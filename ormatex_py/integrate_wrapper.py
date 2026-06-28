@@ -105,7 +105,7 @@ def integrate(ode_sys, y0, t0, dt, nsteps, method, **kwargs):
         y_res[-1].block_until_ready()
     toc = time.perf_counter()
 
-    print(f"Integrated system with {method} in {toc - tic:0.4f} seconds")
+    # print(f"Integrated system with {method} in {toc - tic:0.4f} seconds")
     return IntegrateResult(t_res, y_res, c_res, 0)
 
 
