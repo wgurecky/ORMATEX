@@ -34,6 +34,13 @@ faer = {version = "0.23.2", features=["unstable",]}
 faer-traits = "0.23.0"
 faer_gmres = "0.4.1"
 
+# nd
+ndelement = {git = "https://codeberg.org/nd-project/nd.git"}
+ndmesh = {git = "https://codeberg.org/nd-project/nd.git"}
+ndfunctionspace = {git = "https://codeberg.org/nd-project/nd.git"}
+rlst = "0.6"
+quadraturerules = "0.12.0"
+
 # optional deps
 kuva = {version="0.1", optional=true}
 
