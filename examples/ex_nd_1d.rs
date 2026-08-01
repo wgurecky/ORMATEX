@@ -166,9 +166,10 @@ impl BilinearForm for KernelAdvDiffSUPG {
     }
 }
 
-/// Linear operator applying `M^{-1} K` to a vector (or matrix of columns),
-/// used as the `fjac` return.  `M` is diagonal (mass-lumped), so `M^{-1}`
-/// action is an element-wise scale by `m_inv[i] = 1 / M[i,i]`.
+/// Linear operator applying the system Jacobian `J = -M^{-1} K` (the
+/// derivative of `frhs = -M^{-1} K x`), used as the `fjac` return.  `M` is
+/// diagonal (mass-lumped), so `M^{-1}` action is an element-wise scale by
+/// `m_inv[i] = 1 / M[i,i]`.
 #[derive(Debug)]
 struct MinvKLinOp<'a> {
     k: SparseColMatRef<'a, usize, f64>,
@@ -186,11 +187,12 @@ impl<'a> LinOp<f64> for MinvKLinOp<'a> {
         self.k.ncols()
     }
     fn apply(&self, mut out: MatMut<'_, f64>, rhs: MatRef<'_, f64>, _par: Par, _stack: &mut MemStack) {
+        // J = -M^{-1} K  ->  J v = -(m_inv .* (K v))
         let kv = self.k * rhs;
         let n = self.m_inv.len();
         for j in 0..out.ncols() {
             for i in 0..n {
-                out[(i, j)] = self.m_inv[i] * kv[(i, j)];
+                out[(i, j)] = -self.m_inv[i] * kv[(i, j)];
             }
         }
     }
@@ -276,7 +278,6 @@ struct FiniteElement1DProblem {
     p: usize,
     mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>,
     family: LagrangeElementFamily<f64>,
-    pts: DynArray<f64, 2>,
     wts: Vec<f64>,
     // reference-cell tabulation with nderivs = 1 (values + d/dx)
     table: DynArray<f64, 4>,
@@ -328,17 +329,20 @@ impl FiniteElement1DProblem {
         let (qpts, w) = single_integral_quadrature(
             QuadratureRule::GaussLobattoLegendre,
             Domain::Interval,
-            // 2p-1 order returns p+1 GLL points = interpolation nodes, which
+            // order = p-1 returns p+1 GLL points = interpolation nodes, which
             // lumps the mass matrix to diagonal (classic SEM tradeoff).
-            2 * element.lagrange_superdegree().saturating_sub(1),
+            // NB: the quadraturerules crate's `order` = n_points - 2.
+            element.lagrange_superdegree().saturating_sub(1),
         )
         .unwrap();
         let npts = w.len();
-        // interval quadrature points are stored as barycentric pairs (x, 1-x);
-        // the reference interval is [0, 1] (topological dim 1).
+        // interval quadrature points are stored as barycentric pairs (α, β);
+        // the physical coordinate on [0, 1] is the β component (index 2*i+1).
+        // Using the interpolation nodes (= GLL points) as quadrature points
+        // lumps the mass matrix to diagonal.
         let mut pts = rlst_dynamic_array!(f64, [1, npts]);
         for i in 0..npts {
-            *pts.get_mut([0, i]).unwrap() = qpts[2 * i];
+            *pts.get_mut([0, i]).unwrap() = qpts[2 * i + 1];
         }
         // weights already sum to 1 (reference length 1) -- no /2 scaling.
         let wts = w;
@@ -381,7 +385,6 @@ impl FiniteElement1DProblem {
             p,
             mesh,
             family,
-            pts,
             wts,
             table,
             bc,
@@ -546,7 +549,13 @@ impl FiniteElement1DProblem {
                     let entry = (0..npts)
                         .map(|q| self.wts[q] * self.jdets_cache[c * npts + q] * qf[q])
                         .sum::<f64>();
-                    triplets.push(Triplet::new(*test_dof, *trial_dof, entry));
+                    // skip near-zero entries (Lagrange basis at interpolation nodes
+                    // is exactly 0/1 in exact arithmetic, but FP noise ~1e-17
+                    // would otherwise be stored as explicit nnz).  physical
+                    // entries are ~jdet>1e-6 here, so 1e-12 is a safe cutoff.
+                    if entry.abs() > 1e-12 {
+                        triplets.push(Triplet::new(*test_dof, *trial_dof, entry));
+                    }
                 }
             }
         }
