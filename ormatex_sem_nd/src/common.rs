@@ -1,13 +1,12 @@
-//! Shared finite-element infrastructure for the `ex_nd_*` examples.
+//! Shared finite-element infrastructure for `ormatex_sem_nd`.
 //!
 //! Holds the kernel abstraction (`LocalCtx`, `ShapeFn`, `BilinearForm`,
-//! `LinearForm`, `BoundaryIntegrator`) plus the lumped-mass ODE system
-//! (`AdvDiffSys`, `MinvKLinOp`) so both the 1D and 2D examples can consume
-//! the same kernel API.  Per-example FE problem structs (mesh assembly, BC
-//! reduction, dof LUTs) live in the example files themselves -- the common
+//! `LinearForm`, `BoundaryIntegrator`) so both the 1D and 2D examples can
+//! consume the same kernel API. Per-example ODE adapters, FE problem structs (mesh assembly, BC
+//! reduction, dof LUTs) lives in `problem_1d` and `problem_2d` -- the common
 //! surface here is exactly what a kernel author needs.
 //!
-//! Design (Phase 1.5, MOOSE-style `integrand` ergonomics):
+//! Design:
 //!   * `BilinearForm::integrand` -- bare physics at one quadrature point for
 //!     one `(test, trial)` pair, NO weight/jdet factor.  The provided
 //!     `assemble_local` default owns the test x trial x q triple loop and
@@ -19,11 +18,8 @@
 //!   * `BoundaryIntegrator` -- Neumann/Robin facet kernels. The 2D problem
 //!     owns quadrilateral boundary traversal and DOF reduction.
 
-use faer::dyn_stack::{MemStack, StackReq};
-use faer::matrix_free::LinOp;
-use faer::prelude::*;
+use faer::sparse::SparseColMat;
 use faer::sparse::Triplet;
-use faer::sparse::{SparseColMat, SparseColMatRef};
 use ndelement::{
     ciarlet::LagrangeElementFamily,
     traits::{ElementFamily, FiniteElement},
@@ -31,7 +27,6 @@ use ndelement::{
 };
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::traits::{Entity, Geometry, GeometryMap, Mesh, Point, Topology};
-use ormatex::ode_sys::OdeSys;
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rlst::{rlst_dynamic_array, DynArray};
 
@@ -291,7 +286,7 @@ impl<'a> ShapeFn<'a> {
 
 /// Per-cell bilinear-form kernel.
 ///
-/// **MOOSE-style `integrand` API**: kernel authors implement only
+/// **`integrand` API**: kernel authors implement only
 /// `integrand` -- the physics at one quadrature point for one
 /// `(test_i, trial_i)` pair, WITHOUT quadrature weights or jacobian
 /// determinants.  The provided `assemble_local` default owns the test x
@@ -540,8 +535,7 @@ impl ResidualKernel for KernelAdvDiff {
 
 /// 2D advection-diffusion kernel: `nu * grad_u . grad_v - (vel_x, vel_y) . grad_v * u`.
 ///
-/// Sums the diffusion and advection dot products over `gdim==2`.  Same MOOSE
-/// `integrand` ergonomics as the 1D variant.
+/// Sums the diffusion and advection dot products over `gdim==2`.
 pub struct KernelAdvDiff2D {
     pub nu: f64,
     pub vel: [f64; 2],
@@ -700,7 +694,7 @@ impl ResidualKernel for KernelVolumeSource {
 //   * Robin:   additionally a facet-local mass-like matrix block, also
 //     weighted by `wts[q] * jfacet_det[q]`, added into the global `K`.
 //
-// The trait adopts the same MOOSE-style `integrand` ergonomics as
+// The trait adopts the same `integrand` ergonomics as
 // `BilinearForm` / `LinearForm`: physics authors implement `integrand_rhs`
 // (and optionally `integrand_mat` for Robin); the framework owns the facet
 // test x quadrature loop and the surface-measure weighting.  Override the
@@ -961,7 +955,7 @@ impl<'a> FacetCtx<'a> {
     }
 }
 
-/// Boundary integrator trait.  MOOSE-style `integrand` ergonomics: physics
+/// Boundary integrator trait.  `integrand` ergonomics: physics
 /// authors implement `integrand_rhs` (required) and `integrand_mat`
 /// (optional, for Robin) -- the framework's provided `assemble_*` methods
 /// own the facet test x quadrature loop and surface-measure weighting via
@@ -1066,122 +1060,5 @@ impl BoundaryIntegrator for RobinConvection {
         assert_eq!(ctx.ncomp, 1, "RobinConvection: scalar only (ncomp==1)");
         // h * u(q) * v(q) -- the Robin mass-like addition to K.
         self.h * ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
-    }
-}
-
-// =============================================================================
-// Lumped-mass ODE system: du/dt = -M^{-1} K u  (M diagonal).
-// =============================================================================
-
-/// Linear operator applying the system Jacobian `J = -M^{-1} K` (the
-/// derivative of `frhs = -M^{-1} K x`), used as the `fjac` return.  `M` is
-/// diagonal (mass-lumped), so `M^{-1}` action is an element-wise scale by
-/// `m_inv[i] = 1 / M[i,i]`.
-#[derive(Debug)]
-pub struct MinvKLinOp<'a> {
-    pub k: SparseColMatRef<'a, usize, f64>,
-    pub m_inv: &'a [f64],
-}
-
-impl<'a> LinOp<f64> for MinvKLinOp<'a> {
-    fn apply_scratch(&self, _rhs_ncols: usize, _par: Par) -> StackReq {
-        StackReq::empty()
-    }
-    fn nrows(&self) -> usize {
-        self.k.nrows()
-    }
-    fn ncols(&self) -> usize {
-        self.k.ncols()
-    }
-    fn apply(
-        &self,
-        mut out: MatMut<'_, f64>,
-        rhs: MatRef<'_, f64>,
-        _par: Par,
-        _stack: &mut MemStack,
-    ) {
-        // J = -M^{-1} K  ->  J v = -(m_inv .* (K v))
-        let kv = self.k * rhs;
-        let n = self.m_inv.len();
-        for j in 0..out.ncols() {
-            for i in 0..n {
-                out[(i, j)] = -self.m_inv[i] * kv[(i, j)];
-            }
-        }
-    }
-    fn conj_apply(
-        &self,
-        out: MatMut<'_, f64>,
-        rhs: MatRef<'_, f64>,
-        par: Par,
-        stack: &mut MemStack,
-    ) {
-        // real f64: conjugate == self
-        self.apply(out, rhs, par, stack);
-    }
-}
-
-/// Linear semi-discrete advection-diffusion system `du/dt = -M^{-1} K u`.
-///
-/// `M` is stored only via its diagonal reciprocals `m_inv` (mass-lumped);
-/// `K` is stored as a sparse matrix.  `fjac` returns a `MinvKLinOp` that
-/// applies `M^{-1} K`; `fmass` is left at the default `None` since the
-/// `dirk_step` residual is not mass-consistent.
-pub struct AdvDiffSys {
-    pub k: SparseColMat<usize, f64>,
-    pub m_inv: Vec<f64>,
-}
-
-impl AdvDiffSys {
-    pub fn new(m: SparseColMat<usize, f64>, k: SparseColMat<usize, f64>) -> Self {
-        let n = k.nrows();
-        assert!(
-            m.nrows() == n && m.ncols() == n,
-            "M and K shape mismatch: M={}x{}, K={}x{}",
-            m.nrows(),
-            m.ncols(),
-            n,
-            n,
-        );
-        assert!(
-            m.compute_nnz() == n,
-            "expected lumped-diagonal M (nnz==n={}), got nnz={}; \
-             check quadrature order (must be 2p-1 for mass lumping)",
-            n,
-            m.compute_nnz(),
-        );
-        let mut m_inv = vec![0.0_f64; n];
-        for i in 0..n {
-            let m_ii = m[(i, i)];
-            assert!(m_ii.abs() > 1e-30, "zero diagonal entry M[{}, {}]", i, i);
-            m_inv[i] = 1.0 / m_ii;
-        }
-        Self { k, m_inv }
-    }
-
-    /// Apply `M^{-1} K` to `x` -> returns `Mat<n, ncols>`.
-    pub fn apply_minv_k(&self, x: MatRef<f64>) -> Mat<f64> {
-        let kv = self.k.as_ref() * x;
-        let n = self.m_inv.len();
-        let mut out = kv.clone();
-        for j in 0..out.ncols() {
-            for i in 0..n {
-                out[(i, j)] = self.m_inv[i] * kv[(i, j)];
-            }
-        }
-        out
-    }
-}
-
-impl<'a> OdeSys<'a> for AdvDiffSys {
-    fn frhs(&self, _t: f64, x: MatRef<f64>) -> Mat<f64> {
-        faer::Scale(-1.0) * self.apply_minv_k(x)
-    }
-
-    fn fjac<'b>(&'a self, _t: f64, _x: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
-        Box::new(MinvKLinOp {
-            k: self.k.as_ref(),
-            m_inv: &self.m_inv,
-        })
     }
 }

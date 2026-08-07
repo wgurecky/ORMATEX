@@ -219,6 +219,11 @@ To run tests:
 
     cargo test
 
+This runs the primary `ormatex` crate and the `ormatex_sem_nd` spectral-element
+crate. To run a spectral-element example:
+
+    cargo run -p ormatex_sem_nd --example ex_nd_2d_diffusion_neumann --release
+
 For an optimized build run:
 
     cargo build --release
@@ -245,6 +250,7 @@ Run the rust examples with
 
     cargo run --example ex_sys_1 --release --features plot
     cargo run --example ex_sys_2 --release --features plot
+    cargo run -p ormatex_sem_nd --example ex_nd_1d --release
 
 Expected resulting images from running the first example of the Lotka-Volterra system integrated with EPI3:
 

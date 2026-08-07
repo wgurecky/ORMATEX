@@ -1,0 +1,15 @@
+[package]
+name = "ormatex_sem_nd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+faer = { version = "0.23.2", features = ["unstable"] }
+ndelement = { git = "https://codeberg.org/nd-project/nd.git" }
+ndmesh = { git = "https://codeberg.org/nd-project/nd.git" }
+ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" }
+rlst = "0.6"
+quadraturerules = "0.12.0"
+
+[dev-dependencies]
+ormatex = { path = "..", default-features = false }

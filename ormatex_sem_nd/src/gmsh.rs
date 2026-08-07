@@ -1,4 +1,4 @@
-//! The Neumann/Robin diffusion case on a Gmsh MSH2 quadrilateral mesh.
+//! Minimal MSH2 quadrilateral mesh loader for the Neumann/Robin example.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -9,18 +9,14 @@ use ndmesh::{
     SingleElementMesh, SingleElementMeshBuilder,
 };
 
-#[path = "ex_nd_2d_diffusion_neumann.rs"]
-mod diffusion;
-use diffusion::ex_nd_2d::FiniteElement2DProblem;
-use diffusion::ex_nd_common::{NeumannFlux, RobinConvection};
-
-type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+pub type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
 fn triangle_element(element_type: usize) -> bool {
     matches!(element_type, 2 | 9 | 20..=25 | 42..=46)
 }
 
-fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> {
+/// Load a linear quadrilateral MSH2 mesh and its boundary physical tags.
+pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> {
     let source = fs::read_to_string(path).map_err(|err| format!("read {path}: {err}"))?;
     let mut nodes = Vec::new();
     let mut lines = Vec::new();
@@ -74,7 +70,9 @@ fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> 
                     let element_type: usize =
                         fields[1].parse().map_err(|_| "invalid element type")?;
                     if triangle_element(element_type) {
-                        return Err(format!("triangle element type {element_type} found; only quadrilaterals are supported"));
+                        return Err(format!(
+                            "triangle element type {element_type} found; only quadrilaterals are supported"
+                        ));
                     }
                     let tag_count: usize =
                         fields[2].parse().map_err(|_| "invalid element tag count")?;
@@ -195,36 +193,6 @@ fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> 
         return Err("a tagged Gmsh boundary line did not match an ndmesh facet".into());
     }
     Ok((mesh, facet_tags))
-}
-
-fn main() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/ex_nd_2d_diffusion_neumann_gmsh.msh"
-    );
-    let (mesh, facet_tags) = gmsh_quad_mesh(path).expect("failed to load Gmsh quadrilateral mesh");
-    for tag in 1..=4 {
-        assert!(
-            facet_tags.iter().any(|facet_tag| *facet_tag == Some(tag)),
-            "missing physical boundary tag {tag}"
-        );
-    }
-    let p = 2;
-    diffusion::run_diffusion_neumann(
-        "diffusion-neumann-robin-gmsh",
-        mesh,
-        p,
-        |problem: &FiniteElement2DProblem<QuadMesh>| {
-            let neumann = NeumannFlux::new(1.0);
-            let robin = RobinConvection::new(0.1, 0.0);
-            problem.assemble_boundary(|facet| match facet_tags[facet.index] {
-                Some(1) => Some(&neumann),
-                Some(2) => Some(&robin),
-                _ => None,
-            })
-        },
-        "target/ex_nd_2d_diffusion_neumann_gmsh_out.csv",
-    );
 }
 
 #[cfg(test)]
