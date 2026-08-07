@@ -274,12 +274,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement1DProb
         out
     }
 
-    fn prepare_cell_ctx<'a>(
-        &'a self,
-        cell_index: usize,
-        ndofs: usize,
-        grads: &'a mut [f64],
-    ) -> LocalCtx<'a> {
+    fn populate_cell_grads(&self, cell_index: usize, ndofs: usize, grads: &mut [f64]) {
         let cd = &self.cell_data;
         for dof_i in 0..ndofs {
             for q in 0..cd.npts {
@@ -287,6 +282,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement1DProb
                     * *cd.table.get([1, q, dof_i, 0]).unwrap();
             }
         }
+    }
+
+    fn cell_ctx<'a>(&'a self, cell_index: usize, ndofs: usize, grads: &'a [f64]) -> LocalCtx<'a> {
+        let cd = &self.cell_data;
         LocalCtx {
             tdim: 1,
             gdim: 1,
@@ -299,6 +298,193 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement1DProb
             values: &cd.reference_values,
             grads: &grads[..ndofs * cd.npts],
         }
+    }
+
+    fn prepare_cell_ctx<'a>(
+        &'a self,
+        cell_index: usize,
+        ndofs: usize,
+        grads: &'a mut [f64],
+    ) -> LocalCtx<'a> {
+        self.populate_cell_grads(cell_index, ndofs, grads);
+        self.cell_ctx(cell_index, ndofs, grads)
+    }
+
+    fn prepare_cell_field<'a>(
+        &self,
+        reduced_dofs: &[Option<usize>],
+        state: MatRef<'_, f64>,
+        basis_grads: &[f64],
+        values: &'a mut [f64],
+        field_grads: &'a mut [f64],
+    ) -> CellField<'a> {
+        let cd = &self.cell_data;
+        values[..cd.npts].fill(0.0);
+        field_grads[..cd.npts].fill(0.0);
+        for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
+            let coefficient = reduced.map_or(0.0, |i| state[(i, 0)]);
+            for q in 0..cd.npts {
+                values[q] += coefficient * cd.reference_values[local_i * cd.npts + q];
+                field_grads[q] += coefficient * basis_grads[local_i * cd.npts + q];
+            }
+        }
+        CellField {
+            npts: cd.npts,
+            gdim: 1,
+            values: &values[..cd.npts],
+            grads: &field_grads[..cd.npts],
+        }
+    }
+
+    pub fn assemble_residual<K: ResidualKernel>(&self, kernel: &K, state: MatRef<f64>) -> Vec<f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "residual assembly requires one state column"
+        );
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; cd.npts];
+        let mut local = vec![0.0; cd.ndofs];
+        let mut residual = vec![0.0; self.reduced_size()];
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * cd.npts]);
+            let field = self.prepare_cell_field(
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * cd.npts]);
+            kernel.assemble_local_residual(&ctx, &field, &mut local[..ndofs]);
+            for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                if let Some(reduced_i) = reduced_i {
+                    residual[reduced_i] += local[local_i];
+                }
+            }
+        }
+        residual
+    }
+
+    pub fn assemble_residual_jacobian<K: ResidualKernel>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+    ) -> SparseColMat<usize, f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "Jacobian assembly requires one state column"
+        );
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; cd.npts];
+        let mut local = vec![0.0; cd.ndofs * cd.ndofs];
+        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * cd.ndofs * cd.ndofs);
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * cd.npts]);
+            let field = self.prepare_cell_field(
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * cd.npts]);
+            kernel.assemble_local_jacobian(&ctx, &field, &mut local[..ndofs * ndofs]);
+            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
+                let Some(reduced_i) = reduced_i else {
+                    continue;
+                };
+                for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
+                    if let Some(reduced_j) = reduced_j {
+                        let value = local[ti * ndofs + si];
+                        if value != 0.0 {
+                            triplets.push(Triplet::new(reduced_i, reduced_j, value));
+                        }
+                    }
+                }
+            }
+        }
+        let n = self.reduced_size();
+        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+    }
+
+    pub fn apply_jacobian_matfree<K: ResidualKernel>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+    ) -> Mat<f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "matrix-free Jacobian requires one state column"
+        );
+        assert_eq!(
+            direction.nrows(),
+            self.reduced_size(),
+            "direction size mismatch"
+        );
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; cd.npts];
+        let mut local_direction = vec![0.0; cd.ndofs];
+        let mut local_action = vec![0.0; cd.ndofs];
+        let mut out = Mat::<f64>::zeros(self.reduced_size(), direction.ncols());
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * cd.npts]);
+            let field = self.prepare_cell_field(
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * cd.npts]);
+            for column in 0..direction.ncols() {
+                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                    local_direction[local_i] = reduced_i.map_or(0.0, |i| direction[(i, column)]);
+                }
+                kernel.apply_local_jacobian(
+                    &ctx,
+                    &field,
+                    &local_direction[..ndofs],
+                    &mut local_action[..ndofs],
+                );
+                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                    if let Some(reduced_i) = reduced_i {
+                        out[(reduced_i, column)] += local_action[local_i];
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn assemble_bilinear<K: BilinearForm>(&self, kernel: &K) -> SparseColMat<usize, f64> {

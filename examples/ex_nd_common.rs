@@ -351,6 +351,93 @@ pub trait LinearForm {
     }
 }
 
+/// Interpolated scalar field at the quadrature points of one cell.
+///
+/// `values` is `[npts]`; `grads` is `[gdim, npts]`.  The FE problem owns the
+/// scratch storage and rebuilds this view for each cell, so kernels never need
+/// the global solution vector or mesh connectivity.
+pub struct CellField<'a> {
+    pub npts: usize,
+    pub gdim: usize,
+    pub values: &'a [f64],
+    pub grads: &'a [f64],
+}
+
+impl<'a> CellField<'a> {
+    pub fn value(&self, q: usize) -> f64 {
+        self.values[q]
+    }
+
+    pub fn grad(&self, q: usize, gd: usize) -> f64 {
+        self.grads[gd * self.npts + q]
+    }
+}
+
+/// State-aware cell kernel for residual and Jacobian assembly.
+///
+/// The residual is the positive weak spatial operator `R(u)`.  Semi-discrete
+/// systems use `du/dt = -M^-1 R(u)` (plus any separately supplied forcing).
+/// The Jacobian integrand is `dR_i / du_j`; the provided local action avoids
+/// building a local matrix for matrix-free Krylov applications.
+pub trait ResidualKernel {
+    fn residual_integrand(&self, ctx: &LocalCtx, state: &CellField, q: usize, test_i: usize)
+        -> f64;
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64;
+
+    fn assemble_local_residual(&self, ctx: &LocalCtx, state: &CellField, out: &mut [f64]) {
+        for ti in 0..ctx.ndofs {
+            let mut acc = 0.0;
+            for q in 0..ctx.npts {
+                acc += ctx.wts[q] * ctx.jdets[q] * self.residual_integrand(ctx, state, q, ti);
+            }
+            out[ti] = acc;
+        }
+    }
+
+    fn assemble_local_jacobian(&self, ctx: &LocalCtx, state: &CellField, out: &mut [f64]) {
+        let n = ctx.ndofs;
+        for ti in 0..n {
+            for si in 0..n {
+                let mut acc = 0.0;
+                for q in 0..ctx.npts {
+                    acc +=
+                        ctx.wts[q] * ctx.jdets[q] * self.jacobian_integrand(ctx, state, q, ti, si);
+                }
+                out[ti * n + si] = acc;
+            }
+        }
+    }
+
+    fn apply_local_jacobian(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        direction: &[f64],
+        out: &mut [f64],
+    ) {
+        for ti in 0..ctx.ndofs {
+            let mut acc = 0.0;
+            for si in 0..ctx.ndofs {
+                for q in 0..ctx.npts {
+                    acc += ctx.wts[q]
+                        * ctx.jdets[q]
+                        * self.jacobian_integrand(ctx, state, q, ti, si)
+                        * direction[si];
+                }
+            }
+            out[ti] = acc;
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // kernels
 // -----------------------------------------------------------------------------
@@ -367,6 +454,29 @@ impl KernelMass {
 impl BilinearForm for KernelMass {
     fn integrand(&self, ctx: &LocalCtx, q: usize, test_i: usize, trial_i: usize) -> f64 {
         assert_eq!(ctx.ncomp, 1, "KernelMass: scalar only (ncomp==1)");
+        ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
+    }
+}
+
+impl ResidualKernel for KernelMass {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        state.value(q) * ctx.test(test_i, 0).v(q)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        _state: &CellField,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
         ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
     }
 }
@@ -403,6 +513,31 @@ impl BilinearForm for KernelAdvDiff {
     }
 }
 
+impl ResidualKernel for KernelAdvDiff {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        assert_eq!(ctx.gdim, 1, "KernelAdvDiff: 1D only");
+        let gv = ctx.test(test_i, 0).grad(q, 0);
+        self.nu * state.grad(q, 0) * gv - self.vel * state.value(q) * gv
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        _state: &CellField,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.integrand(ctx, q, test_i, trial_i)
+    }
+}
+
 /// 2D advection-diffusion kernel: `nu * grad_u . grad_v - (vel_x, vel_y) . grad_v * u`.
 ///
 /// Sums the diffusion and advection dot products over `gdim==2`.  Same MOOSE
@@ -427,6 +562,36 @@ impl BilinearForm for KernelAdvDiff2D {
         let grad_dot: f64 = (0..2).map(|d| gu.grad(q, d) * gv.grad(q, d)).sum();
         let advect: f64 = (0..2).map(|d| self.vel[d] * u * gv.grad(q, d)).sum();
         self.nu * grad_dot - advect
+    }
+}
+
+impl ResidualKernel for KernelAdvDiff2D {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        assert_eq!(ctx.ncomp, 1, "KernelAdvDiff2D: scalar only (ncomp==1)");
+        assert_eq!(ctx.gdim, 2, "KernelAdvDiff2D: 2D only (gdim==2)");
+        let gv = ctx.test(test_i, 0);
+        let diffusion: f64 = (0..2).map(|d| state.grad(q, d) * gv.grad(q, d)).sum();
+        let advection: f64 = (0..2)
+            .map(|d| self.vel[d] * state.value(q) * gv.grad(q, d))
+            .sum();
+        self.nu * diffusion - advection
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        _state: &CellField,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.integrand(ctx, q, test_i, trial_i)
     }
 }
 
@@ -458,6 +623,32 @@ impl BilinearForm for KernelAdvDiffSUPG {
     }
 }
 
+impl ResidualKernel for KernelAdvDiffSUPG {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellField,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        assert_eq!(ctx.gdim, 1, "KernelAdvDiffSUPG: 1D only");
+        let gv = ctx.test(test_i, 0).grad(q, 0);
+        (self.nu + self.tau * self.vel * self.vel) * state.grad(q, 0) * gv
+            - self.vel * state.value(q) * gv
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        _state: &CellField,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.integrand(ctx, q, test_i, trial_i)
+    }
+}
+
 /// Constant volumetric source `f(x) = val` -- demo `LinearForm` kernel.
 pub struct KernelVolumeSource {
     pub val: f64,
@@ -473,6 +664,29 @@ impl LinearForm for KernelVolumeSource {
     fn integrand(&self, ctx: &LocalCtx, q: usize, test_i: usize) -> f64 {
         assert_eq!(ctx.ncomp, 1, "KernelVolumeSource: scalar only (ncomp==1)");
         self.val * ctx.test(test_i, 0).v(q)
+    }
+}
+
+impl ResidualKernel for KernelVolumeSource {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        _state: &CellField,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        -self.val * ctx.test(test_i, 0).v(q)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        _ctx: &LocalCtx,
+        _state: &CellField,
+        _q: usize,
+        _test_i: usize,
+        _trial_i: usize,
+    ) -> f64 {
+        0.0
     }
 }
 

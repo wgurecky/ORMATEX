@@ -337,12 +337,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement2DProb
         out
     }
 
-    fn prepare_cell_ctx<'a>(
-        &'a self,
-        cell_index: usize,
-        ndofs: usize,
-        grads: &'a mut [f64],
-    ) -> LocalCtx<'a> {
+    fn populate_cell_grads(&self, cell_index: usize, ndofs: usize, grads: &mut [f64]) {
         let cd = &self.cell_data;
         let npts = cd.npts;
         let gdim = self.mesh.geometry_dim();
@@ -359,6 +354,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement2DProb
                 }
             }
         }
+    }
+
+    fn cell_ctx<'a>(&'a self, cell_index: usize, ndofs: usize, grads: &'a [f64]) -> LocalCtx<'a> {
+        let cd = &self.cell_data;
+        let npts = cd.npts;
+        let gdim = self.mesh.geometry_dim();
+        let tdim = self.mesh.topology_dim();
         LocalCtx {
             tdim,
             gdim,
@@ -372,6 +374,214 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> FiniteElement2DProb
             values: &cd.reference_values,
             grads: &grads[..ndofs * gdim * npts],
         }
+    }
+
+    fn prepare_cell_ctx<'a>(
+        &'a self,
+        cell_index: usize,
+        ndofs: usize,
+        grads: &'a mut [f64],
+    ) -> LocalCtx<'a> {
+        self.populate_cell_grads(cell_index, ndofs, grads);
+        self.cell_ctx(cell_index, ndofs, grads)
+    }
+
+    fn prepare_cell_field<'a>(
+        &self,
+        _ndofs: usize,
+        reduced_dofs: &[Option<usize>],
+        state: MatRef<'_, f64>,
+        basis_grads: &[f64],
+        values: &'a mut [f64],
+        field_grads: &'a mut [f64],
+    ) -> CellField<'a> {
+        let cd = &self.cell_data;
+        let npts = cd.npts;
+        let gdim = self.mesh.geometry_dim();
+        values[..npts].fill(0.0);
+        field_grads[..gdim * npts].fill(0.0);
+        for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
+            let coefficient = reduced.map_or(0.0, |i| state[(i, 0)]);
+            for q in 0..npts {
+                values[q] += coefficient * cd.reference_values[local_i * npts + q];
+                for gd in 0..gdim {
+                    field_grads[gd * npts + q] +=
+                        coefficient * basis_grads[(local_i * gdim + gd) * npts + q];
+                }
+            }
+        }
+        CellField {
+            npts,
+            gdim,
+            values: &values[..npts],
+            grads: &field_grads[..gdim * npts],
+        }
+    }
+
+    /// Assemble the positive weak spatial residual `R(u)` of a state-aware
+    /// kernel. Semi-discrete systems apply the lumped inverse mass separately.
+    pub fn assemble_residual<K: ResidualKernel>(&self, kernel: &K, state: MatRef<f64>) -> Vec<f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "residual assembly requires one state column"
+        );
+        let gdim = self.mesh.geometry_dim();
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; gdim * cd.npts];
+        let mut local = vec![0.0; cd.ndofs];
+        let mut residual = vec![0.0; self.reduced_size()];
+
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
+            let field = self.prepare_cell_field(
+                ndofs,
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * gdim * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
+            kernel.assemble_local_residual(&ctx, &field, &mut local[..ndofs]);
+            for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                if let Some(reduced_i) = reduced_i {
+                    residual[reduced_i] += local[local_i];
+                }
+            }
+        }
+        residual
+    }
+
+    /// Assemble `dR/du` for a state-aware kernel at `state`.
+    pub fn assemble_residual_jacobian<K: ResidualKernel>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+    ) -> SparseColMat<usize, f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "Jacobian assembly requires one state column"
+        );
+        let gdim = self.mesh.geometry_dim();
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; gdim * cd.npts];
+        let mut local = vec![0.0; cd.ndofs * cd.ndofs];
+        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * cd.ndofs * cd.ndofs);
+
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
+            let field = self.prepare_cell_field(
+                ndofs,
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * gdim * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
+            kernel.assemble_local_jacobian(&ctx, &field, &mut local[..ndofs * ndofs]);
+            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
+                let Some(reduced_i) = reduced_i else {
+                    continue;
+                };
+                for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
+                    let Some(reduced_j) = reduced_j else {
+                        continue;
+                    };
+                    let value = local[ti * ndofs + si];
+                    if value != 0.0 {
+                        triplets.push(Triplet::new(reduced_i, reduced_j, value));
+                    }
+                }
+            }
+        }
+        let n = self.reduced_size();
+        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+    }
+
+    /// Apply `dR/du(state)` to one or more direction columns without building
+    /// a global sparse Jacobian. The local action is direct by default.
+    pub fn apply_jacobian_matfree<K: ResidualKernel>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+    ) -> Mat<f64> {
+        assert_eq!(state.nrows(), self.reduced_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "matrix-free Jacobian requires one state column"
+        );
+        assert_eq!(
+            direction.nrows(),
+            self.reduced_size(),
+            "direction size mismatch"
+        );
+        let gdim = self.mesh.geometry_dim();
+        let cd = &self.cell_data;
+        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
+        let mut field_values = vec![0.0; cd.npts];
+        let mut field_grads = vec![0.0; gdim * cd.npts];
+        let mut local_direction = vec![0.0; cd.ndofs];
+        let mut local_action = vec![0.0; cd.ndofs];
+        let mut out = Mat::<f64>::zeros(self.reduced_size(), direction.ncols());
+
+        for (c, (dofs, reduced_dofs)) in self
+            .cell_dofs
+            .iter()
+            .zip(&self.cell_reduced_dofs)
+            .enumerate()
+        {
+            let ndofs = dofs.len();
+            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
+            let field = self.prepare_cell_field(
+                ndofs,
+                reduced_dofs,
+                state,
+                &basis_grads[..ndofs * gdim * cd.npts],
+                &mut field_values,
+                &mut field_grads,
+            );
+            let ctx = self.cell_ctx(c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
+            for column in 0..direction.ncols() {
+                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                    local_direction[local_i] = reduced_i.map_or(0.0, |i| direction[(i, column)]);
+                }
+                kernel.apply_local_jacobian(
+                    &ctx,
+                    &field,
+                    &local_direction[..ndofs],
+                    &mut local_action[..ndofs],
+                );
+                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                    if let Some(reduced_i) = reduced_i {
+                        out[(reduced_i, column)] += local_action[local_i];
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Assemble a reduced sparse matrix using `kernel.assemble_local` per
@@ -646,6 +856,31 @@ mod tests {
         }
     }
 
+    struct QuadraticReaction;
+
+    impl ResidualKernel for QuadraticReaction {
+        fn residual_integrand(
+            &self,
+            ctx: &LocalCtx,
+            state: &CellField,
+            q: usize,
+            test_i: usize,
+        ) -> f64 {
+            state.value(q).powi(2) * ctx.test(test_i, 0).v(q)
+        }
+
+        fn jacobian_integrand(
+            &self,
+            ctx: &LocalCtx,
+            state: &CellField,
+            q: usize,
+            test_i: usize,
+            trial_i: usize,
+        ) -> f64 {
+            2.0 * state.value(q) * ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
+        }
+    }
+
     #[test]
     fn dirichlet_eliminates_every_high_order_facet_dof() {
         let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> =
@@ -727,5 +962,29 @@ mod tests {
             (total_flux - 0.5).abs() < 1e-12,
             "integral of y on the left unit-square edge must be one half, got {total_flux}"
         );
+    }
+
+    #[test]
+    fn residual_kernel_jacobian_matches_directional_difference() {
+        let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> =
+            unit_square(1, 1, ReferenceCellType::Quadrilateral);
+        let problem = FiniteElement2DProblem::new(mesh, 2, DofReduction2D::None);
+        let n = problem.reduced_size();
+        let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
+        let direction = Mat::from_fn(n, 1, |i, _| (0.3 * i as f64).sin());
+        let kernel = QuadraticReaction;
+        let jacobian_action =
+            problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+        let eps = 1e-7;
+        let perturbed = state.as_ref() + faer::Scale(eps) * direction.as_ref();
+        let residual = problem.assemble_residual(&kernel, state.as_ref());
+        let residual_perturbed = problem.assemble_residual(&kernel, perturbed.as_ref());
+        for i in 0..n {
+            let finite_difference = (residual_perturbed[i] - residual[i]) / eps;
+            assert!(
+                (jacobian_action[(i, 0)] - finite_difference).abs() < 1e-7,
+                "Jv finite-difference mismatch at dof {i}"
+            );
+        }
     }
 }
