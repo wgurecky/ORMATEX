@@ -8,7 +8,8 @@ use faer::prelude::*;
 use faer::sparse::{SparseColMat, SparseColMatRef};
 use faer::Par;
 
-use crate::{FiniteElement1DProblem, FiniteElement2DProblem, ResidualKernel};
+use crate::kernels::kernel_common::ResidualKernel;
+use crate::{SEM1DProblem, SEM2DProblem};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 
@@ -17,47 +18,54 @@ use ndmesh::traits::Mesh;
 pub trait MatrixFreeJacobianProblem: Sync {
     fn reduced_size(&self) -> usize;
 
+    fn system_size(&self, nfields: usize) -> usize {
+        nfields * self.reduced_size()
+    }
+
     fn apply_residual_jacobian_matfree<K: ResidualKernel>(
         &self,
+        time: f64,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64>;
 }
 
-impl<M> MatrixFreeJacobianProblem for FiniteElement1DProblem<M>
+impl<M> MatrixFreeJacobianProblem for SEM1DProblem<M>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     fn reduced_size(&self) -> usize {
-        FiniteElement1DProblem::reduced_size(self)
+        SEM1DProblem::reduced_size(self)
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel>(
         &self,
+        time: f64,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64> {
-        FiniteElement1DProblem::apply_jacobian_matfree(self, kernel, state, direction)
+        SEM1DProblem::apply_system_jacobian_matfree_at(self, time, kernel, state, direction)
     }
 }
 
-impl<M> MatrixFreeJacobianProblem for FiniteElement2DProblem<M>
+impl<M> MatrixFreeJacobianProblem for SEM2DProblem<M>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     fn reduced_size(&self) -> usize {
-        FiniteElement2DProblem::reduced_size(self)
+        SEM2DProblem::reduced_size(self)
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel>(
         &self,
+        time: f64,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64> {
-        FiniteElement2DProblem::apply_jacobian_matfree(self, kernel, state, direction)
+        SEM2DProblem::apply_system_jacobian_matfree_at(self, time, kernel, state, direction)
     }
 }
 
@@ -126,6 +134,7 @@ impl LinOp<f64> for OwnedMinvJacobian<'_> {
 pub struct MatrixFreeMinvJacobian<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> {
     problem: &'a P,
     kernel: &'a K,
+    time: f64,
     state: Mat<f64>,
     fixed_jacobian: Option<SparseColMatRef<'a, usize, f64>>,
     m_inv: &'a [f64],
@@ -139,7 +148,18 @@ impl<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> MatrixFreeMinvJacobian
         fixed_jacobian: Option<SparseColMatRef<'a, usize, f64>>,
         m_inv: &'a [f64],
     ) -> Self {
-        let n = problem.reduced_size();
+        Self::new_at(0.0, problem, kernel, state, fixed_jacobian, m_inv)
+    }
+
+    pub fn new_at(
+        time: f64,
+        problem: &'a P,
+        kernel: &'a K,
+        state: Mat<f64>,
+        fixed_jacobian: Option<SparseColMatRef<'a, usize, f64>>,
+        m_inv: &'a [f64],
+    ) -> Self {
+        let n = problem.system_size(kernel.nfields());
         assert_eq!(state.nrows(), n, "state/problem size mismatch");
         assert_eq!(
             state.ncols(),
@@ -154,6 +174,7 @@ impl<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> MatrixFreeMinvJacobian
         Self {
             problem,
             kernel,
+            time,
             state,
             fixed_jacobian,
             m_inv,
@@ -193,9 +214,12 @@ impl<P: MatrixFreeJacobianProblem, K: ResidualKernel + Sync> LinOp<f64>
         _par: Par,
         _stack: &mut MemStack,
     ) {
-        let mut action =
-            self.problem
-                .apply_residual_jacobian_matfree(self.kernel, self.state.as_ref(), rhs);
+        let mut action = self.problem.apply_residual_jacobian_matfree(
+            self.time,
+            self.kernel,
+            self.state.as_ref(),
+            rhs,
+        );
         if let Some(fixed) = self.fixed_jacobian {
             action += fixed * rhs;
         }

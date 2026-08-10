@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
+use crate::material::{MeshMetadata, PhysicalRegion};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{
     traits::{Builder, Entity, Geometry, Mesh, Point, Topology},
@@ -15,16 +16,47 @@ fn triangle_element(element_type: usize) -> bool {
     matches!(element_type, 2 | 9 | 20..=25 | 42..=46)
 }
 
-/// Load a linear quadrilateral MSH2 mesh and its boundary physical tags.
-pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> {
+pub struct GmshQuadData {
+    pub mesh: QuadMesh,
+    pub metadata: MeshMetadata,
+}
+
+/// Load a linear quadrilateral MSH2 mesh and its physical-region metadata.
+pub fn gmsh_quad_data(path: &str) -> Result<GmshQuadData, String> {
     let source = fs::read_to_string(path).map_err(|err| format!("read {path}: {err}"))?;
     let mut nodes = Vec::new();
     let mut lines = Vec::new();
     let mut quads = Vec::new();
+    let mut physical_names = HashMap::new();
     let mut input = source.lines();
 
     while let Some(section) = input.next() {
         match section.trim() {
+            "$PhysicalNames" => {
+                let count: usize = input
+                    .next()
+                    .ok_or("missing physical-name count")?
+                    .parse()
+                    .map_err(|_| "invalid physical-name count")?;
+                for _ in 0..count {
+                    let line = input.next().ok_or("truncated physical-name list")?;
+                    let fields: Vec<_> = line.splitn(3, char::is_whitespace).collect();
+                    if fields.len() != 3 {
+                        return Err("invalid physical name header".into());
+                    }
+                    let dimension = fields[0]
+                        .parse()
+                        .map_err(|_| "invalid physical dimension")?;
+                    let tag = fields[1].parse().map_err(|_| "invalid physical tag")?;
+                    physical_names.insert(
+                        PhysicalRegion { dimension, tag },
+                        fields[2].trim().trim_matches('"').to_string(),
+                    );
+                }
+                if input.next().map(str::trim) != Some("$EndPhysicalNames") {
+                    return Err("missing $EndPhysicalNames".into());
+                }
+            }
             "$Nodes" => {
                 let count: usize = input
                     .next()
@@ -104,12 +136,15 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
                             if element_nodes.len() != 4 {
                                 return Err("only linear quadrilaterals are supported".into());
                             }
-                            quads.push([
-                                element_nodes[0],
-                                element_nodes[1],
-                                element_nodes[2],
-                                element_nodes[3],
-                            ]);
+                            quads.push((
+                                physical_tag.map(|tag| PhysicalRegion { dimension: 2, tag }),
+                                [
+                                    element_nodes[0],
+                                    element_nodes[1],
+                                    element_nodes[2],
+                                    element_nodes[3],
+                                ],
+                            ));
                         }
                         15 => {}
                         _ => return Err(format!("unsupported Gmsh element type {element_type}")),
@@ -135,7 +170,8 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
         }
         builder.add_point(*id, xy);
     }
-    for (index, quad) in quads.iter().enumerate() {
+    let mut cell_regions = Vec::with_capacity(quads.len());
+    for (index, (region, quad)) in quads.iter().enumerate() {
         if !quad.iter().all(|node| node_indices.contains_key(node)) {
             return Err(format!("quadrilateral {index} references an unknown node"));
         }
@@ -143,6 +179,7 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
         // top-right], while Gmsh uses [bottom-left, bottom-right, top-right,
         // top-left].
         builder.add_cell(index + 1, &[quad[0], quad[1], quad[3], quad[2]]);
+        cell_regions.push(*region);
     }
     let mesh = builder.create_mesh();
 
@@ -155,7 +192,10 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
             .get(&endpoints[1])
             .ok_or("boundary line references an unknown node")?;
         let edge = if a < b { (a, b) } else { (b, a) };
-        if line_tags.insert(edge, tag).is_some() {
+        if line_tags
+            .insert(edge, PhysicalRegion { dimension: 1, tag })
+            .is_some()
+        {
             return Err("duplicate boundary line".into());
         }
     }
@@ -177,7 +217,7 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
             return Err("only linear interval facets are supported".into());
         }
         let edge = if a < b { (a, b) } else { (b, a) };
-        if let Some(&tag) = line_tags.get(&edge) {
+        if let Some(&region) = line_tags.get(&edge) {
             let topology = facet.topology();
             let mut cells = topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
             if cells.next().is_none() || cells.next().is_some() {
@@ -185,14 +225,33 @@ pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), Stri
                     "a tagged line must match exactly one quadrilateral boundary facet".into(),
                 );
             }
-            facet_tags[facet_index] = Some(tag);
+            facet_tags[facet_index] = Some(region);
             matched.insert(edge);
         }
     }
     if matched.len() != line_tags.len() {
         return Err("a tagged Gmsh boundary line did not match an ndmesh facet".into());
     }
-    Ok((mesh, facet_tags))
+    Ok(GmshQuadData {
+        mesh,
+        metadata: MeshMetadata {
+            cell_regions,
+            facet_regions: facet_tags,
+            physical_names,
+        },
+    })
+}
+
+/// Compatibility loader returning only boundary numeric tags.
+pub fn gmsh_quad_mesh(path: &str) -> Result<(QuadMesh, Vec<Option<usize>>), String> {
+    let data = gmsh_quad_data(path)?;
+    let tags = data
+        .metadata
+        .facet_regions
+        .iter()
+        .map(|region| region.map(|region| region.tag))
+        .collect();
+    Ok((data.mesh, tags))
 }
 
 #[cfg(test)]
@@ -211,5 +270,39 @@ mod tests {
         let error = gmsh_quad_mesh(path.to_str().unwrap()).unwrap_err();
         fs::remove_file(path).unwrap();
         assert!(error.contains("triangle element"));
+    }
+
+    #[test]
+    fn preserves_cell_facet_regions_and_names() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/ex_nd_2d_diffusion_neumann_gmsh.msh"
+        );
+        let data = gmsh_quad_data(path).unwrap();
+        assert_eq!(
+            data.metadata.cell_regions.len(),
+            data.mesh.entity_count(ReferenceCellType::Quadrilateral)
+        );
+        assert!(data.metadata.cell_regions.iter().all(|region| {
+            *region
+                == Some(PhysicalRegion {
+                    dimension: 2,
+                    tag: 10,
+                })
+        }));
+        assert_eq!(
+            data.metadata.physical_names[&PhysicalRegion {
+                dimension: 2,
+                tag: 10
+            }],
+            "domain"
+        );
+        assert!(data.metadata.facet_regions.iter().any(|region| {
+            *region
+                == Some(PhysicalRegion {
+                    dimension: 1,
+                    tag: 1,
+                })
+        }));
     }
 }

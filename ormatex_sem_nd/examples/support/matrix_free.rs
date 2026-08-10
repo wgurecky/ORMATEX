@@ -4,9 +4,7 @@ use faer::sparse::{SparseColMat, SparseColMatRef, Triplet};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use ormatex::ode_sys::OdeSys;
-use ormatex_sem_nd::{
-    FiniteElement2DProblem, KernelAdvDiff2D, MatrixFreeMinvJacobian, OwnedMinvJacobian,
-};
+use ormatex_sem_nd::{KernelAdvDiff2D, MatrixFreeMinvJacobian, OwnedMinvJacobian, SEM2DProblem};
 
 #[derive(Clone, Copy)]
 pub enum JacobianBackend {
@@ -37,7 +35,7 @@ pub fn sparse_add(
 }
 
 pub struct ResidualDiffusionNeumannSys<'a, M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
-    problem: &'a FiniteElement2DProblem<M>,
+    problem: &'a SEM2DProblem<M>,
     kernel: KernelAdvDiff2D,
     robin: SparseColMat<usize, f64>,
     source: Vec<f64>,
@@ -50,7 +48,7 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
 {
     pub fn new(
-        problem: &'a FiniteElement2DProblem<M>,
+        problem: &'a SEM2DProblem<M>,
         mass: SparseColMat<usize, f64>,
         kernel: KernelAdvDiff2D,
         robin: SparseColMat<usize, f64>,
@@ -90,8 +88,10 @@ impl<'a, M> OdeSys<'a> for ResidualDiffusionNeumannSys<'a, M>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
-    fn frhs(&self, _t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let mut residual = self.problem.assemble_residual(&self.kernel, state);
+    fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
+        let mut residual = self
+            .problem
+            .assemble_system_residual_at(t, &self.kernel, state);
         let robin_state = self.robin.as_ref() * state;
         for row in 0..residual.len() {
             residual[row] += robin_state[(row, 0)] - self.source[row];
@@ -101,18 +101,19 @@ where
         })
     }
 
-    fn fjac<'b>(&'a self, _t: f64, state: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
+    fn fjac<'b>(&'a self, t: f64, state: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
         match self.backend {
             JacobianBackend::Assembled => Box::new(OwnedMinvJacobian::new(
                 sparse_add(
                     self.problem
-                        .assemble_residual_jacobian(&self.kernel, state)
+                        .assemble_system_residual_jacobian_at(t, &self.kernel, state)
                         .as_ref(),
                     self.robin.as_ref(),
                 ),
                 &self.m_inv,
             )),
-            JacobianBackend::MatrixFree => Box::new(MatrixFreeMinvJacobian::new(
+            JacobianBackend::MatrixFree => Box::new(MatrixFreeMinvJacobian::new_at(
+                t,
                 self.problem,
                 &self.kernel,
                 state.to_owned(),

@@ -6,7 +6,7 @@ use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
-    DofReduction2D, FiniteElement2DProblem, KernelAdvDiff2D, NeumannFlux, RobinConvection,
+    DofReduction2D, SEM2DProblem, KernelAdvDiff2D, NeumannFlux, RobinConvection,
 };
 
 #[path = "../examples/support/matrix_free.rs"]
@@ -16,12 +16,12 @@ use matrix_free::{sparse_add, JacobianBackend, ResidualDiffusionNeumannSys};
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
 fn build_problem() -> (
-    FiniteElement2DProblem<QuadMesh>,
+    SEM2DProblem<QuadMesh>,
     faer::sparse::SparseColMat<usize, f64>,
     ormatex_sem_nd::BoundaryContributions,
 ) {
     let mesh = unit_square(32, 2, ReferenceCellType::Quadrilateral);
-    let problem = FiniteElement2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let mass = problem.assemble_lumped_mass();
     let neumann = NeumannFlux::new(1.0);
     let robin = RobinConvection::new(0.1, 0.0);

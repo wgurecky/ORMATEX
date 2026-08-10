@@ -9,7 +9,7 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
-use ormatex_sem_nd::{DofReduction2D, FiniteElement2DProblem, KernelAdvDiff2D, KernelVolumeSource};
+use ormatex_sem_nd::{DofReduction2D, SEM2DProblem, KernelAdvDiff2D, KernelVolumeSource};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;
@@ -18,7 +18,7 @@ use linear_system::AdvDiffSys;
 fn main() {
     let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> =
         unit_square(32, 2, ReferenceCellType::Quadrilateral);
-    let problem = FiniteElement2DProblem::new(mesh, 2, DofReduction2D::Periodic);
+    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::Periodic);
     let mass = problem.assemble_lumped_mass();
     let operator = problem.assemble_bilinear(&KernelAdvDiff2D::new(0.001, [0.5, 0.1]));
     let n = mass.nrows();

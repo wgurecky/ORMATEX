@@ -8,7 +8,7 @@ use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
-    BoundaryContributions, DofReduction2D, FiniteElement2DProblem, KernelAdvDiff2D,
+    BoundaryContributions, DofReduction2D, KernelAdvDiff2D, MeshMetadata, SEM2DProblem,
 };
 
 use super::linear_system::MinvKLinOp;
@@ -40,7 +40,28 @@ pub fn run_diffusion_neumann<M, F>(
     out_path: &str,
 ) where
     M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
-    F: FnOnce(&FiniteElement2DProblem<M>) -> BoundaryContributions,
+    F: FnOnce(&SEM2DProblem<M>) -> BoundaryContributions,
+{
+    run_diffusion_neumann_with_metadata(
+        label,
+        mesh,
+        p,
+        MeshMetadata::default(),
+        assemble_boundary,
+        out_path,
+    );
+}
+
+pub fn run_diffusion_neumann_with_metadata<M, F>(
+    label: &str,
+    mesh: M,
+    p: usize,
+    metadata: MeshMetadata,
+    assemble_boundary: F,
+    out_path: &str,
+) where
+    M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    F: FnOnce(&SEM2DProblem<M>) -> BoundaryContributions,
 {
     let k = 0.1;
     let q_left = 1.0;
@@ -50,7 +71,7 @@ pub fn run_diffusion_neumann<M, F>(
     let nsteps = 200;
     println!("\n=== {label} (p={p}) ===");
 
-    let problem = FiniteElement2DProblem::new(mesh, p, DofReduction2D::None);
+    let problem = SEM2DProblem::new_with_metadata(mesh, p, DofReduction2D::None, metadata);
     let n = problem.reduced_size();
     let k_diff = problem.assemble_bilinear(&KernelAdvDiff2D::new(k, [0.0, 0.0]));
     let mass = problem.assemble_lumped_mass();
