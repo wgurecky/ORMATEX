@@ -6,9 +6,7 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
-use ormatex_sem_nd::{
-    DofReduction2D, SEM2DProblem, KernelAdvDiff2D, NeumannFlux, RobinConvection,
-};
+use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem};
 
 #[path = "support/matrix_free.rs"]
 mod matrix_free;

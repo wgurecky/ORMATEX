@@ -22,7 +22,7 @@ pub trait MatrixFreeJacobianProblem: Sync {
         nfields * self.reduced_size()
     }
 
-    fn apply_residual_jacobian_matfree<K: ResidualKernel>(
+    fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -39,7 +39,7 @@ where
         SEM1DProblem::reduced_size(self)
     }
 
-    fn apply_residual_jacobian_matfree<K: ResidualKernel>(
+    fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -58,7 +58,7 @@ where
         SEM2DProblem::reduced_size(self)
     }
 
-    fn apply_residual_jacobian_matfree<K: ResidualKernel>(
+    fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,

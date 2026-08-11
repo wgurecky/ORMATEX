@@ -14,7 +14,11 @@ use ndelement::{
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::traits::{Entity, GeometryMap, Mesh, Topology};
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
+use rayon::prelude::*;
 use rlst::{rlst_dynamic_array, DynArray};
+
+// ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
+const CELL_BATCH_SIZE: usize = 32;
 
 /// DOF reduction selector for a 2D quadrilateral problem.
 ///
@@ -434,12 +438,15 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
 
     /// Assemble the positive weak spatial residual `R(U)` of a state-aware
     /// kernel. Semi-discrete systems apply the lumped inverse mass separately.
-    pub fn assemble_system_residual_at<K: ResidualKernel>(
+    pub fn assemble_system_residual_at<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
         state: MatRef<f64>,
-    ) -> Vec<f64> {
+    ) -> Vec<f64>
+    where
+        M: Sync,
+    {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
         let n = self.reduced_size();
@@ -451,35 +458,75 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         );
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
-        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
-        let mut field_values = vec![0.0; nfields * cd.npts];
-        let mut field_grads = vec![0.0; nfields * gdim * cd.npts];
-        let mut local = vec![0.0; nfields * cd.ndofs];
-        let mut residual = vec![0.0; nfields * n];
-
-        for (c, (dofs, reduced_dofs)) in self
+        let local_stride = nfields * cd.ndofs;
+        let batches: Vec<Vec<f64>> = self
             .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
+            .par_chunks(CELL_BATCH_SIZE)
+            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
-        {
-            let ndofs = dofs.len();
-            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
-            let state_cell = self.prepare_cell_state(
-                nfields,
-                ndofs,
-                reduced_dofs,
-                state,
-                &basis_grads[..ndofs * gdim * cd.npts],
-                &mut field_values,
-                &mut field_grads,
-            );
-            let ctx = self.cell_ctx(time, c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
-            kernel.assemble_local_residual(&ctx, &state_cell, &mut local[..nfields * ndofs]);
-            for field in 0..nfields {
-                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                    if let Some(reduced_i) = reduced_i {
-                        residual[field * n + reduced_i] += local[field * ndofs + local_i];
+            .map_init(
+                || {
+                    (
+                        vec![0.0; cd.ndofs * gdim * cd.npts],
+                        vec![0.0; nfields * cd.npts],
+                        vec![0.0; nfields * gdim * cd.npts],
+                        vec![0.0; local_stride],
+                    )
+                },
+                |(basis_grads, field_values, field_grads, local),
+                 (batch_index, (dofs_batch, reduced_batch))| {
+                    let mut batch = vec![0.0; dofs_batch.len() * local_stride];
+                    for (cell_offset, (dofs, reduced_dofs)) in
+                        dofs_batch.iter().zip(reduced_batch).enumerate()
+                    {
+                        let ndofs = dofs.len();
+                        let cell_size = nfields * ndofs;
+                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        self.populate_cell_grads(
+                            cell_index,
+                            ndofs,
+                            &mut basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        let state_cell = self.prepare_cell_state(
+                            nfields,
+                            ndofs,
+                            reduced_dofs,
+                            state,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                            field_values,
+                            field_grads,
+                        );
+                        let ctx = self.cell_ctx(
+                            time,
+                            cell_index,
+                            ndofs,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        kernel.assemble_local_residual(&ctx, &state_cell, &mut local[..cell_size]);
+                        batch[cell_offset * local_stride..cell_offset * local_stride + cell_size]
+                            .copy_from_slice(&local[..cell_size]);
+                    }
+                    batch
+                },
+            )
+            .collect();
+        let mut residual = vec![0.0; nfields * n];
+        for (batch_index, batch) in batches.into_iter().enumerate() {
+            let cell_start = batch_index * CELL_BATCH_SIZE;
+            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs
+                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs.len())]
+                .iter()
+                .enumerate()
+            {
+                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                let cell_size = nfields * ndofs;
+                let local =
+                    &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
+                for field in 0..nfields {
+                    for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                        if let Some(reduced_i) = reduced_i {
+                            residual[field * n + reduced_i] += local[field * ndofs + local_i];
+                        }
                     }
                 }
             }
@@ -487,7 +534,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         residual
     }
 
-    pub fn assemble_residual<K: ResidualKernel>(&self, kernel: &K, state: MatRef<f64>) -> Vec<f64> {
+    pub fn assemble_residual<K: ResidualKernel + Sync>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+    ) -> Vec<f64>
+    where
+        M: Sync,
+    {
         assert_eq!(
             kernel.nfields(),
             1,
@@ -496,21 +550,27 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         self.assemble_system_residual_at(0.0, kernel, state)
     }
 
-    pub fn assemble_system_residual<K: ResidualKernel>(
+    pub fn assemble_system_residual<K: ResidualKernel + Sync>(
         &self,
         kernel: &K,
         state: MatRef<f64>,
-    ) -> Vec<f64> {
+    ) -> Vec<f64>
+    where
+        M: Sync,
+    {
         self.assemble_system_residual_at(0.0, kernel, state)
     }
 
     /// Assemble `dR/du` for a state-aware kernel at `state`.
-    pub fn assemble_system_residual_jacobian_at<K: ResidualKernel>(
+    pub fn assemble_system_residual_jacobian_at<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
         state: MatRef<f64>,
-    ) -> SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
         let n = self.reduced_size();
@@ -522,71 +582,98 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         );
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
-        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
-        let mut field_values = vec![0.0; nfields * cd.npts];
-        let mut field_grads = vec![0.0; nfields * gdim * cd.npts];
         let local_size = nfields * cd.ndofs;
-        let mut local = vec![0.0; local_size * local_size];
-        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * local_size * local_size);
-
-        for (c, (dofs, reduced_dofs)) in self
+        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
             .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
+            .par_chunks(CELL_BATCH_SIZE)
+            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
-        {
-            let ndofs = dofs.len();
-            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
-            let state_cell = self.prepare_cell_state(
-                nfields,
-                ndofs,
-                reduced_dofs,
-                state,
-                &basis_grads[..ndofs * gdim * cd.npts],
-                &mut field_values,
-                &mut field_grads,
-            );
-            let ctx = self.cell_ctx(time, c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
-            local[..local_size * local_size].fill(0.0);
-            kernel.assemble_local_jacobian(
-                &ctx,
-                &state_cell,
-                &mut local[..local_size * local_size],
-            );
-            for equation in 0..nfields {
-                for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                    let Some(reduced_i) = reduced_i else {
-                        continue;
-                    };
-                    for unknown in 0..nfields {
-                        for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                            let Some(reduced_j) = reduced_j else {
-                                continue;
-                            };
-                            let row = equation * ndofs + ti;
-                            let col = unknown * ndofs + si;
-                            let value = local[row * local_size + col];
-                            if value != 0.0 {
-                                triplets.push(Triplet::new(
-                                    equation * n + reduced_i,
-                                    unknown * n + reduced_j,
-                                    value,
-                                ));
+            .map_init(
+                || {
+                    (
+                        vec![0.0; cd.ndofs * gdim * cd.npts],
+                        vec![0.0; nfields * cd.npts],
+                        vec![0.0; nfields * gdim * cd.npts],
+                        vec![0.0; local_size * local_size],
+                    )
+                },
+                |(basis_grads, field_values, field_grads, local),
+                 (batch_index, (dofs_batch, reduced_batch))| {
+                    let mut triplets =
+                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
+                    for (cell_offset, (dofs, reduced_dofs)) in
+                        dofs_batch.iter().zip(reduced_batch).enumerate()
+                    {
+                        let ndofs = dofs.len();
+                        let cell_size = nfields * ndofs;
+                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        self.populate_cell_grads(
+                            cell_index,
+                            ndofs,
+                            &mut basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        let state_cell = self.prepare_cell_state(
+                            nfields,
+                            ndofs,
+                            reduced_dofs,
+                            state,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                            field_values,
+                            field_grads,
+                        );
+                        let ctx = self.cell_ctx(
+                            time,
+                            cell_index,
+                            ndofs,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        local[..cell_size * cell_size].fill(0.0);
+                        kernel.assemble_local_jacobian(
+                            &ctx,
+                            &state_cell,
+                            &mut local[..cell_size * cell_size],
+                        );
+                        for equation in 0..nfields {
+                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
+                                let Some(reduced_i) = reduced_i else {
+                                    continue;
+                                };
+                                for unknown in 0..nfields {
+                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
+                                        if let Some(reduced_j) = reduced_j {
+                                            let row = equation * ndofs + ti;
+                                            let col = unknown * ndofs + si;
+                                            let value = local[row * cell_size + col];
+                                            if value != 0.0 {
+                                                triplets.push(Triplet::new(
+                                                    equation * n + reduced_i,
+                                                    unknown * n + reduced_j,
+                                                    value,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-        }
+                    triplets
+                },
+            )
+            .collect();
+        let triplets: Vec<_> = batches.into_iter().flatten().collect();
         let system_size = nfields * n;
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
-    pub fn assemble_residual_jacobian<K: ResidualKernel>(
+    pub fn assemble_residual_jacobian<K: ResidualKernel + Sync>(
         &self,
         kernel: &K,
         state: MatRef<f64>,
-    ) -> SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         assert_eq!(
             kernel.nfields(),
             1,
@@ -595,23 +682,29 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         self.assemble_system_residual_jacobian_at(0.0, kernel, state)
     }
 
-    pub fn assemble_system_residual_jacobian<K: ResidualKernel>(
+    pub fn assemble_system_residual_jacobian<K: ResidualKernel + Sync>(
         &self,
         kernel: &K,
         state: MatRef<f64>,
-    ) -> SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         self.assemble_system_residual_jacobian_at(0.0, kernel, state)
     }
 
     /// Apply `dR/du(state)` to one or more direction columns without building
     /// a global sparse Jacobian. The local action is direct by default.
-    pub fn apply_system_jacobian_matfree_at<K: ResidualKernel>(
+    pub fn apply_system_jacobian_matfree_at<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
-    ) -> Mat<f64> {
+    ) -> Mat<f64>
+    where
+        M: Sync,
+    {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
         let n = self.reduced_size();
@@ -624,50 +717,93 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         assert_eq!(direction.nrows(), nfields * n, "direction size mismatch");
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
-        let mut basis_grads = vec![0.0; cd.ndofs * gdim * cd.npts];
-        let mut field_values = vec![0.0; nfields * cd.npts];
-        let mut field_grads = vec![0.0; nfields * gdim * cd.npts];
         let local_size = nfields * cd.ndofs;
-        let mut local_direction = vec![0.0; local_size];
-        let mut local_action = vec![0.0; local_size];
-        let mut out = Mat::<f64>::zeros(nfields * n, direction.ncols());
-
-        for (c, (dofs, reduced_dofs)) in self
+        let ncols = direction.ncols();
+        let action_stride = local_size * ncols;
+        let batches: Vec<Vec<f64>> = self
             .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
+            .par_chunks(CELL_BATCH_SIZE)
+            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
-        {
-            let ndofs = dofs.len();
-            self.populate_cell_grads(c, ndofs, &mut basis_grads[..ndofs * gdim * cd.npts]);
-            let state_cell = self.prepare_cell_state(
-                nfields,
-                ndofs,
-                reduced_dofs,
-                state,
-                &basis_grads[..ndofs * gdim * cd.npts],
-                &mut field_values,
-                &mut field_grads,
-            );
-            let ctx = self.cell_ctx(time, c, ndofs, &basis_grads[..ndofs * gdim * cd.npts]);
-            for column in 0..direction.ncols() {
-                for field in 0..nfields {
-                    for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                        local_direction[field * ndofs + local_i] =
-                            reduced_i.map_or(0.0, |i| direction[(field * n + i, column)]);
+            .map_init(
+                || {
+                    (
+                        vec![0.0; cd.ndofs * gdim * cd.npts],
+                        vec![0.0; nfields * cd.npts],
+                        vec![0.0; nfields * gdim * cd.npts],
+                        vec![0.0; local_size],
+                        vec![0.0; local_size],
+                    )
+                },
+                |(basis_grads, field_values, field_grads, local_direction, local_action),
+                 (batch_index, (dofs_batch, reduced_batch))| {
+                    let mut batch = vec![0.0; dofs_batch.len() * action_stride];
+                    for (cell_offset, (dofs, reduced_dofs)) in
+                        dofs_batch.iter().zip(reduced_batch).enumerate()
+                    {
+                        let ndofs = dofs.len();
+                        let cell_size = nfields * ndofs;
+                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        self.populate_cell_grads(
+                            cell_index,
+                            ndofs,
+                            &mut basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        let state_cell = self.prepare_cell_state(
+                            nfields,
+                            ndofs,
+                            reduced_dofs,
+                            state,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                            field_values,
+                            field_grads,
+                        );
+                        let ctx = self.cell_ctx(
+                            time,
+                            cell_index,
+                            ndofs,
+                            &basis_grads[..ndofs * gdim * cd.npts],
+                        );
+                        for column in 0..ncols {
+                            for field in 0..nfields {
+                                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                                    local_direction[field * ndofs + local_i] = reduced_i
+                                        .map_or(0.0, |i| direction[(field * n + i, column)]);
+                                }
+                            }
+                            kernel.apply_local_jacobian(
+                                &ctx,
+                                &state_cell,
+                                &local_direction[..cell_size],
+                                &mut local_action[..cell_size],
+                            );
+                            let start = cell_offset * action_stride + column * local_size;
+                            batch[start..start + cell_size]
+                                .copy_from_slice(&local_action[..cell_size]);
+                        }
                     }
-                }
-                kernel.apply_local_jacobian(
-                    &ctx,
-                    &state_cell,
-                    &local_direction[..local_size],
-                    &mut local_action[..local_size],
-                );
-                for field in 0..nfields {
-                    for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                        if let Some(reduced_i) = reduced_i {
-                            out[(field * n + reduced_i, column)] +=
-                                local_action[field * ndofs + local_i];
+                    batch
+                },
+            )
+            .collect();
+        let mut out = Mat::<f64>::zeros(nfields * n, direction.ncols());
+        for (batch_index, batch) in batches.into_iter().enumerate() {
+            let cell_start = batch_index * CELL_BATCH_SIZE;
+            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs
+                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs.len())]
+                .iter()
+                .enumerate()
+            {
+                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                for column in 0..ncols {
+                    let start = cell_offset * action_stride + column * local_size;
+                    let local = &batch[start..start + nfields * ndofs];
+                    for field in 0..nfields {
+                        for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                            if let Some(reduced_i) = reduced_i {
+                                out[(field * n + reduced_i, column)] +=
+                                    local[field * ndofs + local_i];
+                            }
                         }
                     }
                 }
@@ -676,12 +812,15 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         out
     }
 
-    pub fn apply_jacobian_matfree<K: ResidualKernel>(
+    pub fn apply_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
-    ) -> Mat<f64> {
+    ) -> Mat<f64>
+    where
+        M: Sync,
+    {
         assert_eq!(
             kernel.nfields(),
             1,
@@ -690,23 +829,29 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         self.apply_system_jacobian_matfree_at(0.0, kernel, state, direction)
     }
 
-    pub fn apply_system_jacobian_matfree<K: ResidualKernel>(
+    pub fn apply_system_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         kernel: &K,
         state: MatRef<f64>,
         direction: MatRef<f64>,
-    ) -> Mat<f64> {
+    ) -> Mat<f64>
+    where
+        M: Sync,
+    {
         self.apply_system_jacobian_matfree_at(0.0, kernel, state, direction)
     }
 
     /// Assemble a reduced sparse matrix using `kernel.assemble_local` per
     /// quadrilateral. Periodic DOFs are combined and eliminated DOFs omitted
     /// while scattering, so no full-size matrix is exposed.
-    pub fn assemble_system_bilinear_at<K: BilinearForm>(
+    pub fn assemble_system_bilinear_at<K: BilinearForm + Sync>(
         &self,
         time: f64,
         kernel: &K,
-    ) -> SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "bilinear form must contain at least one field");
         let n = self.reduced_size();
@@ -714,61 +859,78 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let cd = &self.cell_data;
         let max_ndofs = cd.ndofs;
 
-        // Per-call reused scratch (sized once, reused for every cell).
-        let mut grads_buf = vec![0.0_f64; max_ndofs * gdim * cd.npts];
         let local_size = nfields * max_ndofs;
-        let mut local_mat = vec![0.0_f64; local_size * local_size];
-        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * local_size * local_size);
-
         let npts = cd.npts;
-        grads_buf.resize(cd.ndofs * gdim * npts, 0.0);
-        for (c, (dofs, reduced_dofs)) in self
+        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
             .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
+            .par_chunks(CELL_BATCH_SIZE)
+            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
-        {
-            let ndofs = dofs.len();
-            debug_assert!(ndofs == cd.ndofs, "ndofs mismatch: cell vs CellData");
+            .map_init(
+                || {
+                    (
+                        vec![0.0_f64; max_ndofs * gdim * npts],
+                        vec![0.0_f64; local_size * local_size],
+                    )
+                },
+                |(grads_buf, local_mat), (batch_index, (dofs_batch, reduced_batch))| {
+                    let mut triplets =
+                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
+                    for (cell_offset, (dofs, reduced_dofs)) in
+                        dofs_batch.iter().zip(reduced_batch).enumerate()
+                    {
+                        let ndofs = dofs.len();
+                        debug_assert!(ndofs == cd.ndofs, "ndofs mismatch: cell vs CellData");
+                        let cell_size = nfields * ndofs;
+                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let ctx = self.prepare_cell_ctx(
+                            time,
+                            cell_index,
+                            ndofs,
+                            &mut grads_buf[..ndofs * gdim * npts],
+                        );
+                        let mat_slice = &mut local_mat[..cell_size * cell_size];
+                        mat_slice.fill(0.0);
+                        kernel.assemble_local(&ctx, mat_slice);
 
-            let ctx = self.prepare_cell_ctx(time, c, ndofs, &mut grads_buf[..ndofs * gdim * npts]);
-            {
-                let mat_slice = &mut local_mat[..local_size * local_size];
-                mat_slice.fill(0.0);
-                kernel.assemble_local(&ctx, mat_slice);
-            }
-
-            // Scatter directly to reduced indices.
-            for equation in 0..nfields {
-                for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                    let Some(reduced_i) = reduced_i else {
-                        continue;
-                    };
-                    for unknown in 0..nfields {
-                        for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                            let Some(reduced_j) = reduced_j else {
-                                continue;
-                            };
-                            let row = equation * ndofs + ti;
-                            let col = unknown * ndofs + si;
-                            let entry = local_mat[row * local_size + col];
-                            if entry.abs() > 1e-12 {
-                                triplets.push(Triplet::new(
-                                    equation * n + reduced_i,
-                                    unknown * n + reduced_j,
-                                    entry,
-                                ));
+                        for equation in 0..nfields {
+                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
+                                let Some(reduced_i) = reduced_i else {
+                                    continue;
+                                };
+                                for unknown in 0..nfields {
+                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
+                                        let Some(reduced_j) = reduced_j else {
+                                            continue;
+                                        };
+                                        let row = equation * ndofs + ti;
+                                        let col = unknown * ndofs + si;
+                                        let entry = mat_slice[row * cell_size + col];
+                                        if entry.abs() > 1e-12 {
+                                            triplets.push(Triplet::new(
+                                                equation * n + reduced_i,
+                                                unknown * n + reduced_j,
+                                                entry,
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-        }
+                    triplets
+                },
+            )
+            .collect();
+        let triplets: Vec<_> = batches.into_iter().flatten().collect();
         let system_size = nfields * n;
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
-    pub fn assemble_bilinear<K: BilinearForm>(&self, kernel: &K) -> SparseColMat<usize, f64> {
+    pub fn assemble_bilinear<K: BilinearForm + Sync>(&self, kernel: &K) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         assert_eq!(
             kernel.nfields(),
             1,
@@ -777,10 +939,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         self.assemble_system_bilinear_at(0.0, kernel)
     }
 
-    pub fn assemble_system_bilinear<K: BilinearForm>(
+    pub fn assemble_system_bilinear<K: BilinearForm + Sync>(
         &self,
         kernel: &K,
-    ) -> SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
         self.assemble_system_bilinear_at(0.0, kernel)
     }
 

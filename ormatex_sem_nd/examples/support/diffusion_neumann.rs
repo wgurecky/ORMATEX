@@ -39,7 +39,7 @@ pub fn run_diffusion_neumann<M, F>(
     assemble_boundary: F,
     out_path: &str,
 ) where
-    M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     F: FnOnce(&SEM2DProblem<M>) -> BoundaryContributions,
 {
     run_diffusion_neumann_with_metadata(
@@ -60,7 +60,7 @@ pub fn run_diffusion_neumann_with_metadata<M, F>(
     assemble_boundary: F,
     out_path: &str,
 ) where
-    M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     F: FnOnce(&SEM2DProblem<M>) -> BoundaryContributions,
 {
     let k = 0.1;

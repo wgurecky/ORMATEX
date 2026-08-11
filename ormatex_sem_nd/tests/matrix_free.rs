@@ -5,9 +5,9 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex::tableau_implicit::ImplicitBT;
-use ormatex_sem_nd::{
-    DofReduction2D, SEM2DProblem, KernelAdvDiff2D, NeumannFlux, RobinConvection,
-};
+use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem};
+use rayon::ThreadPoolBuilder;
+use std::time::Instant;
 
 #[path = "../examples/support/matrix_free.rs"]
 mod matrix_free;
@@ -36,6 +36,27 @@ fn build_problem() -> (
         }
     });
     (problem, mass, boundary)
+}
+
+fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat<f64>, Mat<f64>) {
+    let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral);
+    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.25 + i as f64 / n as f64);
+    let direction = Mat::from_fn(n, 1, |i, _| (i as f64 * 0.17).sin());
+    (
+        problem,
+        KernelAdvDiff2D::new(0.1, [0.0, 0.0]),
+        state,
+        direction,
+    )
+}
+
+fn benchmark_threads() -> (usize, usize) {
+    let available = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    (1, available.min(8))
 }
 
 fn run_case(backend: JacobianBackend, nsteps: usize) -> Mat<f64> {
@@ -104,4 +125,39 @@ fn matrix_free_backward_euler_matches_assembled_backend() {
     for row in 0..matrix_free.nrows() {
         assert!((matrix_free[(row, 0)] - assembled[(row, 0)]).abs() < 1e-8);
     }
+}
+
+#[test]
+#[ignore = "large runtime benchmark; run with --release -- --ignored --nocapture"]
+fn large_2d_diffusion_matrix_free_jacobian_runtime() {
+    let (problem, kernel, state, direction) = build_large_diffusion_case();
+    let (serial_threads, parallel_threads) = benchmark_threads();
+    let serial_pool = ThreadPoolBuilder::new()
+        .num_threads(serial_threads)
+        .build()
+        .unwrap();
+    let parallel_pool = ThreadPoolBuilder::new()
+        .num_threads(parallel_threads)
+        .build()
+        .unwrap();
+
+    let start = Instant::now();
+    let serial = serial_pool
+        .install(|| problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref()));
+    let serial_time = start.elapsed();
+
+    let start = Instant::now();
+    let parallel = parallel_pool
+        .install(|| problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref()));
+    let parallel_time = start.elapsed();
+
+    assert_eq!(serial.nrows(), problem.reduced_size());
+    assert_eq!(parallel.nrows(), problem.reduced_size());
+    for row in 0..serial.nrows() {
+        assert!((serial[(row, 0)] - parallel[(row, 0)]).abs() < 1e-12);
+    }
+    println!(
+        "large 2D matrix-free Jacobian: {serial_threads} thread(s) = {:?}, {parallel_threads} thread(s) = {:?}",
+        serial_time, parallel_time
+    );
 }

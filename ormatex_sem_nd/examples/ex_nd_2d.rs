@@ -9,7 +9,7 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
-use ormatex_sem_nd::{DofReduction2D, SEM2DProblem, KernelAdvDiff2D, KernelVolumeSource};
+use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, KernelVolumeSource, SEM2DProblem};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;

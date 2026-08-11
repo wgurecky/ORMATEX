@@ -10,6 +10,7 @@ ndmesh = { git = "https://codeberg.org/nd-project/nd.git" }
 ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" }
 rlst = "0.6"
 quadraturerules = "0.12.0"
+rayon = "1"
 
 [dev-dependencies]
 ormatex = { path = "..", default-features = false }
