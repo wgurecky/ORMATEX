@@ -8,10 +8,17 @@ pub mod material;
 pub mod problem_1d;
 pub mod problem_2d;
 
-pub use common::*;
-pub use gmsh::*;
-pub use jacobian::*;
-pub use kernels::*;
-pub use material::*;
-pub use problem_1d::*;
-pub use problem_2d::*;
+pub use common::{BoundaryContributions, BoundaryFacet, CellState, FacetCtx, LocalCtx, ShapeFn};
+pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
+pub use jacobian::{MatrixFreeJacobianProblem, MatrixFreeMinvJacobian, OwnedMinvJacobian};
+pub use kernels::{
+    BilinearForm, BoundaryIntegrator, FluxKernel1D, KernelAdvDiff, KernelAdvDiff2D,
+    KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelConservationLaw1D, KernelMass,
+    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, RobinConvection,
+};
+pub use material::{
+    CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,
+    MeshMetadata, PhysicalRegion, RegionCoefficient,
+};
+pub use problem_1d::{BoundaryPoint, DofReduction1D, SEM1DProblem};
+pub use problem_2d::{DofReduction2D, SEM2DProblem};

@@ -6,16 +6,17 @@ use std::io::Write;
 use faer::prelude::*;
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
-use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
-use ormatex::tableau_implicit::ImplicitBT;
+use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
     DofReduction1D, KernelConservationLaw1D, MatrixFreeMinvJacobian, ResidualKernel, SEM1DProblem,
 };
 
 #[path = "support/isothermal_euler.rs"]
 mod isothermal_euler;
+#[path = "support/linear_system.rs"]
+mod linear_system;
 use isothermal_euler::IsothermalEuler1D;
+use linear_system::{implicit_euler_final_state, lumped_inverse_mass};
 
 type IntervalMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
@@ -31,13 +32,7 @@ impl<'a> IsothermalEulerSystem<'a> {
         kernel: KernelConservationLaw1D<IsothermalEuler1D>,
     ) -> Self {
         let mass = problem.assemble_system_lumped_mass(kernel.nfields());
-        let m_inv = (0..mass.nrows())
-            .map(|i| {
-                let value = mass[(i, i)];
-                assert!(value > 0.0, "zero lumped mass at {i}");
-                1.0 / value
-            })
-            .collect();
+        let m_inv = lumped_inverse_mass(mass.as_ref());
         Self {
             problem,
             kernel,
@@ -94,14 +89,7 @@ fn main() {
         y0[(n + i, 0)] = rho0 + amplitude * phase.cos();
     }
 
-    let mut solver =
-        DirkIntegrator::new(0.0, y0.as_ref(), ImplicitBT::implicit_euler(), 1e-10, 1e-10);
-    let mut y = y0;
-    for _ in 0..nsteps {
-        let step = solver.step(&system, dt).unwrap();
-        y = step.y.clone();
-        solver.accept_step(step);
-    }
+    let y = implicit_euler_final_state(&system, y0.as_ref(), dt, nsteps, 1e-10);
 
     let mut output = File::create("target/ex_nd_1d_isothermal_euler_out.csv")
         .expect("failed to create output csv");

@@ -3,8 +3,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellT
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::{
     shapes::unit_square,
-    traits::{Entity, Geometry, Mesh, Point},
-    SingleElementMesh,
+    traits::{Builder, Entity, Geometry, Mesh, Point, Topology},
+    SingleElementMesh, SingleElementMeshBuilder,
 };
 use ormatex_sem_nd::{
     BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, KernelAdvDiff2D, KernelAdvDiffSUPG2D,
@@ -13,6 +13,92 @@ use ormatex_sem_nd::{
 use ormatex_sem_nd::{ConstantCoefficient, MeshMetadata, PhysicalRegion, RegionCoefficient};
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+
+fn unit_square_periodic_pairs(mesh: &QuadMesh) -> Vec<[usize; 2]> {
+    const EPS: f64 = 1e-12;
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut bottom = Vec::new();
+    let mut top = Vec::new();
+    for facet in mesh.entity_iter(ReferenceCellType::Interval) {
+        let topology = facet.topology();
+        let mut cells = topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
+        if cells.next().is_none() || cells.next().is_some() {
+            continue;
+        }
+        let mut midpoint = [0.0; 2];
+        for point in facet.geometry().points() {
+            let mut xy = [0.0; 2];
+            point.coords(&mut xy);
+            midpoint[0] += xy[0] / 2.0;
+            midpoint[1] += xy[1] / 2.0;
+        }
+        let entry = (
+            if midpoint[0].abs() < EPS || (midpoint[0] - 1.0).abs() < EPS {
+                midpoint[1]
+            } else {
+                midpoint[0]
+            },
+            facet.local_index(),
+        );
+        if midpoint[0].abs() < EPS {
+            left.push(entry);
+        } else if (midpoint[0] - 1.0).abs() < EPS {
+            right.push(entry);
+        } else if midpoint[1].abs() < EPS {
+            bottom.push(entry);
+        } else if (midpoint[1] - 1.0).abs() < EPS {
+            top.push(entry);
+        }
+    }
+    for facets in [&mut left, &mut right, &mut bottom, &mut top] {
+        facets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    }
+    assert_eq!(left.len(), right.len());
+    assert_eq!(bottom.len(), top.len());
+    left.into_iter()
+        .zip(right)
+        .chain(bottom.into_iter().zip(top))
+        .map(|((_, a), (_, b))| [a, b])
+        .collect()
+}
+
+fn translated_periodic_mesh() -> QuadMesh {
+    let mut builder = SingleElementMeshBuilder::new(2, (ReferenceCellType::Quadrilateral, 1));
+    for (id, xy) in [
+        (0, [10.0, -3.0]),
+        (1, [14.0, -2.0]),
+        (2, [9.0, 3.0]),
+        (3, [13.0, 4.0]),
+        (4, [18.0, -1.0]),
+        (5, [17.0, 5.0]),
+    ] {
+        builder.add_point(id, &xy);
+    }
+    builder.add_cell(0, &[0, 1, 2, 3]);
+    builder.add_cell(1, &[1, 4, 3, 5]);
+    builder.create_mesh()
+}
+
+fn facet_with_endpoints(mesh: &QuadMesh, a: [f64; 2], b: [f64; 2]) -> usize {
+    mesh.entity_iter(ReferenceCellType::Interval)
+        .find(|facet| {
+            let endpoints: Vec<_> = facet
+                .geometry()
+                .points()
+                .map(|point| {
+                    let mut xy = [0.0; 2];
+                    point.coords(&mut xy);
+                    xy
+                })
+                .collect();
+            endpoints.len() == 2
+                && ((endpoints[0] == a && endpoints[1] == b)
+                    || (endpoints[0] == b && endpoints[1] == a))
+        })
+        .unwrap()
+        .local_index()
+}
 
 struct XSource;
 
@@ -123,7 +209,7 @@ fn dirichlet_eliminates_every_high_order_facet_dof() {
             facets_to_eliminate: vec![left_facet],
         },
     );
-    let space = FunctionSpaceImpl::new(&problem.mesh, &problem.family);
+    let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
     let facet_dofs = space
         .entity_closure_dofs(ReferenceCellType::Interval, left_facet)
         .unwrap();
@@ -144,7 +230,15 @@ fn volume_kernel_reads_physical_quadrature_points() {
 #[test]
 fn lumped_mass_matches_generic_gll_mass() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::Periodic);
+    let facet_pairs = unit_square_periodic_pairs(&mesh);
+    let problem = SEM2DProblem::new(
+        mesh,
+        2,
+        DofReduction2D::Periodic {
+            facet_pairs,
+            tolerance: 1e-12,
+        },
+    );
     let generic = problem.assemble_bilinear(&KernelMass::new()).to_dense();
     let lumped = problem.assemble_lumped_mass().to_dense();
     for i in 0..generic.nrows() {
@@ -152,6 +246,82 @@ fn lumped_mass_matches_generic_gll_mass() {
             assert!((generic[(i, j)] - lumped[(i, j)]).abs() < 1e-12);
         }
     }
+}
+
+#[test]
+fn periodic_pairs_identify_translated_reversed_high_order_facets() {
+    let mesh = translated_periodic_mesh();
+    let source = facet_with_endpoints(&mesh, [10.0, -3.0], [9.0, 3.0]);
+    let target = facet_with_endpoints(&mesh, [18.0, -1.0], [17.0, 5.0]);
+    let problem = SEM2DProblem::new(
+        mesh,
+        3,
+        DofReduction2D::Periodic {
+            facet_pairs: vec![[source, target]],
+            tolerance: 1e-12,
+        },
+    );
+    let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
+    let source_dofs = space
+        .entity_closure_dofs(ReferenceCellType::Interval, source)
+        .unwrap();
+    let target_dofs = space
+        .entity_closure_dofs(ReferenceCellType::Interval, target)
+        .unwrap();
+    assert_eq!(source_dofs.len(), 4);
+    assert_eq!(target_dofs.len(), 4);
+    assert_eq!(problem.reduced_size(), 24);
+    let source_reduced: std::collections::HashSet<_> = source_dofs
+        .iter()
+        .map(|&dof| problem.target_dof(dof).unwrap())
+        .collect();
+    let target_reduced: std::collections::HashSet<_> = target_dofs
+        .iter()
+        .map(|&dof| problem.target_dof(dof).unwrap())
+        .collect();
+    assert_eq!(source_reduced.len(), 4);
+    assert_eq!(source_reduced, target_reduced);
+}
+
+#[test]
+#[should_panic(expected = "not related by a translation")]
+fn periodic_pairs_reject_nontranslated_facets() {
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let pairs = unit_square_periodic_pairs(&mesh);
+    SEM2DProblem::new(
+        mesh,
+        2,
+        DofReduction2D::Periodic {
+            facet_pairs: vec![[pairs[0][0], pairs.last().unwrap()[0]]],
+            tolerance: 1e-12,
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be a boundary interval")]
+fn periodic_pairs_reject_interior_facets() {
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let interior = mesh
+        .entity_iter(ReferenceCellType::Interval)
+        .find(|facet| {
+            let topology = facet.topology();
+            topology
+                .connected_entity_iter(ReferenceCellType::Quadrilateral)
+                .count()
+                == 2
+        })
+        .unwrap()
+        .local_index();
+    let boundary = unit_square_periodic_pairs(&mesh)[0][0];
+    SEM2DProblem::new(
+        mesh,
+        2,
+        DofReduction2D::Periodic {
+            facet_pairs: vec![[interior, boundary]],
+            tolerance: 1e-12,
+        },
+    );
 }
 
 #[test]

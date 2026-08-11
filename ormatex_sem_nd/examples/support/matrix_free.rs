@@ -1,37 +1,17 @@
 use faer::matrix_free::LinOp;
 use faer::prelude::*;
-use faer::sparse::{SparseColMat, SparseColMatRef, Triplet};
+use faer::sparse::SparseColMat;
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{KernelAdvDiff2D, MatrixFreeMinvJacobian, OwnedMinvJacobian, SEM2DProblem};
 
+use super::linear_system::{lumped_inverse_mass, sparse_add};
+
 #[derive(Clone, Copy)]
 pub enum JacobianBackend {
     Assembled,
     MatrixFree,
-}
-
-pub fn sparse_add(
-    a: SparseColMatRef<'_, usize, f64>,
-    b: SparseColMatRef<'_, usize, f64>,
-) -> SparseColMat<usize, f64> {
-    let n = a.nrows();
-    assert_eq!(a.ncols(), n);
-    assert_eq!(b.nrows(), n);
-    assert_eq!(b.ncols(), n);
-    let mut triplets = Vec::new();
-    for mat in [a, b] {
-        let (symbolic, values) = mat.parts();
-        let columns = symbolic.col_ptr();
-        let rows = symbolic.row_idx();
-        for column in 0..n {
-            for entry in columns[column]..columns[column + 1] {
-                triplets.push(Triplet::new(rows[entry], column, values[entry]));
-            }
-        }
-    }
-    SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
 }
 
 pub struct ResidualDiffusionNeumannSys<'a, M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
@@ -58,21 +38,10 @@ where
         let n = problem.reduced_size();
         assert_eq!(mass.nrows(), n);
         assert_eq!(mass.ncols(), n);
-        assert_eq!(
-            mass.compute_nnz(),
-            n,
-            "matrix-free path requires lumped mass"
-        );
         assert_eq!(robin.nrows(), n);
         assert_eq!(robin.ncols(), n);
         assert_eq!(source.len(), n);
-        let m_inv = (0..n)
-            .map(|i| {
-                let value = mass[(i, i)];
-                assert!(value.abs() > 1e-30, "zero mass diagonal at {i}");
-                1.0 / value
-            })
-            .collect();
+        let m_inv = lumped_inverse_mass(mass.as_ref());
         Self {
             problem,
             kernel,

@@ -1,4 +1,8 @@
-use crate::common::{BoundaryContributions, CellData, CellState, FacetCtx, LocalCtx};
+use crate::common::{
+    assemble_lumped_mass, cell_ctx, interpolate_cell_state, push_local_matrix_triplets,
+    scatter_local_vector, BoundaryContributions, CellData, CellState, FacetCtx, LocalCtx,
+    CELL_BATCH_SIZE,
+};
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
 use faer::prelude::*;
@@ -14,9 +18,6 @@ use ndmesh::traits::{Entity, Geometry, GeometryMap, Mesh, Point, Topology};
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rayon::prelude::*;
 use rlst::{rlst_dynamic_array, DynArray};
-
-// ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
-const CELL_BATCH_SIZE: usize = 32;
 
 /// DOF reduction for a 1D interval mesh. Facets are `Point` entity indices.
 #[derive(Clone, Debug)]
@@ -43,10 +44,9 @@ pub struct BoundaryPoint {
 
 /// 1D GLL spectral-element problem on interval meshes.
 pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
-    pub mesh: M,
-    pub family: LagrangeElementFamily<f64>,
+    mesh: M,
+    family: LagrangeElementFamily<f64>,
     cell_data: CellData,
-    cell_dofs: Vec<Vec<usize>>,
     cell_reduced_dofs: Vec<Vec<Option<usize>>>,
     dof_lut: Vec<Option<usize>>,
     n_reduced: usize,
@@ -161,7 +161,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             jinv_cache,
             jdets_cache,
             physical_points_cache,
-            pts,
         };
 
         let boundary_dof = |facet_index: usize| -> usize {
@@ -242,7 +241,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             mesh,
             family,
             cell_data,
-            cell_dofs,
             cell_reduced_dofs,
             dof_lut,
             n_reduced,
@@ -253,6 +251,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     pub fn target_dof(&self, full: usize) -> Option<usize> {
         self.dof_lut[full]
+    }
+
+    pub fn mesh(&self) -> &M {
+        &self.mesh
+    }
+
+    pub fn family(&self) -> &LagrangeElementFamily<f64> {
+        &self.family
     }
 
     pub fn reduced_size(&self) -> usize {
@@ -289,21 +295,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         ndofs: usize,
         grads: &'a [f64],
     ) -> LocalCtx<'a> {
-        let cd = &self.cell_data;
-        LocalCtx {
+        cell_ctx(
+            &self.cell_data,
+            &self.metadata,
+            1,
+            1,
             time,
-            cell: self.metadata.cell(cell_index),
-            tdim: 1,
-            gdim: 1,
-            ncomp: 1,
-            npts: cd.npts,
+            cell_index,
             ndofs,
-            wts: &cd.wts,
-            jdets: &cd.jdets_cache[cell_index * cd.npts..(cell_index + 1) * cd.npts],
-            points: &cd.physical_points_cache[cell_index * cd.npts..(cell_index + 1) * cd.npts],
-            values: &cd.reference_values,
-            grads: &grads[..ndofs * cd.npts],
-        }
+            grads,
+        )
     }
 
     fn prepare_cell_ctx<'a>(
@@ -326,28 +327,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         values: &'a mut [f64],
         field_grads: &'a mut [f64],
     ) -> CellState<'a> {
-        let cd = &self.cell_data;
-        let n = self.reduced_size();
-        values[..nfields * cd.npts].fill(0.0);
-        field_grads[..nfields * cd.npts].fill(0.0);
-        for field in 0..nfields {
-            for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
-                let coefficient = reduced.map_or(0.0, |i| state[(field * n + i, 0)]);
-                for q in 0..cd.npts {
-                    values[field * cd.npts + q] +=
-                        coefficient * cd.reference_values[local_i * cd.npts + q];
-                    field_grads[field * cd.npts + q] +=
-                        coefficient * basis_grads[local_i * cd.npts + q];
-                }
-            }
-        }
-        CellState {
+        interpolate_cell_state(
+            &self.cell_data,
+            1,
+            self.reduced_size(),
             nfields,
-            npts: cd.npts,
-            gdim: 1,
-            values: &values[..nfields * cd.npts],
-            grads: &field_grads[..nfields * cd.npts],
-        }
+            reduced_dofs,
+            state,
+            basis_grads,
+            values,
+            field_grads,
+        )
     }
 
     pub fn assemble_system_residual_at<K: ResidualKernel + Sync>(
@@ -374,9 +364,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let cd = &self.cell_data;
         let local_stride = nfields * cd.ndofs;
         let batches: Vec<Vec<f64>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -387,13 +376,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         vec![0.0; local_stride],
                     )
                 },
-                |(basis_grads, field_values, field_grads, local),
-                 (batch_index, (dofs_batch, reduced_batch))| {
-                    let mut batch = vec![0.0; dofs_batch.len() * local_stride];
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
+                    let mut batch = vec![0.0; reduced_batch.len() * local_stride];
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -427,18 +413,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 .iter()
                 .enumerate()
             {
-                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                let ndofs = reduced_dofs.len();
                 let cell_size = nfields * ndofs;
                 let local =
                     &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
-                for field in 0..nfields {
-                    for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                        if let Some(reduced_i) = reduced_i {
-                            residual[field * self.reduced_size() + reduced_i] +=
-                                local[field * ndofs + local_i];
-                        }
-                    }
-                }
+                scatter_local_vector(
+                    &mut residual,
+                    local,
+                    reduced_dofs,
+                    nfields,
+                    self.reduced_size(),
+                );
             }
         }
         residual
@@ -492,9 +477,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -505,14 +489,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         vec![0.0; local_size * local_size],
                     )
                 },
-                |(basis_grads, field_values, field_grads, local),
-                 (batch_index, (dofs_batch, reduced_batch))| {
+                |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -536,29 +517,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             &state_cell,
                             &mut local[..cell_size * cell_size],
                         );
-                        for equation in 0..nfields {
-                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                                let Some(reduced_i) = reduced_i else {
-                                    continue;
-                                };
-                                for unknown in 0..nfields {
-                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                                        if let Some(reduced_j) = reduced_j {
-                                            let row = equation * ndofs + ti;
-                                            let col = unknown * ndofs + si;
-                                            let value = local[row * cell_size + col];
-                                            if value != 0.0 {
-                                                triplets.push(Triplet::new(
-                                                    equation * n + reduced_i,
-                                                    unknown * n + reduced_j,
-                                                    value,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        push_local_matrix_triplets(
+                            &mut triplets,
+                            &local[..cell_size * cell_size],
+                            reduced_dofs,
+                            nfields,
+                            n,
+                            |value| value != 0.0,
+                        );
                     }
                     triplets
                 },
@@ -621,9 +587,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let ncols = direction.ncols();
         let action_stride = local_size * ncols;
         let batches: Vec<Vec<f64>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -636,12 +601,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     )
                 },
                 |(basis_grads, field_values, field_grads, local_direction, local_action),
-                 (batch_index, (dofs_batch, reduced_batch))| {
-                    let mut batch = vec![0.0; dofs_batch.len() * action_stride];
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                 (batch_index, reduced_batch)| {
+                    let mut batch = vec![0.0; reduced_batch.len() * action_stride];
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -689,7 +652,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 .iter()
                 .enumerate()
             {
-                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                let ndofs = reduced_dofs.len();
                 for column in 0..ncols {
                     let start = cell_offset * action_stride + column * local_size;
                     let local = &batch[start..start + nfields * ndofs];
@@ -750,9 +713,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -761,13 +723,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         vec![0.0; local_size * local_size],
                     )
                 },
-                |(grads, local), (batch_index, (dofs_batch, reduced_batch))| {
+                |(grads, local), (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let ctx = self.prepare_cell_ctx(
@@ -778,29 +738,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         );
                         local[..cell_size * cell_size].fill(0.0);
                         kernel.assemble_local(&ctx, &mut local[..cell_size * cell_size]);
-                        for equation in 0..nfields {
-                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                                let Some(reduced_i) = reduced_i else {
-                                    continue;
-                                };
-                                for unknown in 0..nfields {
-                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                                        if let Some(reduced_j) = reduced_j {
-                                            let row = equation * ndofs + ti;
-                                            let col = unknown * ndofs + si;
-                                            let value = local[row * cell_size + col];
-                                            if value.abs() > 1e-12 {
-                                                triplets.push(Triplet::new(
-                                                    equation * n + reduced_i,
-                                                    unknown * n + reduced_j,
-                                                    value,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        push_local_matrix_triplets(
+                            &mut triplets,
+                            &local[..cell_size * cell_size],
+                            reduced_dofs,
+                            nfields,
+                            n,
+                            |value| value.abs() > 1e-12,
+                        );
                     }
                     triplets
                 },
@@ -842,22 +787,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let mut local = vec![0.0; nfields * cd.ndofs];
         let mut rhs = vec![0.0; nfields * n];
 
-        for (c, (dofs, reduced_dofs)) in self
-            .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
-            .enumerate()
-        {
-            let ndofs = dofs.len();
+        for (c, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
+            let ndofs = reduced_dofs.len();
             let ctx = self.prepare_cell_ctx(time, c, ndofs, &mut grads[..ndofs * cd.npts]);
             kernel.assemble_local_rhs(&ctx, &mut local[..nfields * ndofs]);
-            for field in 0..nfields {
-                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                    if let Some(reduced_i) = reduced_i {
-                        rhs[field * n + reduced_i] += local[field * ndofs + local_i];
-                    }
-                }
-            }
+            scatter_local_vector(
+                &mut rhs,
+                &local[..nfields * ndofs],
+                reduced_dofs,
+                nfields,
+                n,
+            );
         }
         rhs
     }
@@ -873,27 +813,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.
     pub fn assemble_system_lumped_mass(&self, nfields: usize) -> SparseColMat<usize, f64> {
-        assert!(nfields > 0, "mass requires at least one field");
-        let n = self.reduced_size();
-        let cd = &self.cell_data;
-        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * cd.ndofs * nfields);
-        for field in 0..nfields {
-            for (cell, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
-                for (local_dof, &reduced) in reduced_dofs.iter().enumerate() {
-                    if let Some(reduced) = reduced {
-                        let q = cd.nodal_quadrature[local_dof];
-                        let index = field * n + reduced;
-                        triplets.push(Triplet::new(
-                            index,
-                            index,
-                            cd.wts[q] * cd.jdets_cache[cell * cd.npts + q],
-                        ));
-                    }
-                }
-            }
-        }
-        let system_size = nfields * n;
-        SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
+        assemble_lumped_mass(
+            &self.cell_data,
+            &self.cell_reduced_dofs,
+            self.reduced_size(),
+            nfields,
+        )
     }
 
     /// Assemble the diagonal GLL mass matrix for one scalar field.
@@ -937,12 +862,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 index: point_index,
                 coordinate: coord[0],
                 normal,
-                physical_region: self
-                    .metadata
-                    .facet_regions
-                    .get(point_index)
-                    .copied()
-                    .flatten(),
+                physical_region: self.metadata.facet(point_index).physical_region,
             }) else {
                 continue;
             };

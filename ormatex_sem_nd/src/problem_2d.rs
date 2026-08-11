@@ -1,5 +1,7 @@
 use crate::common::{
-    assemble_quad_boundaries, BoundaryContributions, BoundaryFacet, CellData, CellState, LocalCtx,
+    assemble_lumped_mass, assemble_quad_boundaries, cell_ctx, interpolate_cell_state,
+    push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, BoundaryFacet,
+    CellData, CellState, LocalCtx, CELL_BATCH_SIZE,
 };
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
@@ -12,25 +14,24 @@ use ndelement::{
     types::{Continuity, ReferenceCellType},
 };
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
-use ndmesh::traits::{Entity, GeometryMap, Mesh, Topology};
+use ndmesh::traits::{Entity, Geometry, GeometryMap, Mesh, Point, Topology};
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rayon::prelude::*;
 use rlst::{rlst_dynamic_array, DynArray};
 
-// ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
-const CELL_BATCH_SIZE: usize = 32;
-
 /// DOF reduction selector for a 2D quadrilateral problem.
-///
-/// * `Periodic` -- identify left<->right and bottom<->top boundary vertices
-///   (cyclic), system size = (# unique canonical vertices).
-/// * `None` -- retain all dofs.
-/// * `Dirichlet { facets_to_eliminate }` -- eliminate every DOF on the listed
-///   boundary interval facets.
 #[derive(Clone, Debug)]
 pub enum DofReduction2D {
-    /// Identify left<->right and bottom<->top boundary vertices (cyclic).
-    Periodic,
+    /// Identify explicitly paired boundary facets related by translation.
+    ///
+    /// Each pair contains ndmesh `Interval` local indices. Every paired facet
+    /// must have the same number of closure DOFs and differ only by one
+    /// translation; orientation is inferred from its endpoint coordinates.
+    /// Pair every conforming facet segment, not just each outer boundary side.
+    Periodic {
+        facet_pairs: Vec<[usize; 2]>,
+        tolerance: f64,
+    },
     /// Retain all dofs.
     None,
     /// Eliminate every closure DOF on the listed boundary facets (homogeneous
@@ -38,23 +39,40 @@ pub enum DofReduction2D {
     Dirichlet { facets_to_eliminate: Vec<usize> },
 }
 
-// `CellData` (per-cell-type quadrature + tabulation + jacobian caches) is
-// shared with the 1D example via `ex_nd_common::CellData`.  See there for
-// the struct definition + per-field docs.
+struct DisjointSet {
+    parent: Vec<usize>,
+}
 
-// =============================================================================
-// SEM2DProblem
-// =============================================================================
+impl DisjointSet {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+        }
+    }
+
+    fn find(&mut self, item: usize) -> usize {
+        if self.parent[item] != item {
+            self.parent[item] = self.find(self.parent[item]);
+        }
+        self.parent[item]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let a = self.find(a);
+        let b = self.find(b);
+        if a != b {
+            self.parent[a.max(b)] = a.min(b);
+        }
+    }
+}
 
 /// 2D GLL spectral-element problem on quadrilateral meshes.
 pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
-    pub mesh: M,
-    pub family: LagrangeElementFamily<f64>,
+    mesh: M,
+    family: LagrangeElementFamily<f64>,
     p: usize,
     cell_data: CellData,
-    cell_dofs: Vec<Vec<usize>>,
     cell_reduced_dofs: Vec<Vec<Option<usize>>>,
-    bc: DofReduction2D,
     /// Precomputed `full -> Option<reduced>` DOF map (BC reduction LUT).
     /// Built once in `new`; `target_dof` is O(1), `apply_bc` is O(nnz).
     dof_lut: Vec<Option<usize>>,
@@ -62,8 +80,7 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     /// periodic identification).  Distinct from `dof_lut.len()` when BCs
     /// identify boundary dofs.
     n_reduced: usize,
-    /// (x, y) position of each full GLL nodal DOF, used to build the periodic
-    /// identification LUT and to expose `dof_positions()`.
+    /// (x, y) position of each full GLL nodal DOF.
     dof_xy: Vec<(f64, f64)>,
     metadata: MeshMetadata,
 }
@@ -193,7 +210,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                 .expect("GLL basis dof has no nodal quadrature point");
         }
         let cell_data = CellData {
-            pts,
             wts,
             npts,
             table,
@@ -210,40 +226,165 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             "every GLL dof must have a physical coordinate"
         );
 
-        // --- DOF reduction LUT (full dof -> Option<reduced>).  Three cases:
-        //   * `Periodic` -- identify every GLL node by snapped XY position
-        //     (left<->right, top<->bottom).
-        //   * `None` -- retain all dofs.
-        //   * `Dirichlet { facets_to_eliminate }` -- eliminate every closure
-        //     DOF on those boundary facets (`None` in the LUT), keep the rest
-        //     contiguously-indexed.
-        use std::collections::HashMap;
         let (dof_lut, n_reduced) = match &bc {
-            DofReduction2D::Periodic => {
-                const EPS: f64 = 1e-9;
-                let snap = |c: f64| -> i64 {
-                    let s = if c < EPS || c > 1.0 - EPS { 0.0 } else { c };
-                    (s * 1e9).round() as i64
-                };
-                let mut canonical: HashMap<(i64, i64), usize> = HashMap::new();
-                let mut canonical_dof = vec![0; n];
-                for full in 0..n {
-                    let (x, y) = dof_xy[full];
-                    let key = (snap(x), snap(y));
-                    canonical_dof[full] = *canonical.entry(key).or_insert(full);
+            DofReduction2D::Periodic {
+                facet_pairs,
+                tolerance,
+            } => {
+                assert!(
+                    tolerance.is_finite() && *tolerance > 0.0,
+                    "periodic tolerance must be finite and positive"
+                );
+                assert!(
+                    !facet_pairs.is_empty(),
+                    "periodic reduction requires at least one facet pair"
+                );
+                let mut paired_facets = std::collections::HashSet::new();
+                let mut equivalence = DisjointSet::new(n);
+
+                for &[source_facet, target_facet] in facet_pairs {
+                    assert_ne!(
+                        source_facet, target_facet,
+                        "periodic facets must be distinct"
+                    );
+                    assert!(
+                        paired_facets.insert(source_facet) && paired_facets.insert(target_facet),
+                        "a periodic facet may appear in only one pair"
+                    );
+
+                    let facet_endpoints = |facet_index: usize| -> [[f64; 2]; 2] {
+                        let facet = mesh
+                            .entity(ReferenceCellType::Interval, facet_index)
+                            .expect("periodic facet index out of range");
+                        let topology = facet.topology();
+                        let mut cells =
+                            topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
+                        assert!(
+                            cells.next().is_some() && cells.next().is_none(),
+                            "periodic facet {facet_index} must be a boundary interval"
+                        );
+                        let mut vertices = topology.sub_entity_iter(ReferenceCellType::Point);
+                        let endpoint = |vertex| {
+                            let point = mesh
+                                .entity(ReferenceCellType::Point, vertex)
+                                .expect("periodic facet endpoint out of range");
+                            let mut xy = [0.0; 2];
+                            point.geometry().points().next().unwrap().coords(&mut xy);
+                            xy
+                        };
+                        let endpoints = [
+                            endpoint(
+                                vertices
+                                    .next()
+                                    .expect("periodic facet has no first endpoint"),
+                            ),
+                            endpoint(
+                                vertices
+                                    .next()
+                                    .expect("periodic facet has no second endpoint"),
+                            ),
+                        ];
+                        assert!(
+                            vertices.next().is_none(),
+                            "periodic facet {facet_index} must have two endpoints"
+                        );
+                        endpoints
+                    };
+                    let source_endpoints = facet_endpoints(source_facet);
+                    let target_endpoints = facet_endpoints(target_facet);
+                    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                    assert!(
+                        distance(source_endpoints[0], source_endpoints[1]) > *tolerance,
+                        "periodic facet {source_facet} has zero length"
+                    );
+                    assert!(
+                        distance(target_endpoints[0], target_endpoints[1]) > *tolerance,
+                        "periodic facet {target_facet} has zero length"
+                    );
+                    let aligned = [
+                        target_endpoints[0][0] - source_endpoints[0][0],
+                        target_endpoints[0][1] - source_endpoints[0][1],
+                    ];
+                    let reversed = [
+                        target_endpoints[1][0] - source_endpoints[0][0],
+                        target_endpoints[1][1] - source_endpoints[0][1],
+                    ];
+                    let translation = if distance(
+                        [
+                            source_endpoints[1][0] + aligned[0],
+                            source_endpoints[1][1] + aligned[1],
+                        ],
+                        target_endpoints[1],
+                    ) <= *tolerance
+                    {
+                        aligned
+                    } else if distance(
+                        [
+                            source_endpoints[1][0] + reversed[0],
+                            source_endpoints[1][1] + reversed[1],
+                        ],
+                        target_endpoints[0],
+                    ) <= *tolerance
+                    {
+                        reversed
+                    } else {
+                        panic!(
+                            "periodic facets {source_facet} and {target_facet} are not related by a translation"
+                        );
+                    };
+
+                    let source_dofs = space
+                        .entity_closure_dofs(ReferenceCellType::Interval, source_facet)
+                        .unwrap();
+                    let target_dofs = space
+                        .entity_closure_dofs(ReferenceCellType::Interval, target_facet)
+                        .unwrap();
+                    assert_eq!(
+                        source_dofs.len(),
+                        target_dofs.len(),
+                        "periodic facets must have matching closure DOF counts"
+                    );
+                    let mut matched = vec![false; target_dofs.len()];
+                    for &source in source_dofs {
+                        let source_xy = dof_xy[source];
+                        let expected = (source_xy.0 + translation[0], source_xy.1 + translation[1]);
+                        // ponytail: p + 1 facet nodes make direct matching O(p^2); index only if p becomes large.
+                        let matches: Vec<_> = target_dofs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, &target)| {
+                                let target_xy = dof_xy[target];
+                                (target_xy.0 - expected.0).hypot(target_xy.1 - expected.1)
+                                    <= *tolerance
+                            })
+                            .collect();
+                        assert_eq!(
+                            matches.len(),
+                            1,
+                            "periodic source DOF {source} must match exactly one target DOF"
+                        );
+                        let (target_index, &target) = matches[0];
+                        assert!(
+                            !matched[target_index],
+                            "periodic target DOF {target} matched more than once"
+                        );
+                        matched[target_index] = true;
+                        equivalence.union(source, target);
+                    }
+                    assert!(
+                        matched.iter().all(|&used| used),
+                        "every periodic target DOF must be matched"
+                    );
                 }
-                let mut canonical_set: Vec<usize> =
-                    (0..n).filter(|&full| canonical_dof[full] == full).collect();
-                canonical_set.sort_unstable();
-                let mut reduced_index: HashMap<usize, usize> = HashMap::new();
-                for (i, &vi) in canonical_set.iter().enumerate() {
-                    reduced_index.insert(vi, i);
+                let canonical: Vec<_> = (0..n).map(|dof| equivalence.find(dof)).collect();
+                let canonical_set: Vec<_> = (0..n).filter(|&dof| canonical[dof] == dof).collect();
+                let mut reduced_index = vec![usize::MAX; n];
+                for (reduced, &full) in canonical_set.iter().enumerate() {
+                    reduced_index[full] = reduced;
                 }
-                let lut: Vec<Option<usize>> = (0..n)
-                    .map(|d| {
-                        let canon = canonical_dof[d];
-                        Some(reduced_index[&canon])
-                    })
+                let lut = canonical
+                    .into_iter()
+                    .map(|full| Some(reduced_index[full]))
                     .collect();
                 (lut, canonical_set.len())
             }
@@ -302,9 +443,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             family,
             p,
             cell_data,
-            cell_dofs,
             cell_reduced_dofs,
-            bc,
             dof_lut,
             n_reduced,
             dof_xy,
@@ -317,23 +456,30 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         self.dof_lut[full]
     }
 
+    pub fn mesh(&self) -> &M {
+        &self.mesh
+    }
+
+    pub fn family(&self) -> &LagrangeElementFamily<f64> {
+        &self.family
+    }
+
     /// Number of reduced dofs (post-BC) = count of unique canonical
     /// vertices after periodic identification.
     pub fn reduced_size(&self) -> usize {
         self.n_reduced
     }
 
-    /// (x, y) position of each reduced dof, in reduced-index order.
+    /// Representative (x, y) position of each reduced DOF, in reduced-index order.
     pub fn dof_positions(&self) -> Vec<(f64, f64)> {
         let nr = self.reduced_size();
         let mut out = vec![(f64::NAN, f64::NAN); nr];
-        // Snap x>1-eps and y>1-eps to 0 only under `Periodic`.
-        let do_snap = matches!(self.bc, DofReduction2D::Periodic);
-        let snap = |c: f64| if do_snap && c > 1.0 - 1e-9 { 0.0 } else { c };
         for full in 0..self.dof_lut.len() {
             if let Some(r) = self.dof_lut[full] {
                 let (x, y) = self.dof_xy[full];
-                out[r] = (snap(x), snap(y));
+                if out[r].0.is_nan() {
+                    out[r] = (x, y);
+                }
             }
         }
         debug_assert!(out.iter().all(|(x, y)| !x.is_nan() && !y.is_nan()));
@@ -366,25 +512,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         ndofs: usize,
         grads: &'a [f64],
     ) -> LocalCtx<'a> {
-        let cd = &self.cell_data;
-        let npts = cd.npts;
-        let gdim = self.mesh.geometry_dim();
-        let tdim = self.mesh.topology_dim();
-        LocalCtx {
+        cell_ctx(
+            &self.cell_data,
+            &self.metadata,
+            self.mesh.topology_dim(),
+            self.mesh.geometry_dim(),
             time,
-            cell: self.metadata.cell(cell_index),
-            tdim,
-            gdim,
-            ncomp: 1,
-            npts,
+            cell_index,
             ndofs,
-            wts: &cd.wts,
-            jdets: &cd.jdets_cache[cell_index * npts..(cell_index + 1) * npts],
-            points: &cd.physical_points_cache
-                [cell_index * npts * gdim..(cell_index + 1) * npts * gdim],
-            values: &cd.reference_values,
-            grads: &grads[..ndofs * gdim * npts],
-        }
+            grads,
+        )
     }
 
     fn prepare_cell_ctx<'a>(
@@ -408,32 +545,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         values: &'a mut [f64],
         field_grads: &'a mut [f64],
     ) -> CellState<'a> {
-        let cd = &self.cell_data;
-        let npts = cd.npts;
-        let gdim = self.mesh.geometry_dim();
-        let n = self.reduced_size();
-        values[..nfields * npts].fill(0.0);
-        field_grads[..nfields * gdim * npts].fill(0.0);
-        for field in 0..nfields {
-            for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
-                let coefficient = reduced.map_or(0.0, |i| state[(field * n + i, 0)]);
-                for q in 0..npts {
-                    values[field * npts + q] +=
-                        coefficient * cd.reference_values[local_i * npts + q];
-                    for gd in 0..gdim {
-                        field_grads[(field * gdim + gd) * npts + q] +=
-                            coefficient * basis_grads[(local_i * gdim + gd) * npts + q];
-                    }
-                }
-            }
-        }
-        CellState {
+        interpolate_cell_state(
+            &self.cell_data,
+            self.mesh.geometry_dim(),
+            self.reduced_size(),
             nfields,
-            npts,
-            gdim,
-            values: &values[..nfields * npts],
-            grads: &field_grads[..nfields * gdim * npts],
-        }
+            reduced_dofs,
+            state,
+            basis_grads,
+            values,
+            field_grads,
+        )
     }
 
     /// Assemble the positive weak spatial residual `R(U)` of a state-aware
@@ -460,9 +582,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let cd = &self.cell_data;
         let local_stride = nfields * cd.ndofs;
         let batches: Vec<Vec<f64>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -473,13 +594,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                         vec![0.0; local_stride],
                     )
                 },
-                |(basis_grads, field_values, field_grads, local),
-                 (batch_index, (dofs_batch, reduced_batch))| {
-                    let mut batch = vec![0.0; dofs_batch.len() * local_stride];
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
+                    let mut batch = vec![0.0; reduced_batch.len() * local_stride];
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -518,17 +636,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                 .iter()
                 .enumerate()
             {
-                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                let ndofs = reduced_dofs.len();
                 let cell_size = nfields * ndofs;
                 let local =
                     &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
-                for field in 0..nfields {
-                    for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                        if let Some(reduced_i) = reduced_i {
-                            residual[field * n + reduced_i] += local[field * ndofs + local_i];
-                        }
-                    }
-                }
+                scatter_local_vector(&mut residual, local, reduced_dofs, nfields, n);
             }
         }
         residual
@@ -584,9 +696,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -597,14 +708,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                         vec![0.0; local_size * local_size],
                     )
                 },
-                |(basis_grads, field_values, field_grads, local),
-                 (batch_index, (dofs_batch, reduced_batch))| {
+                |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -633,29 +741,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                             &state_cell,
                             &mut local[..cell_size * cell_size],
                         );
-                        for equation in 0..nfields {
-                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                                let Some(reduced_i) = reduced_i else {
-                                    continue;
-                                };
-                                for unknown in 0..nfields {
-                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                                        if let Some(reduced_j) = reduced_j {
-                                            let row = equation * ndofs + ti;
-                                            let col = unknown * ndofs + si;
-                                            let value = local[row * cell_size + col];
-                                            if value != 0.0 {
-                                                triplets.push(Triplet::new(
-                                                    equation * n + reduced_i,
-                                                    unknown * n + reduced_j,
-                                                    value,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        push_local_matrix_triplets(
+                            &mut triplets,
+                            &local[..cell_size * cell_size],
+                            reduced_dofs,
+                            nfields,
+                            n,
+                            |value| value != 0.0,
+                        );
                     }
                     triplets
                 },
@@ -721,9 +814,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let ncols = direction.ncols();
         let action_stride = local_size * ncols;
         let batches: Vec<Vec<f64>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -736,12 +828,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                     )
                 },
                 |(basis_grads, field_values, field_grads, local_direction, local_action),
-                 (batch_index, (dofs_batch, reduced_batch))| {
-                    let mut batch = vec![0.0; dofs_batch.len() * action_stride];
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                 (batch_index, reduced_batch)| {
+                    let mut batch = vec![0.0; reduced_batch.len() * action_stride];
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         self.populate_cell_grads(
@@ -794,7 +884,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                 .iter()
                 .enumerate()
             {
-                let ndofs = self.cell_dofs[cell_start + cell_offset].len();
+                let ndofs = reduced_dofs.len();
                 for column in 0..ncols {
                     let start = cell_offset * action_stride + column * local_size;
                     let local = &batch[start..start + nfields * ndofs];
@@ -862,9 +952,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let local_size = nfields * max_ndofs;
         let npts = cd.npts;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_dofs
+            .cell_reduced_dofs
             .par_chunks(CELL_BATCH_SIZE)
-            .zip(self.cell_reduced_dofs.par_chunks(CELL_BATCH_SIZE))
             .enumerate()
             .map_init(
                 || {
@@ -873,13 +962,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                         vec![0.0_f64; local_size * local_size],
                     )
                 },
-                |(grads_buf, local_mat), (batch_index, (dofs_batch, reduced_batch))| {
+                |(grads_buf, local_mat), (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(dofs_batch.len() * local_size * local_size);
-                    for (cell_offset, (dofs, reduced_dofs)) in
-                        dofs_batch.iter().zip(reduced_batch).enumerate()
-                    {
-                        let ndofs = dofs.len();
+                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
+                        let ndofs = reduced_dofs.len();
                         debug_assert!(ndofs == cd.ndofs, "ndofs mismatch: cell vs CellData");
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
@@ -893,30 +980,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                         mat_slice.fill(0.0);
                         kernel.assemble_local(&ctx, mat_slice);
 
-                        for equation in 0..nfields {
-                            for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
-                                let Some(reduced_i) = reduced_i else {
-                                    continue;
-                                };
-                                for unknown in 0..nfields {
-                                    for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
-                                        let Some(reduced_j) = reduced_j else {
-                                            continue;
-                                        };
-                                        let row = equation * ndofs + ti;
-                                        let col = unknown * ndofs + si;
-                                        let entry = mat_slice[row * cell_size + col];
-                                        if entry.abs() > 1e-12 {
-                                            triplets.push(Triplet::new(
-                                                equation * n + reduced_i,
-                                                unknown * n + reduced_j,
-                                                entry,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        push_local_matrix_triplets(
+                            &mut triplets,
+                            mat_slice,
+                            reduced_dofs,
+                            nfields,
+                            n,
+                            |value| value.abs() > 1e-12,
+                        );
                     }
                     triplets
                 },
@@ -960,23 +1031,18 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let mut local_rhs = vec![0.0_f64; nfields * cd.ndofs];
         let mut rhs = vec![0.0_f64; nfields * n];
 
-        for (c, (dofs, reduced_dofs)) in self
-            .cell_dofs
-            .iter()
-            .zip(&self.cell_reduced_dofs)
-            .enumerate()
-        {
-            let ndofs = dofs.len();
+        for (c, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
+            let ndofs = reduced_dofs.len();
             let npts = cd.npts;
             let ctx = self.prepare_cell_ctx(time, c, ndofs, &mut grads_buf[..ndofs * gdim * npts]);
             kernel.assemble_local_rhs(&ctx, &mut local_rhs[..nfields * ndofs]);
-            for field in 0..nfields {
-                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
-                    if let Some(reduced_i) = reduced_i {
-                        rhs[field * n + reduced_i] += local_rhs[field * ndofs + local_i];
-                    }
-                }
-            }
+            scatter_local_vector(
+                &mut rhs,
+                &local_rhs[..nfields * ndofs],
+                reduced_dofs,
+                nfields,
+                n,
+            );
         }
         rhs
     }
@@ -992,27 +1058,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
 
     /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.
     pub fn assemble_system_lumped_mass(&self, nfields: usize) -> SparseColMat<usize, f64> {
-        assert!(nfields > 0, "mass requires at least one field");
-        let n = self.reduced_size();
-        let cd = &self.cell_data;
-        let mut triplets = Vec::with_capacity(self.cell_dofs.len() * cd.ndofs * nfields);
-        for field in 0..nfields {
-            for (cell, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
-                for (local_dof, &reduced) in reduced_dofs.iter().enumerate() {
-                    if let Some(reduced) = reduced {
-                        let q = cd.nodal_quadrature[local_dof];
-                        let index = field * n + reduced;
-                        triplets.push(Triplet::new(
-                            index,
-                            index,
-                            cd.wts[q] * cd.jdets_cache[cell * cd.npts + q],
-                        ));
-                    }
-                }
-            }
-        }
-        let system_size = nfields * n;
-        SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
+        assemble_lumped_mass(
+            &self.cell_data,
+            &self.cell_reduced_dofs,
+            self.reduced_size(),
+            nfields,
+        )
     }
 
     /// Assemble the diagonal GLL mass matrix for one scalar field.
@@ -1031,7 +1082,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             &self.family,
             self.p,
             self.reduced_size(),
-            &self.metadata.facet_regions,
+            &self.metadata,
             0.0,
             |full| self.target_dof(full),
             select,
@@ -1047,7 +1098,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             &self.family,
             self.p,
             self.reduced_size(),
-            &self.metadata.facet_regions,
+            &self.metadata,
             time,
             |full| self.target_dof(full),
             select,

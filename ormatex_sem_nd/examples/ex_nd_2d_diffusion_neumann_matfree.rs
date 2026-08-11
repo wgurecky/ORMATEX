@@ -3,52 +3,35 @@
 use faer::prelude::*;
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{shapes::unit_square, SingleElementMesh};
-use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::IntegrateSys;
-use ormatex::tableau_implicit::ImplicitBT;
-use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem};
-
+#[path = "support/diffusion_neumann.rs"]
+mod diffusion_neumann;
+#[path = "support/linear_system.rs"]
+mod linear_system;
 #[path = "support/matrix_free.rs"]
 mod matrix_free;
+use diffusion_neumann::{diffusion_neumann_problem, unit_square_neumann_robin_boundary};
+use linear_system::implicit_euler_final_state;
 use matrix_free::{JacobianBackend, ResidualDiffusionNeumannSys};
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
 fn main() {
     let mesh: QuadMesh = unit_square(32, 2, ReferenceCellType::Quadrilateral);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
-    let mass = problem.assemble_lumped_mass();
-    let neumann = NeumannFlux::new(1.0);
-    let robin = RobinConvection::new(0.1, 0.0);
-    let boundary = problem.assemble_boundary(|facet| {
-        const EPS: f64 = 1e-9;
-        if facet.midpoint[0] < EPS {
-            Some(&neumann)
-        } else if facet.midpoint[0] > 1.0 - EPS {
-            Some(&robin)
-        } else {
-            None
-        }
-    });
+    let (problem, mass, kernel) =
+        diffusion_neumann_problem(mesh, 2, ormatex_sem_nd::MeshMetadata::default());
+    let boundary = unit_square_neumann_robin_boundary(&problem);
     let system = ResidualDiffusionNeumannSys::new(
         &problem,
         mass,
-        KernelAdvDiff2D::new(0.1, [0.0, 0.0]),
+        kernel,
         boundary.mat,
         boundary.rhs,
         JacobianBackend::MatrixFree,
     );
 
     let n = problem.reduced_size();
-    let mut y = Mat::<f64>::zeros(n, 1);
-    let mut solver =
-        DirkIntegrator::new(0.0, y.as_ref(), ImplicitBT::implicit_euler(), 1e-10, 1e-10);
-    for _ in 0..200 {
-        let step = solver.step(&system, 1.0).unwrap();
-        y = step.y.clone();
-        solver.accept_step(step);
-    }
-    assert!((solver.time() - 200.0).abs() < 1e-12);
+    let y0 = Mat::<f64>::zeros(n, 1);
+    let y = implicit_euler_final_state(&system, y0.as_ref(), 1.0, 200, 1e-10);
 
     let positions = problem.dof_positions();
     let mut max_error = 0.0_f64;

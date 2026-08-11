@@ -1,5 +1,6 @@
 //! Shared finite-element contexts and geometry assembly infrastructure.
 
+use faer::prelude::MatRef;
 use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{
     ciarlet::LagrangeElementFamily,
@@ -12,21 +13,164 @@ use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rlst::{rlst_dynamic_array, DynArray};
 
 use crate::kernels::kernel_common::BoundaryIntegrator;
-use crate::material::{CellMeta, FacetMeta, MaterialContext};
+use crate::material::{CellMeta, FacetMeta, MaterialContext, MeshMetadata};
+
+// ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
+pub(crate) const CELL_BATCH_SIZE: usize = 32;
 
 /// Cached per-cell-type quadrature, basis tabulation, and geometry data.
-pub struct CellData {
-    pub wts: Vec<f64>,
-    pub npts: usize,
-    pub ndofs: usize,
-    pub table: DynArray<f64, 4>,
-    pub reference_values: Vec<f64>,
-    pub nodal_quadrature: Vec<usize>,
-    pub jinv_cache: DynArray<f64, 4>,
-    pub jdets_cache: Vec<f64>,
-    pub physical_points_cache: Vec<f64>,
-    #[allow(dead_code)]
-    pub pts: DynArray<f64, 2>,
+pub(crate) struct CellData {
+    pub(crate) wts: Vec<f64>,
+    pub(crate) npts: usize,
+    pub(crate) ndofs: usize,
+    pub(crate) table: DynArray<f64, 4>,
+    pub(crate) reference_values: Vec<f64>,
+    pub(crate) nodal_quadrature: Vec<usize>,
+    pub(crate) jinv_cache: DynArray<f64, 4>,
+    pub(crate) jdets_cache: Vec<f64>,
+    pub(crate) physical_points_cache: Vec<f64>,
+}
+
+pub(crate) fn cell_ctx<'a>(
+    cell_data: &'a CellData,
+    metadata: &'a MeshMetadata,
+    tdim: usize,
+    gdim: usize,
+    time: f64,
+    cell_index: usize,
+    ndofs: usize,
+    grads: &'a [f64],
+) -> LocalCtx<'a> {
+    let npts = cell_data.npts;
+    LocalCtx {
+        time,
+        cell: metadata.cell(cell_index),
+        tdim,
+        gdim,
+        ncomp: 1,
+        npts,
+        ndofs,
+        wts: &cell_data.wts,
+        jdets: &cell_data.jdets_cache[cell_index * npts..(cell_index + 1) * npts],
+        points: &cell_data.physical_points_cache
+            [cell_index * npts * gdim..(cell_index + 1) * npts * gdim],
+        values: &cell_data.reference_values,
+        grads: &grads[..ndofs * gdim * npts],
+    }
+}
+
+pub(crate) fn interpolate_cell_state<'a>(
+    cell_data: &CellData,
+    gdim: usize,
+    n_reduced: usize,
+    nfields: usize,
+    reduced_dofs: &[Option<usize>],
+    state: MatRef<'_, f64>,
+    basis_grads: &[f64],
+    values: &'a mut [f64],
+    field_grads: &'a mut [f64],
+) -> CellState<'a> {
+    let npts = cell_data.npts;
+    values[..nfields * npts].fill(0.0);
+    field_grads[..nfields * gdim * npts].fill(0.0);
+    for field in 0..nfields {
+        for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
+            let coefficient = reduced.map_or(0.0, |i| state[(field * n_reduced + i, 0)]);
+            for q in 0..npts {
+                values[field * npts + q] +=
+                    coefficient * cell_data.reference_values[local_i * npts + q];
+                for gd in 0..gdim {
+                    field_grads[(field * gdim + gd) * npts + q] +=
+                        coefficient * basis_grads[(local_i * gdim + gd) * npts + q];
+                }
+            }
+        }
+    }
+    CellState {
+        nfields,
+        npts,
+        gdim,
+        values: &values[..nfields * npts],
+        grads: &field_grads[..nfields * gdim * npts],
+    }
+}
+
+pub(crate) fn scatter_local_vector(
+    out: &mut [f64],
+    local: &[f64],
+    reduced_dofs: &[Option<usize>],
+    nfields: usize,
+    n_reduced: usize,
+) {
+    let ndofs = reduced_dofs.len();
+    for field in 0..nfields {
+        for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+            if let Some(reduced_i) = reduced_i {
+                out[field * n_reduced + reduced_i] += local[field * ndofs + local_i];
+            }
+        }
+    }
+}
+
+pub(crate) fn push_local_matrix_triplets(
+    triplets: &mut Vec<Triplet<usize, usize, f64>>,
+    local: &[f64],
+    reduced_dofs: &[Option<usize>],
+    nfields: usize,
+    n_reduced: usize,
+    keep: impl Fn(f64) -> bool,
+) {
+    let ndofs = reduced_dofs.len();
+    let local_size = nfields * ndofs;
+    for equation in 0..nfields {
+        for (ti, &reduced_i) in reduced_dofs.iter().enumerate() {
+            let Some(reduced_i) = reduced_i else {
+                continue;
+            };
+            for unknown in 0..nfields {
+                for (si, &reduced_j) in reduced_dofs.iter().enumerate() {
+                    let Some(reduced_j) = reduced_j else {
+                        continue;
+                    };
+                    let value = local[(equation * ndofs + ti) * local_size + unknown * ndofs + si];
+                    if keep(value) {
+                        triplets.push(Triplet::new(
+                            equation * n_reduced + reduced_i,
+                            unknown * n_reduced + reduced_j,
+                            value,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn assemble_lumped_mass(
+    cell_data: &CellData,
+    cell_reduced_dofs: &[Vec<Option<usize>>],
+    n_reduced: usize,
+    nfields: usize,
+) -> SparseColMat<usize, f64> {
+    assert!(nfields > 0, "mass requires at least one field");
+    let mut triplets = Vec::with_capacity(cell_reduced_dofs.len() * cell_data.ndofs * nfields);
+    for field in 0..nfields {
+        for (cell, reduced_dofs) in cell_reduced_dofs.iter().enumerate() {
+            for (local_dof, &reduced) in reduced_dofs.iter().enumerate() {
+                if let Some(reduced) = reduced {
+                    let q = cell_data.nodal_quadrature[local_dof];
+                    let index = field * n_reduced + reduced;
+                    triplets.push(Triplet::new(
+                        index,
+                        index,
+                        cell_data.wts[q] * cell_data.jdets_cache[cell * cell_data.npts + q],
+                    ));
+                }
+            }
+        }
+    }
+    let system_size = nfields * n_reduced;
+    SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
 }
 
 /// Per-cell assembly context with physical basis values and gradients.
@@ -151,7 +295,7 @@ pub(crate) fn assemble_quad_boundaries<'a, M, D, F>(
     family: &LagrangeElementFamily<f64>,
     p: usize,
     reduced_size: usize,
-    facet_metadata: &[Option<crate::material::PhysicalRegion>],
+    metadata: &MeshMetadata,
     time: f64,
     target_dof: D,
     mut select_kernel: F,
@@ -207,7 +351,7 @@ where
         let Some(kernel) = select_kernel(BoundaryFacet {
             index: facet_index,
             midpoint,
-            physical_region: facet_metadata.get(facet_index).copied().flatten(),
+            physical_region: metadata.facet(facet_index).physical_region,
         }) else {
             continue;
         };
@@ -308,10 +452,7 @@ where
         }
         let ctx = FacetCtx {
             time,
-            facet: FacetMeta {
-                local_index: facet_index,
-                physical_region: facet_metadata.get(facet_index).copied().flatten(),
-            },
+            facet: metadata.facet(facet_index),
             tdim: 1,
             gdim: 2,
             ncomp: 1,

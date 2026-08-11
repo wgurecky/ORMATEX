@@ -161,7 +161,7 @@ fn dirichlet_eliminates_selected_endpoint() {
 #[test]
 fn periodic_identifies_selected_endpoints() {
     let problem = SEM1DProblem::new(mesh(2), 2, DofReduction1D::Periodic { facets: [0, 2] });
-    let space = FunctionSpaceImpl::new(&problem.mesh, &problem.family);
+    let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
     let left = space
         .entity_closure_dofs(ReferenceCellType::Point, 0)
         .unwrap()[0];

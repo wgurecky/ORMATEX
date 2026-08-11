@@ -1,17 +1,19 @@
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::prelude::*;
+use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{shapes::unit_square, SingleElementMesh};
-use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
-use ormatex::tableau_implicit::ImplicitBT;
+use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem};
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
 
+#[path = "../examples/support/linear_system.rs"]
+mod linear_system;
 #[path = "../examples/support/matrix_free.rs"]
 mod matrix_free;
-use matrix_free::{sparse_add, JacobianBackend, ResidualDiffusionNeumannSys};
+use linear_system::{implicit_euler_final_state, sparse_add, LinearOdeSys};
+use matrix_free::{JacobianBackend, ResidualDiffusionNeumannSys};
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
@@ -70,15 +72,8 @@ fn run_case(backend: JacobianBackend, nsteps: usize) -> Mat<f64> {
         boundary.rhs,
         backend,
     );
-    let mut y = Mat::<f64>::zeros(n, 1);
-    let mut solver =
-        DirkIntegrator::new(0.0, y.as_ref(), ImplicitBT::implicit_euler(), 1e-10, 1e-10);
-    for _ in 0..nsteps {
-        let step = solver.step(&system, 1.0).unwrap();
-        y = step.y.clone();
-        solver.accept_step(step);
-    }
-    y
+    let y0 = Mat::<f64>::zeros(n, 1);
+    implicit_euler_final_state(&system, y0.as_ref(), 1.0, nsteps, 1e-10)
 }
 
 #[test]
@@ -125,6 +120,15 @@ fn matrix_free_backward_euler_matches_assembled_backend() {
     for row in 0..matrix_free.nrows() {
         assert!((matrix_free[(row, 0)] - assembled[(row, 0)]).abs() < 1e-8);
     }
+}
+
+#[test]
+fn linear_ode_system_applies_source_with_positive_sign() {
+    let mass = SparseColMat::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 2.0)]).unwrap();
+    let operator = SparseColMat::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 4.0)]).unwrap();
+    let system = LinearOdeSys::new(mass, operator, vec![3.0]);
+    let state = Mat::from_fn(1, 1, |_, _| 2.0);
+    assert_eq!(system.frhs(0.0, state.as_ref())[(0, 0)], -2.5);
 }
 
 #[test]

@@ -15,7 +15,7 @@ use ormatex_sem_nd::{
 
 #[path = "support/linear_system.rs"]
 mod linear_system;
-use linear_system::AdvDiffSys;
+use linear_system::LinearOdeSys;
 
 fn main() {
     let nx = 64;
@@ -59,7 +59,7 @@ fn main() {
             < 1e-12
     );
 
-    let system = AdvDiffSys::new(mass, operator);
+    let system = LinearOdeSys::new(mass, operator, vec![0.0; n]);
     let ones = Mat::<f64>::from_fn(n, 1, |_, _| 1.0);
     assert!(
         (0..n)

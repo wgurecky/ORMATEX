@@ -25,7 +25,10 @@ pub struct FacetMeta {
     pub physical_region: Option<PhysicalRegion>,
 }
 
-/// Optional mesh metadata used by external coefficients and boundary kernels.
+/// Optional mesh metadata indexed by mesh-local entity index.
+///
+/// Empty region vectors mean no region metadata. Nonempty vectors must follow
+/// the `local_index()` ordering of the corresponding mesh entity type.
 #[derive(Clone, Debug, Default)]
 pub struct MeshMetadata {
     pub cell_regions: Vec<Option<PhysicalRegion>>,
@@ -61,6 +64,9 @@ impl MeshMetadata {
 }
 
 /// All information available while evaluating a coefficient at one point.
+///
+/// `state` is absent during state-independent bilinear assembly. Coefficients
+/// that require state therefore belong in residual assembly, not a bilinear form.
 pub struct MaterialContext<'a> {
     pub time: f64,
     pub point: &'a [f64],
@@ -75,6 +81,10 @@ pub trait Coefficient<T>: Send + Sync {
 }
 
 /// A coefficient with derivatives needed by nonlinear residual Jacobians.
+///
+/// `derivative(ctx, field)` is the derivative with respect to the point value
+/// of `state.value(field, ctx.q)`. Returning `None` freezes that coefficient
+/// with a zero derivative. Gradient-dependent material laws are not supported.
 pub trait MaterialProperty<T>: Coefficient<T> {
     fn derivative(&self, _ctx: &MaterialContext<'_>, _solution_field: usize) -> Option<T> {
         None

@@ -2,34 +2,45 @@ use std::fs::File;
 use std::io::Write;
 
 use faer::prelude::*;
-use faer::sparse::{SparseColMat, SparseColMatRef, Triplet};
+use faer::sparse::SparseColMat;
 use ndelement::types::ReferenceCellType;
-use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
-use ormatex::tableau_implicit::ImplicitBT;
+use ndmesh::traits::Mesh;
 use ormatex_sem_nd::{
-    BoundaryContributions, DofReduction2D, KernelAdvDiff2D, MeshMetadata, SEM2DProblem,
+    BoundaryContributions, BoundaryFacet, DofReduction2D, KernelAdvDiff2D, MeshMetadata,
+    NeumannFlux, RobinConvection, SEM2DProblem,
 };
 
-use super::linear_system::MinvKLinOp;
+use super::linear_system::{implicit_euler_final_state, sparse_add, LinearOdeSys};
 
-fn sparse_add(
-    a: SparseColMatRef<'_, usize, f64>,
-    b: SparseColMatRef<'_, usize, f64>,
-) -> SparseColMat<usize, f64> {
-    let n = a.nrows();
-    let mut triplets = Vec::new();
-    for mat in [a, b] {
-        let (symbolic, values) = mat.parts();
-        let columns = symbolic.col_ptr();
-        let rows = symbolic.row_idx();
-        for column in 0..n {
-            for entry in columns[column]..columns[column + 1] {
-                triplets.push(Triplet::new(rows[entry], column, values[entry]));
-            }
+pub fn diffusion_neumann_problem<M>(
+    mesh: M,
+    p: usize,
+    metadata: MeshMetadata,
+) -> (SEM2DProblem<M>, SparseColMat<usize, f64>, KernelAdvDiff2D)
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+{
+    let problem = SEM2DProblem::new_with_metadata(mesh, p, DofReduction2D::None, metadata);
+    let mass = problem.assemble_lumped_mass();
+    (problem, mass, KernelAdvDiff2D::new(0.1, [0.0, 0.0]))
+}
+
+pub fn unit_square_neumann_robin_boundary<M>(problem: &SEM2DProblem<M>) -> BoundaryContributions
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+{
+    let neumann = NeumannFlux::new(1.0);
+    let robin = RobinConvection::new(0.1, 0.0);
+    problem.assemble_boundary(|facet: BoundaryFacet| {
+        const EPS: f64 = 1e-9;
+        if facet.midpoint[0] < EPS {
+            Some(&neumann)
+        } else if facet.midpoint[0] > 1.0 - EPS {
+            Some(&robin)
+        } else {
+            None
         }
-    }
-    SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+    })
 }
 
 pub fn run_diffusion_neumann<M, F>(
@@ -63,31 +74,24 @@ pub fn run_diffusion_neumann_with_metadata<M, F>(
     M: ndmesh::traits::Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     F: FnOnce(&SEM2DProblem<M>) -> BoundaryContributions,
 {
-    let k = 0.1;
     let q_left = 1.0;
+    let k = 0.1;
     let h = 0.1;
     let t_amb = 0.0;
     let dt = 1.0;
     let nsteps = 200;
     println!("\n=== {label} (p={p}) ===");
 
-    let problem = SEM2DProblem::new_with_metadata(mesh, p, DofReduction2D::None, metadata);
+    let (problem, mass, kernel) = diffusion_neumann_problem(mesh, p, metadata);
     let n = problem.reduced_size();
-    let k_diff = problem.assemble_bilinear(&KernelAdvDiff2D::new(k, [0.0, 0.0]));
-    let mass = problem.assemble_lumped_mass();
+    let k_diff = problem.assemble_bilinear(&kernel);
     let boundary = assemble_boundary(&problem);
     let b = boundary.rhs;
     let k_eff = sparse_add(k_diff.as_ref(), boundary.mat.as_ref());
 
-    let system = DiffusionNeumannSys::new(mass, k_eff, b);
-    let mut y = Mat::<f64>::zeros(n, 1);
-    let mut solver =
-        DirkIntegrator::new(0.0, y.as_ref(), ImplicitBT::implicit_euler(), 1e-10, 1e-10);
-    for _ in 0..nsteps {
-        let step = solver.step(&system, dt).unwrap();
-        y = step.y.clone();
-        solver.accept_step(step);
-    }
+    let system = LinearOdeSys::new(mass, k_eff, b);
+    let y0 = Mat::<f64>::zeros(n, 1);
+    let y = implicit_euler_final_state(&system, y0.as_ref(), dt, nsteps, 1e-10);
 
     let positions = problem.dof_positions();
     let slope = -q_left / k;
@@ -111,55 +115,5 @@ pub fn run_diffusion_neumann_with_metadata<M, F>(
             y[(row, 0)]
         )
         .unwrap();
-    }
-}
-
-struct DiffusionNeumannSys {
-    k_eff: SparseColMat<usize, f64>,
-    m_inv: Vec<f64>,
-    b: Vec<f64>,
-}
-
-impl DiffusionNeumannSys {
-    fn new(mass: SparseColMat<usize, f64>, k_eff: SparseColMat<usize, f64>, b: Vec<f64>) -> Self {
-        let n = k_eff.nrows();
-        assert_eq!(k_eff.ncols(), n);
-        assert_eq!(mass.nrows(), n);
-        assert_eq!(mass.ncols(), n);
-        assert_eq!(b.len(), n);
-        assert_eq!(
-            mass.compute_nnz(),
-            n,
-            "expected lumped diagonal mass matrix"
-        );
-        let m_inv = (0..n)
-            .map(|i| {
-                let value = mass[(i, i)];
-                assert!(value.abs() > 1e-30, "zero mass diagonal at {i}");
-                1.0 / value
-            })
-            .collect();
-        Self { k_eff, m_inv, b }
-    }
-}
-
-impl<'a> OdeSys<'a> for DiffusionNeumannSys {
-    fn frhs(&self, _t: f64, x: MatRef<f64>) -> Mat<f64> {
-        let kx = self.k_eff.as_ref() * x;
-        Mat::from_fn(x.nrows(), x.ncols(), |row, column| {
-            -self.m_inv[row] * kx[(row, column)] + self.m_inv[row] * self.b[row]
-        })
-    }
-
-    fn fjac<'b>(
-        &'a self,
-        _t: f64,
-        x: MatRef<'b, f64>,
-    ) -> Box<dyn faer::matrix_free::LinOp<f64> + 'a> {
-        let _ = x;
-        Box::new(MinvKLinOp {
-            k: self.k_eff.as_ref(),
-            m_inv: &self.m_inv,
-        })
     }
 }
