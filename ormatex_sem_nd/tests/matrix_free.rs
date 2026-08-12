@@ -22,7 +22,7 @@ fn build_problem() -> (
     faer::sparse::SparseColMat<usize, f64>,
     ormatex_sem_nd::BoundaryContributions,
 ) {
-    let mesh = unit_square(32, 2, ReferenceCellType::Quadrilateral);
+    let mesh = unit_square(32, 2, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let mass = problem.assemble_lumped_mass();
     let neumann = NeumannFlux::new(1.0);
@@ -41,7 +41,7 @@ fn build_problem() -> (
 }
 
 fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat<f64>, Mat<f64>) {
-    let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral);
+    let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.25 + i as f64 / n as f64);

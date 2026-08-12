@@ -11,7 +11,7 @@ use diffusion_neumann::{run_diffusion_neumann, unit_square_neumann_robin_boundar
 
 fn main() {
     let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> =
-        unit_square(32, 2, ReferenceCellType::Quadrilateral);
+        unit_square(32, 2, ReferenceCellType::Quadrilateral, 1);
     run_diffusion_neumann(
         "diffusion-neumann-robin",
         mesh,

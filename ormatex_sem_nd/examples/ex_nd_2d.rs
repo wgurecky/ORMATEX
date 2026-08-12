@@ -18,7 +18,7 @@ use linear_system::{implicit_euler_final_state, LinearOdeSys};
 
 fn main() {
     let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> =
-        unit_square(32, 2, ReferenceCellType::Quadrilateral);
+        unit_square(32, 2, ReferenceCellType::Quadrilateral, 1);
     let facet_pairs = unit_square_periodic_pairs(&mesh);
     let problem = SEM2DProblem::new(
         mesh,

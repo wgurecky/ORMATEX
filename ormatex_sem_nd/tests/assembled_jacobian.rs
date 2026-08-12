@@ -8,7 +8,7 @@ use std::time::Instant;
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
 fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat<f64>) {
-    let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral);
+    let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.25 + i as f64 / n as f64);

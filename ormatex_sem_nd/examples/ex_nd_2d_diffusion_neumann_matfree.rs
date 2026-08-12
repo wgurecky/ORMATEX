@@ -16,7 +16,7 @@ use matrix_free::{JacobianBackend, ResidualDiffusionNeumannSys};
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
 fn main() {
-    let mesh: QuadMesh = unit_square(32, 2, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(32, 2, ReferenceCellType::Quadrilateral, 1);
     let (problem, mass, kernel) =
         diffusion_neumann_problem(mesh, 2, ormatex_sem_nd::MeshMetadata::default());
     let boundary = unit_square_neumann_robin_boundary(&problem);

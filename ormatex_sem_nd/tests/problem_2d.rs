@@ -190,7 +190,7 @@ impl ResidualKernel for CoupledReaction {
 
 #[test]
 fn dirichlet_eliminates_every_high_order_facet_dof() {
-    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let left_facet = mesh
         .entity_iter(ReferenceCellType::Interval)
         .find(|facet| {
@@ -222,14 +222,14 @@ fn dirichlet_eliminates_every_high_order_facet_dof() {
 
 #[test]
 fn volume_kernel_reads_physical_quadrature_points() {
-    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
 #[test]
 fn lumped_mass_matches_generic_gll_mass() {
-    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let facet_pairs = unit_square_periodic_pairs(&mesh);
     let problem = SEM2DProblem::new(
         mesh,
@@ -286,7 +286,7 @@ fn periodic_pairs_identify_translated_reversed_high_order_facets() {
 #[test]
 #[should_panic(expected = "not related by a translation")]
 fn periodic_pairs_reject_nontranslated_facets() {
-    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let pairs = unit_square_periodic_pairs(&mesh);
     SEM2DProblem::new(
         mesh,
@@ -301,7 +301,7 @@ fn periodic_pairs_reject_nontranslated_facets() {
 #[test]
 #[should_panic(expected = "must be a boundary interval")]
 fn periodic_pairs_reject_interior_facets() {
-    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let interior = mesh
         .entity_iter(ReferenceCellType::Interval)
         .find(|facet| {
@@ -326,7 +326,7 @@ fn periodic_pairs_reject_interior_facets() {
 
 #[test]
 fn boundary_kernel_reads_physical_quadrature_points() {
-    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let flux = YFlux;
     let boundary =
@@ -336,7 +336,7 @@ fn boundary_kernel_reads_physical_quadrature_points() {
 
 #[test]
 fn residual_kernel_jacobian_matches_directional_difference() {
-    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
@@ -354,7 +354,7 @@ fn residual_kernel_jacobian_matches_directional_difference() {
 
 #[test]
 fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
-    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let n = problem.reduced_size();
     let state = Mat::from_fn(2 * n, 1, |i, _| 0.2 + 0.02 * i as f64);
@@ -374,7 +374,7 @@ fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
 
 #[test]
 fn supg_2d_zero_tau_matches_advection_diffusion() {
-    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
     let plain = problem
         .assemble_bilinear(&KernelAdvDiff2D::new(0.1, [0.4, -0.2]))
@@ -399,7 +399,7 @@ fn region_coefficient_changes_2d_material_operator() {
         cell_regions: vec![Some(region)],
         ..MeshMetadata::default()
     };
-    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral);
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new_with_metadata(mesh, 2, DofReduction2D::None, metadata);
     let region_diffusion =
         RegionCoefficient::new(std::collections::HashMap::from([(region, 3.0)]), 1.0);
