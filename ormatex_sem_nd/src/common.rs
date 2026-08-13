@@ -31,6 +31,156 @@ pub(crate) struct CellData {
     pub(crate) physical_points_cache: Vec<f64>,
 }
 
+/// Maps full function-space DOFs to the reduced system.
+pub(crate) struct ReducedDofMap {
+    /// Full DOF -> reduced DOF. `Some(i)` retains a DOF at reduced index `i`;
+    /// `None` eliminates it. Multiple full DOFs may share one reduced index
+    /// when periodic DOFs are identified.
+    dof_lut: Vec<Option<usize>>,
+    prescribed_values: Vec<Option<f64>>,
+    n_reduced: usize,
+}
+
+impl ReducedDofMap {
+    pub(crate) fn identity(n: usize) -> Self {
+        Self {
+            dof_lut: (0..n).map(Some).collect(),
+            prescribed_values: vec![None; n],
+            n_reduced: n,
+        }
+    }
+
+    pub(crate) fn from_representatives(representatives: Vec<usize>) -> Self {
+        let n = representatives.len();
+        let mut representatives_in_order = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &representative in &representatives {
+            assert!(representative < n, "DOF representative out of range");
+            if seen.insert(representative) {
+                representatives_in_order.push(representative);
+            }
+        }
+        let mut reduced_index = vec![usize::MAX; n];
+        for (reduced, representative) in representatives_in_order.iter().enumerate() {
+            reduced_index[*representative] = reduced;
+        }
+        let dof_lut = representatives
+            .into_iter()
+            .map(|representative| Some(reduced_index[representative]))
+            .collect();
+        Self::new(dof_lut, vec![None; n], representatives_in_order.len())
+    }
+
+    pub(crate) fn from_dirichlet_values<I>(n: usize, values: I) -> Self
+    where
+        I: IntoIterator<Item = (usize, f64)>,
+    {
+        let mut prescribed_values: Vec<Option<f64>> = vec![None; n];
+        for (dof, value) in values {
+            assert!(dof < n, "Dirichlet DOF out of range");
+            assert!(value.is_finite(), "Dirichlet value must be finite");
+            if let Some(previous) = prescribed_values[dof] {
+                assert!(
+                    (previous - value).abs() <= 1e-12 * previous.abs().max(value.abs()).max(1.0),
+                    "conflicting Dirichlet values for DOF {dof}"
+                );
+            } else {
+                prescribed_values[dof] = Some(value);
+            }
+        }
+        let mut reduced = 0;
+        let dof_lut = prescribed_values
+            .iter()
+            .map(|value| {
+                if value.is_some() {
+                    None
+                } else {
+                    let index = Some(reduced);
+                    reduced += 1;
+                    index
+                }
+            })
+            .collect();
+        Self::new(dof_lut, prescribed_values, reduced)
+    }
+
+    fn new(
+        dof_lut: Vec<Option<usize>>,
+        prescribed_values: Vec<Option<f64>>,
+        n_reduced: usize,
+    ) -> Self {
+        assert_eq!(
+            dof_lut.len(),
+            prescribed_values.len(),
+            "DOF map and prescribed-value lengths must match"
+        );
+        let mut present = vec![false; n_reduced];
+        for (full, &reduced) in dof_lut.iter().enumerate() {
+            match reduced {
+                Some(reduced) => {
+                    assert!(reduced < n_reduced, "reduced DOF out of range");
+                    assert!(
+                        prescribed_values[full].is_none(),
+                        "retained DOF cannot have a prescribed value"
+                    );
+                    present[reduced] = true;
+                }
+                None => assert!(
+                    prescribed_values[full].is_some(),
+                    "eliminated DOF must have a prescribed value"
+                ),
+            }
+        }
+        assert!(
+            present.into_iter().all(|present| present),
+            "reduced DOF indices must be contiguous"
+        );
+        Self {
+            dof_lut,
+            prescribed_values,
+            n_reduced,
+        }
+    }
+
+    pub(crate) fn target(&self, full: usize) -> Option<usize> {
+        self.dof_lut[full]
+    }
+
+    pub(crate) fn full_size(&self) -> usize {
+        self.dof_lut.len()
+    }
+
+    pub(crate) fn reduced_size(&self) -> usize {
+        self.n_reduced
+    }
+
+    pub(crate) fn map_cells(
+        &self,
+        cell_dofs: &[Vec<usize>],
+    ) -> (Vec<Vec<Option<usize>>>, Vec<Vec<Option<f64>>>) {
+        let reduced = cell_dofs
+            .iter()
+            .map(|dofs| dofs.iter().map(|&dof| self.target(dof)).collect())
+            .collect();
+        let prescribed = cell_dofs
+            .iter()
+            .map(|dofs| {
+                dofs.iter()
+                    .map(|&dof| self.prescribed_values[dof])
+                    .collect()
+            })
+            .collect();
+        (reduced, prescribed)
+    }
+}
+
+/// Build a [`LocalCtx`] from cached data for one cell.
+///
+/// `cell_index` selects the cell metadata, Jacobian determinants, and physical
+/// quadrature points. `grads` must contain physical basis gradients in
+/// `[local_dof, geometric_direction, quadrature_point]` order for the first
+/// `ndofs` local basis functions. The returned context borrows both the cached
+/// data and `grads`.
 pub(crate) fn cell_ctx<'a>(
     cell_data: &'a CellData,
     metadata: &'a MeshMetadata,
@@ -59,23 +209,41 @@ pub(crate) fn cell_ctx<'a>(
     }
 }
 
+/// Interpolate a reduced global state and its physical gradients to cell
+/// quadrature points, including prescribed values for eliminated DOFs.
+///
+/// `reduced_dofs` maps each local basis function to a reduced global degree of
+/// freedom. An entry of `None` uses the matching `prescribed_values` entry.
+/// The state is field-major with row
+/// `field * n_reduced + reduced_dof` and must have one column. The output
+/// buffers use `values[field * npts + q]` and
+/// `field_grads[(field * gdim + gd) * npts + q]` layouts; the returned
+/// [`CellState`] borrows the initialized prefixes of those buffers.
 pub(crate) fn interpolate_cell_state<'a>(
     cell_data: &CellData,
     gdim: usize,
     n_reduced: usize,
     nfields: usize,
     reduced_dofs: &[Option<usize>],
+    prescribed_values: &[Option<f64>],
     state: MatRef<'_, f64>,
     basis_grads: &[f64],
     values: &'a mut [f64],
     field_grads: &'a mut [f64],
 ) -> CellState<'a> {
     let npts = cell_data.npts;
+    assert_eq!(
+        reduced_dofs.len(),
+        prescribed_values.len(),
+        "cell DOF maps must have matching lengths"
+    );
     values[..nfields * npts].fill(0.0);
     field_grads[..nfields * gdim * npts].fill(0.0);
     for field in 0..nfields {
         for (local_i, &reduced) in reduced_dofs.iter().enumerate() {
-            let coefficient = reduced.map_or(0.0, |i| state[(field * n_reduced + i, 0)]);
+            let coefficient = reduced.map_or(prescribed_values[local_i].unwrap_or(0.0), |i| {
+                state[(field * n_reduced + i, 0)]
+            });
             for q in 0..npts {
                 values[field * npts + q] +=
                     coefficient * cell_data.reference_values[local_i * npts + q];
@@ -95,6 +263,52 @@ pub(crate) fn interpolate_cell_state<'a>(
     }
 }
 
+/// Add the RHS correction caused by prescribed local DOF values.
+///
+/// For a local matrix `A` and prescribed values `u_b`, this appends
+/// `-A_fb * u_b` to the reduced free-DOF RHS. The prescribed values are used
+/// for every scalar field; scalar problems are the primary use case.
+pub(crate) fn add_dirichlet_rhs_correction(
+    rhs: &mut [f64],
+    local: &[f64],
+    reduced_dofs: &[Option<usize>],
+    prescribed_values: &[Option<f64>],
+    nfields: usize,
+    n_reduced: usize,
+) {
+    let ndofs = reduced_dofs.len();
+    let local_size = nfields * ndofs;
+    assert_eq!(
+        prescribed_values.len(),
+        ndofs,
+        "cell DOF map length mismatch"
+    );
+    for equation in 0..nfields {
+        for (test_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+            let Some(reduced_i) = reduced_i else {
+                continue;
+            };
+            let row = equation * ndofs + test_i;
+            for unknown in 0..nfields {
+                for (trial_i, &value) in prescribed_values.iter().enumerate() {
+                    let Some(value) = value else {
+                        continue;
+                    };
+                    let col = unknown * ndofs + trial_i;
+                    rhs[equation * n_reduced + reduced_i] -= local[row * local_size + col] * value;
+                }
+            }
+        }
+    }
+}
+
+/// Add a field-major local vector into a reduced global vector.
+///
+/// `local[field * ndofs + local_dof]` is accumulated into
+/// `out[field * n_reduced + reduced_dof]`. Entries whose reduced degree of
+/// freedom is `None` are omitted. This is an additive scatter, so shared or
+/// periodically identified degrees of freedom are combined by repeated
+/// additions.
 pub(crate) fn scatter_local_vector(
     out: &mut [f64],
     local: &[f64],
@@ -112,6 +326,14 @@ pub(crate) fn scatter_local_vector(
     }
 }
 
+/// Append selected entries of a field-major local matrix as global triplets.
+///
+/// The local matrix is row-major with field-major rows and columns: a row is
+/// `equation * ndofs + test_dof`, and a column is
+/// `unknown * ndofs + trial_dof`. Reduced degrees of freedom mapped to
+/// `None` are omitted, while `keep` decides whether each remaining value is
+/// appended. Existing triplets are preserved and may contain duplicate global
+/// coordinates from neighboring cells.
 pub(crate) fn push_local_matrix_triplets(
     triplets: &mut Vec<Triplet<usize, usize, f64>>,
     local: &[f64],
@@ -146,6 +368,18 @@ pub(crate) fn push_local_matrix_triplets(
     }
 }
 
+/// Assemble a block-diagonal lumped GLL mass matrix for multiple scalar fields.
+///
+/// Each local nodal basis function contributes its quadrature weight multiplied
+/// by the cell Jacobian determinant at that node. Eliminated degrees of freedom
+/// are skipped, and contributions from cells sharing a reduced degree of
+/// freedom are combined in the resulting matrix. The matrix has size
+/// `nfields * n_reduced` and has one identical scalar diagonal block per field.
+///
+/// # Panics
+///
+/// Panics if `nfields` is zero or if the cached cell and DOF data are
+/// inconsistent.
 pub(crate) fn assemble_lumped_mass(
     cell_data: &CellData,
     cell_reduced_dofs: &[Vec<Option<usize>>],
@@ -190,10 +424,20 @@ pub struct LocalCtx<'a> {
 }
 
 impl<'a> LocalCtx<'a> {
+    /// Return the physical coordinates of quadrature point `q`.
+    ///
+    /// The returned slice has length `gdim` and borrows the context's
+    /// point-storage buffer.
     pub fn point(&self, q: usize) -> &'a [f64] {
         &self.points[q * self.gdim..(q + 1) * self.gdim]
     }
 
+    /// Build the material-evaluation context for quadrature point `q`.
+    ///
+    /// `state` is `None` for state-independent coefficients and `Some` when a
+    /// coefficient needs the interpolated [`CellState`]. The returned context
+    /// includes this cell's physical point, metadata, time, and quadrature
+    /// index.
     pub fn material_context<'b>(
         &'b self,
         state: Option<&'b CellState<'b>>,
@@ -208,6 +452,10 @@ impl<'a> LocalCtx<'a> {
         }
     }
 
+    /// Return the `i`th test basis function and component as a [`ShapeFn`]
+    /// view.
+    ///
+    /// The view borrows this context's basis values and physical gradients.
     pub fn test(&'a self, i: usize, comp: usize) -> ShapeFn<'a> {
         ShapeFn {
             npts: self.npts,
@@ -220,6 +468,11 @@ impl<'a> LocalCtx<'a> {
         }
     }
 
+    /// Return the `i`th trial basis function and component as a [`ShapeFn`]
+    /// view.
+    ///
+    /// Test and trial functions use the same basis data here; the separate
+    /// methods make the role of the basis function explicit in bilinear forms.
     pub fn trial(&'a self, i: usize, comp: usize) -> ShapeFn<'a> {
         self.test(i, comp)
     }
@@ -237,19 +490,32 @@ pub struct ShapeFn<'a> {
 }
 
 impl<'a> ShapeFn<'a> {
+    /// Return this basis function's value at quadrature point `q`.
     pub fn v(&self, q: usize) -> f64 {
         self.values[(self.i * self.ncomp + self.comp) * self.npts + q]
     }
 
+    /// Return this basis function's physical gradient component `gd` at
+    /// quadrature point `q`.
     pub fn grad(&self, q: usize, gd: usize) -> f64 {
         self.grads[((self.i * self.ncomp + self.comp) * self.gdim + gd) * self.npts + q]
     }
 
+    /// Return all quadrature-point values for this basis function and
+    /// component.
+    ///
+    /// The returned slice is ordered by quadrature point and has length
+    /// `npts`.
     pub fn v_slice(&self) -> &'a [f64] {
         let start = (self.i * self.ncomp + self.comp) * self.npts;
         &self.values[start..start + self.npts]
     }
 
+    /// Return all quadrature-point gradient values in geometric direction
+    /// `gd`.
+    ///
+    /// The returned slice is ordered by quadrature point and has length
+    /// `npts`.
     pub fn grad_slice(&self, gd: usize) -> &'a [f64] {
         let start = ((self.i * self.ncomp + self.comp) * self.gdim + gd) * self.npts;
         &self.grads[start..start + self.npts]
@@ -266,10 +532,13 @@ pub struct CellState<'a> {
 }
 
 impl<'a> CellState<'a> {
+    /// Return the interpolated value of field `field` at quadrature point `q`.
     pub fn value(&self, field: usize, q: usize) -> f64 {
         self.values[field * self.npts + q]
     }
 
+    /// Return the physical gradient component `gd` of field `field` at
+    /// quadrature point `q`.
     pub fn grad(&self, field: usize, q: usize, gd: usize) -> f64 {
         self.grads[(field * self.gdim + gd) * self.npts + q]
     }
@@ -289,7 +558,26 @@ pub struct BoundaryFacet {
     pub physical_region: Option<crate::material::PhysicalRegion>,
 }
 
-/// Assemble selected natural-boundary kernels on straight quadrilateral facets.
+/// Assemble selected natural-boundary kernels on straight quadrilateral
+/// facets.
+///
+/// The selector receives each mesh boundary facet's index, physical midpoint,
+/// and optional physical region. Returning `None` skips that facet; selected
+/// facets are integrated with Gauss-Lobatto-Legendre quadrature of order
+/// `p - 1`, using an outward unit normal. `target_dof` maps full facet degrees
+/// of freedom to reduced indices, so eliminated DOFs are omitted during
+/// scattering. All selected kernels must report the same field count.
+///
+/// Only two-dimensional meshes embedded in two dimensions are supported, and
+/// only facets with exactly one connected quadrilateral cell are assembled.
+/// The returned RHS and matrix use field-major reduced indexing and have size
+/// `nfields * reduced_size`.
+///
+/// # Panics
+///
+/// Panics if `p` is zero, the mesh is not 2D-in-2D, a selected kernel has no
+/// fields, selected kernels disagree about their field count, or the mesh has
+/// malformed quadrilateral boundary geometry.
 pub(crate) fn assemble_quad_boundaries<'a, M, D, F>(
     mesh: &M,
     family: &LagrangeElementFamily<f64>,
@@ -524,10 +812,16 @@ pub struct FacetCtx<'a> {
 }
 
 impl<'a> FacetCtx<'a> {
+    /// Return the physical coordinates of facet quadrature point `q`.
+    ///
+    /// The returned slice has length `gdim` and borrows the context's
+    /// point-storage buffer.
     pub fn point(&self, q: usize) -> &'a [f64] {
         &self.points[q * self.gdim..(q + 1) * self.gdim]
     }
 
+    /// Return the `i`th facet test basis function and component as a
+    /// [`ShapeFn`] view.
     pub fn test(&'a self, i: usize, comp: usize) -> ShapeFn<'a> {
         ShapeFn {
             npts: self.npts,
@@ -540,6 +834,10 @@ impl<'a> FacetCtx<'a> {
         }
     }
 
+    /// Return the `i`th facet trial basis function and component as a
+    /// [`ShapeFn`] view.
+    ///
+    /// Test and trial functions use the same facet basis data here.
     pub fn trial(&'a self, i: usize, comp: usize) -> ShapeFn<'a> {
         self.test(i, comp)
     }

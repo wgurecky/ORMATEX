@@ -1,7 +1,8 @@
 use crate::common::{
-    assemble_lumped_mass, assemble_quad_boundaries, cell_ctx, interpolate_cell_state,
-    push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, BoundaryFacet,
-    CellData, CellState, LocalCtx, CELL_BATCH_SIZE,
+    add_dirichlet_rhs_correction, assemble_lumped_mass, assemble_quad_boundaries, cell_ctx,
+    interpolate_cell_state, push_local_matrix_triplets, scatter_local_vector,
+    BoundaryContributions, BoundaryFacet, CellData, CellState, LocalCtx, ReducedDofMap,
+    CELL_BATCH_SIZE,
 };
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
@@ -34,9 +35,10 @@ pub enum DofReduction2D {
     },
     /// Retain all dofs.
     None,
-    /// Eliminate every closure DOF on the listed boundary facets (homogeneous
-    /// Dirichlet), including high-order edge DOFs.
-    Dirichlet { facets_to_eliminate: Vec<usize> },
+    /// Eliminate every closure DOF on the listed boundary facets and prescribe
+    /// its value. Each pair is `(facet_index, prescribed_value)`.
+    /// This includes high-order edge DOFs.
+    Dirichlet { facets: Vec<(usize, f64)> },
 }
 
 struct DisjointSet {
@@ -66,6 +68,134 @@ impl DisjointSet {
     }
 }
 
+fn build_dof_map_2d<F>(
+    n: usize,
+    dof_xy: &[(f64, f64)],
+    bc: &DofReduction2D,
+    facet_data: F,
+) -> ReducedDofMap
+where
+    F: Fn(usize) -> ([[f64; 2]; 2], Vec<usize>),
+{
+    match bc {
+        DofReduction2D::Periodic {
+            facet_pairs,
+            tolerance,
+        } => {
+            assert!(
+                tolerance.is_finite() && *tolerance > 0.0,
+                "periodic tolerance must be finite and positive"
+            );
+            assert!(
+                !facet_pairs.is_empty(),
+                "periodic reduction requires at least one facet pair"
+            );
+            let mut paired_facets = std::collections::HashSet::new();
+            let mut equivalence = DisjointSet::new(n);
+
+            for &[source_facet, target_facet] in facet_pairs {
+                assert_ne!(
+                    source_facet, target_facet,
+                    "periodic facets must be distinct"
+                );
+                assert!(
+                    paired_facets.insert(source_facet) && paired_facets.insert(target_facet),
+                    "a periodic facet may appear in only one pair"
+                );
+
+                let (source_endpoints, source_dofs) = facet_data(source_facet);
+                let (target_endpoints, target_dofs) = facet_data(target_facet);
+                let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                assert!(
+                    distance(source_endpoints[0], source_endpoints[1]) > *tolerance,
+                    "periodic facet {source_facet} has zero length"
+                );
+                assert!(
+                    distance(target_endpoints[0], target_endpoints[1]) > *tolerance,
+                    "periodic facet {target_facet} has zero length"
+                );
+                let aligned = [
+                    target_endpoints[0][0] - source_endpoints[0][0],
+                    target_endpoints[0][1] - source_endpoints[0][1],
+                ];
+                let reversed = [
+                    target_endpoints[1][0] - source_endpoints[0][0],
+                    target_endpoints[1][1] - source_endpoints[0][1],
+                ];
+                let translation = if distance(
+                    [
+                        source_endpoints[1][0] + aligned[0],
+                        source_endpoints[1][1] + aligned[1],
+                    ],
+                    target_endpoints[1],
+                ) <= *tolerance
+                {
+                    aligned
+                } else if distance(
+                    [
+                        source_endpoints[1][0] + reversed[0],
+                        source_endpoints[1][1] + reversed[1],
+                    ],
+                    target_endpoints[0],
+                ) <= *tolerance
+                {
+                    reversed
+                } else {
+                    panic!(
+                        "periodic facets {source_facet} and {target_facet} are not related by a translation"
+                    );
+                };
+
+                assert_eq!(
+                    source_dofs.len(),
+                    target_dofs.len(),
+                    "periodic facets must have matching closure DOF counts"
+                );
+                let mut matched = vec![false; target_dofs.len()];
+                for &source in &source_dofs {
+                    let source_xy = dof_xy[source];
+                    let expected = (source_xy.0 + translation[0], source_xy.1 + translation[1]);
+                    // ponytail: p + 1 facet nodes make direct matching O(p^2); index only if p becomes large.
+                    let matches: Vec<_> = target_dofs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &target)| {
+                            let target_xy = dof_xy[target];
+                            (target_xy.0 - expected.0).hypot(target_xy.1 - expected.1) <= *tolerance
+                        })
+                        .collect();
+                    assert_eq!(
+                        matches.len(),
+                        1,
+                        "periodic source DOF {source} must match exactly one target DOF"
+                    );
+                    let (target_index, &target) = matches[0];
+                    assert!(
+                        !matched[target_index],
+                        "periodic target DOF {target} matched more than once"
+                    );
+                    matched[target_index] = true;
+                    equivalence.union(source, target);
+                }
+                assert!(
+                    matched.iter().all(|&used| used),
+                    "every periodic target DOF must be matched"
+                );
+            }
+            ReducedDofMap::from_representatives((0..n).map(|dof| equivalence.find(dof)).collect())
+        }
+        DofReduction2D::None => ReducedDofMap::identity(n),
+        DofReduction2D::Dirichlet { facets } => {
+            let mut prescribed = Vec::new();
+            for &(facet, value) in facets {
+                let (_, dofs) = facet_data(facet);
+                prescribed.extend(dofs.into_iter().map(|dof| (dof, value)));
+            }
+            ReducedDofMap::from_dirichlet_values(n, prescribed)
+        }
+    }
+}
+
 /// 2D GLL spectral-element problem on quadrilateral meshes.
 pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
     mesh: M,
@@ -73,13 +203,8 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     p: usize,
     cell_data: CellData,
     cell_reduced_dofs: Vec<Vec<Option<usize>>>,
-    /// Precomputed `full -> Option<reduced>` DOF map (BC reduction LUT).
-    /// Built once in `new`; `target_dof` is O(1), `apply_bc` is O(nnz).
-    dof_lut: Vec<Option<usize>>,
-    /// Number of reduced dofs (count of unique canonical vertices after
-    /// periodic identification).  Distinct from `dof_lut.len()` when BCs
-    /// identify boundary dofs.
-    n_reduced: usize,
+    cell_prescribed_values: Vec<Vec<Option<f64>>>,
+    dof_map: ReducedDofMap,
     /// (x, y) position of each full GLL nodal DOF.
     dof_xy: Vec<(f64, f64)>,
     metadata: MeshMetadata,
@@ -226,205 +351,40 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             "every GLL dof must have a physical coordinate"
         );
 
-        let (dof_lut, n_reduced) = match &bc {
-            DofReduction2D::Periodic {
-                facet_pairs,
-                tolerance,
-            } => {
-                assert!(
-                    tolerance.is_finite() && *tolerance > 0.0,
-                    "periodic tolerance must be finite and positive"
-                );
-                assert!(
-                    !facet_pairs.is_empty(),
-                    "periodic reduction requires at least one facet pair"
-                );
-                let mut paired_facets = std::collections::HashSet::new();
-                let mut equivalence = DisjointSet::new(n);
-
-                for &[source_facet, target_facet] in facet_pairs {
-                    assert_ne!(
-                        source_facet, target_facet,
-                        "periodic facets must be distinct"
-                    );
-                    assert!(
-                        paired_facets.insert(source_facet) && paired_facets.insert(target_facet),
-                        "a periodic facet may appear in only one pair"
-                    );
-
-                    let facet_endpoints = |facet_index: usize| -> [[f64; 2]; 2] {
-                        let facet = mesh
-                            .entity(ReferenceCellType::Interval, facet_index)
-                            .expect("periodic facet index out of range");
-                        let topology = facet.topology();
-                        let mut cells =
-                            topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
-                        assert!(
-                            cells.next().is_some() && cells.next().is_none(),
-                            "periodic facet {facet_index} must be a boundary interval"
-                        );
-                        let mut vertices = topology.sub_entity_iter(ReferenceCellType::Point);
-                        let endpoint = |vertex| {
-                            let point = mesh
-                                .entity(ReferenceCellType::Point, vertex)
-                                .expect("periodic facet endpoint out of range");
-                            let mut xy = [0.0; 2];
-                            point.geometry().points().next().unwrap().coords(&mut xy);
-                            xy
-                        };
-                        let endpoints = [
-                            endpoint(
-                                vertices
-                                    .next()
-                                    .expect("periodic facet has no first endpoint"),
-                            ),
-                            endpoint(
-                                vertices
-                                    .next()
-                                    .expect("periodic facet has no second endpoint"),
-                            ),
-                        ];
-                        assert!(
-                            vertices.next().is_none(),
-                            "periodic facet {facet_index} must have two endpoints"
-                        );
-                        endpoints
-                    };
-                    let source_endpoints = facet_endpoints(source_facet);
-                    let target_endpoints = facet_endpoints(target_facet);
-                    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
-                    assert!(
-                        distance(source_endpoints[0], source_endpoints[1]) > *tolerance,
-                        "periodic facet {source_facet} has zero length"
-                    );
-                    assert!(
-                        distance(target_endpoints[0], target_endpoints[1]) > *tolerance,
-                        "periodic facet {target_facet} has zero length"
-                    );
-                    let aligned = [
-                        target_endpoints[0][0] - source_endpoints[0][0],
-                        target_endpoints[0][1] - source_endpoints[0][1],
-                    ];
-                    let reversed = [
-                        target_endpoints[1][0] - source_endpoints[0][0],
-                        target_endpoints[1][1] - source_endpoints[0][1],
-                    ];
-                    let translation = if distance(
-                        [
-                            source_endpoints[1][0] + aligned[0],
-                            source_endpoints[1][1] + aligned[1],
-                        ],
-                        target_endpoints[1],
-                    ) <= *tolerance
-                    {
-                        aligned
-                    } else if distance(
-                        [
-                            source_endpoints[1][0] + reversed[0],
-                            source_endpoints[1][1] + reversed[1],
-                        ],
-                        target_endpoints[0],
-                    ) <= *tolerance
-                    {
-                        reversed
-                    } else {
-                        panic!(
-                            "periodic facets {source_facet} and {target_facet} are not related by a translation"
-                        );
-                    };
-
-                    let source_dofs = space
-                        .entity_closure_dofs(ReferenceCellType::Interval, source_facet)
-                        .unwrap();
-                    let target_dofs = space
-                        .entity_closure_dofs(ReferenceCellType::Interval, target_facet)
-                        .unwrap();
-                    assert_eq!(
-                        source_dofs.len(),
-                        target_dofs.len(),
-                        "periodic facets must have matching closure DOF counts"
-                    );
-                    let mut matched = vec![false; target_dofs.len()];
-                    for &source in source_dofs {
-                        let source_xy = dof_xy[source];
-                        let expected = (source_xy.0 + translation[0], source_xy.1 + translation[1]);
-                        // ponytail: p + 1 facet nodes make direct matching O(p^2); index only if p becomes large.
-                        let matches: Vec<_> = target_dofs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, &target)| {
-                                let target_xy = dof_xy[target];
-                                (target_xy.0 - expected.0).hypot(target_xy.1 - expected.1)
-                                    <= *tolerance
-                            })
-                            .collect();
-                        assert_eq!(
-                            matches.len(),
-                            1,
-                            "periodic source DOF {source} must match exactly one target DOF"
-                        );
-                        let (target_index, &target) = matches[0];
-                        assert!(
-                            !matched[target_index],
-                            "periodic target DOF {target} matched more than once"
-                        );
-                        matched[target_index] = true;
-                        equivalence.union(source, target);
-                    }
-                    assert!(
-                        matched.iter().all(|&used| used),
-                        "every periodic target DOF must be matched"
-                    );
-                }
-                let canonical: Vec<_> = (0..n).map(|dof| equivalence.find(dof)).collect();
-                let canonical_set: Vec<_> = (0..n).filter(|&dof| canonical[dof] == dof).collect();
-                let mut reduced_index = vec![usize::MAX; n];
-                for (reduced, &full) in canonical_set.iter().enumerate() {
-                    reduced_index[full] = reduced;
-                }
-                let lut = canonical
-                    .into_iter()
-                    .map(|full| Some(reduced_index[full]))
-                    .collect();
-                (lut, canonical_set.len())
-            }
-            DofReduction2D::None => ((0..n).map(Some).collect(), n),
-            DofReduction2D::Dirichlet {
-                facets_to_eliminate,
-            } => {
-                use std::collections::HashSet;
-                let mut eliminated_dofs = HashSet::new();
-                for &facet_index in facets_to_eliminate {
-                    let facet = mesh
-                        .entity(ReferenceCellType::Interval, facet_index)
-                        .expect("Dirichlet facet index out of range");
-                    let topology = facet.topology();
-                    let mut cells =
-                        topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
-                    assert!(
-                        cells.next().is_some() && cells.next().is_none(),
-                        "Dirichlet facet {facet_index} must be a boundary interval"
-                    );
-                    for dof in space
-                        .entity_closure_dofs(ReferenceCellType::Interval, facet_index)
-                        .unwrap()
-                    {
-                        eliminated_dofs.insert(dof);
-                    }
-                }
-                let mut lut: Vec<Option<usize>> = Vec::with_capacity(n);
-                let mut reduced = 0;
-                for d in 0..n {
-                    if eliminated_dofs.contains(&d) {
-                        lut.push(None);
-                    } else {
-                        lut.push(Some(reduced));
-                        reduced += 1;
-                    }
-                }
-                (lut, reduced)
-            }
+        let facet_data = |facet_index: usize| -> ([[f64; 2]; 2], Vec<usize>) {
+            let facet = mesh
+                .entity(ReferenceCellType::Interval, facet_index)
+                .expect("facet index out of range");
+            let topology = facet.topology();
+            let mut cells = topology.connected_entity_iter(ReferenceCellType::Quadrilateral);
+            assert!(
+                cells.next().is_some() && cells.next().is_none(),
+                "facet {facet_index} must be a boundary interval"
+            );
+            let mut vertices = topology.sub_entity_iter(ReferenceCellType::Point);
+            let endpoint = |vertex| {
+                let point = mesh
+                    .entity(ReferenceCellType::Point, vertex)
+                    .expect("facet endpoint out of range");
+                let mut xy = [0.0; 2];
+                point.geometry().points().next().unwrap().coords(&mut xy);
+                xy
+            };
+            let endpoints = [
+                endpoint(vertices.next().expect("facet has no first endpoint")),
+                endpoint(vertices.next().expect("facet has no second endpoint")),
+            ];
+            assert!(
+                vertices.next().is_none(),
+                "facet {facet_index} must have two endpoints"
+            );
+            let dofs = space
+                .entity_closure_dofs(ReferenceCellType::Interval, facet_index)
+                .unwrap()
+                .to_vec();
+            (endpoints, dofs)
         };
+        let dof_map = build_dof_map_2d(n, &dof_xy, &bc, facet_data);
         let cell_dofs: Vec<Vec<usize>> = (0..ncells)
             .map(|cell| {
                 space
@@ -433,10 +393,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                     .to_vec()
             })
             .collect();
-        let cell_reduced_dofs = cell_dofs
-            .iter()
-            .map(|dofs| dofs.iter().map(|&dof| dof_lut[dof]).collect())
-            .collect();
+        let (cell_reduced_dofs, cell_prescribed_values) = dof_map.map_cells(&cell_dofs);
 
         Self {
             mesh,
@@ -444,8 +401,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             p,
             cell_data,
             cell_reduced_dofs,
-            dof_lut,
-            n_reduced,
+            cell_prescribed_values,
+            dof_map,
             dof_xy,
             metadata,
         }
@@ -453,7 +410,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
 
     /// O(1) full -> Option<reduced> DOF lookup.
     pub fn target_dof(&self, full: usize) -> Option<usize> {
-        self.dof_lut[full]
+        self.dof_map.target(full)
     }
 
     pub fn mesh(&self) -> &M {
@@ -464,18 +421,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         &self.family
     }
 
-    /// Number of reduced dofs (post-BC) = count of unique canonical
-    /// vertices after periodic identification.
+    /// Number of retained reduced DOFs after boundary-condition reduction.
     pub fn reduced_size(&self) -> usize {
-        self.n_reduced
+        self.dof_map.reduced_size()
     }
 
     /// Representative (x, y) position of each reduced DOF, in reduced-index order.
     pub fn dof_positions(&self) -> Vec<(f64, f64)> {
         let nr = self.reduced_size();
         let mut out = vec![(f64::NAN, f64::NAN); nr];
-        for full in 0..self.dof_lut.len() {
-            if let Some(r) = self.dof_lut[full] {
+        for full in 0..self.dof_map.full_size() {
+            if let Some(r) = self.dof_map.target(full) {
                 let (x, y) = self.dof_xy[full];
                 if out[r].0.is_nan() {
                     out[r] = (x, y);
@@ -540,6 +496,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         nfields: usize,
         _ndofs: usize,
         reduced_dofs: &[Option<usize>],
+        prescribed_values: &[Option<f64>],
         state: MatRef<'_, f64>,
         basis_grads: &[f64],
         values: &'a mut [f64],
@@ -551,6 +508,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             self.reduced_size(),
             nfields,
             reduced_dofs,
+            prescribed_values,
             state,
             basis_grads,
             values,
@@ -609,6 +567,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                             nfields,
                             ndofs,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * gdim * cd.npts],
                             field_values,
@@ -724,6 +683,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                             nfields,
                             ndofs,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * gdim * cd.npts],
                             field_values,
@@ -843,6 +803,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                             nfields,
                             ndofs,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * gdim * cd.npts],
                             field_values,
@@ -1054,6 +1015,101 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
 
     pub fn assemble_system_linear<K: LinearForm>(&self, kernel: &K) -> Vec<f64> {
         self.assemble_system_linear_at(0.0, kernel)
+    }
+
+    /// Assemble a linear RHS and apply the nonzero Dirichlet correction.
+    pub fn assemble_system_linear_with_dirichlet_at<B, L>(
+        &self,
+        time: f64,
+        bilinear: &B,
+        linear: &L,
+    ) -> Vec<f64>
+    where
+        B: BilinearForm,
+        L: LinearForm,
+    {
+        assert_eq!(
+            bilinear.nfields(),
+            linear.nfields(),
+            "bilinear and linear field counts must match"
+        );
+        let mut rhs = self.assemble_system_linear_at(time, linear);
+        self.apply_dirichlet_rhs_correction_at(time, bilinear, &mut rhs);
+        rhs
+    }
+
+    pub fn assemble_linear_with_dirichlet<B, L>(&self, bilinear: &B, linear: &L) -> Vec<f64>
+    where
+        B: BilinearForm,
+        L: LinearForm,
+    {
+        assert_eq!(
+            bilinear.nfields(),
+            1,
+            "scalar matrix requires a one-field form"
+        );
+        assert_eq!(linear.nfields(), 1, "scalar RHS requires a one-field form");
+        self.assemble_system_linear_with_dirichlet_at(0.0, bilinear, linear)
+    }
+
+    /// Apply the prescribed-DOF contribution `-A_fb u_b` to a reduced RHS.
+    ///
+    /// Call this after assembling a source RHS and before solving a linear
+    /// problem with nonzero Dirichlet values. Homogeneous Dirichlet values and
+    /// problems without Dirichlet reduction are no-ops.
+    pub fn apply_dirichlet_rhs_correction_at<K: BilinearForm>(
+        &self,
+        time: f64,
+        kernel: &K,
+        rhs: &mut [f64],
+    ) {
+        let nfields = kernel.nfields();
+        assert!(nfields > 0, "bilinear form must contain at least one field");
+        assert_eq!(
+            rhs.len(),
+            nfields * self.reduced_size(),
+            "RHS size mismatch"
+        );
+        if !self
+            .cell_prescribed_values
+            .iter()
+            .flatten()
+            .any(Option::is_some)
+        {
+            return;
+        }
+        let cd = &self.cell_data;
+        let gdim = self.mesh.geometry_dim();
+        let mut grads = vec![0.0; cd.ndofs * gdim * cd.npts];
+        let local_size = nfields * cd.ndofs;
+        let mut local = vec![0.0; local_size * local_size];
+        for (cell_index, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
+            let prescribed = &self.cell_prescribed_values[cell_index];
+            if !prescribed.iter().any(Option::is_some) {
+                continue;
+            }
+            let ndofs = reduced_dofs.len();
+            let ctx = self.prepare_cell_ctx(
+                time,
+                cell_index,
+                ndofs,
+                &mut grads[..ndofs * gdim * cd.npts],
+            );
+            local.fill(0.0);
+            kernel.assemble_local(&ctx, &mut local[..local_size * local_size]);
+            add_dirichlet_rhs_correction(
+                rhs,
+                &local[..local_size * local_size],
+                reduced_dofs,
+                prescribed,
+                nfields,
+                self.reduced_size(),
+            );
+        }
+    }
+
+    pub fn apply_dirichlet_rhs_correction<K: BilinearForm>(&self, kernel: &K, rhs: &mut [f64]) {
+        self.apply_dirichlet_rhs_correction_at(0.0, kernel, rhs);
     }
 
     /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.

@@ -1,7 +1,7 @@
 use crate::common::{
-    assemble_lumped_mass, cell_ctx, interpolate_cell_state, push_local_matrix_triplets,
-    scatter_local_vector, BoundaryContributions, CellData, CellState, FacetCtx, LocalCtx,
-    CELL_BATCH_SIZE,
+    add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
+    push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, CellData, CellState,
+    FacetCtx, LocalCtx, ReducedDofMap, CELL_BATCH_SIZE,
 };
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
@@ -27,9 +27,10 @@ pub enum DofReduction1D {
     Periodic {
         facets: [usize; 2],
     },
-    /// Eliminate every closure DOF on selected endpoint facets.
+    /// Eliminate every closure DOF on selected endpoint facets and prescribe
+    /// its value. Each pair is `(facet_index, prescribed_value)`.
     Dirichlet {
-        facets_to_eliminate: Vec<usize>,
+        facets: Vec<(usize, f64)>,
     },
 }
 
@@ -42,14 +43,39 @@ pub struct BoundaryPoint {
     pub physical_region: Option<crate::material::PhysicalRegion>,
 }
 
+fn build_dof_map_1d<F>(n: usize, reduction: DofReduction1D, boundary_dof: F) -> ReducedDofMap
+where
+    F: Fn(usize) -> usize,
+{
+    match reduction {
+        DofReduction1D::None => ReducedDofMap::identity(n),
+        DofReduction1D::Dirichlet { facets } => ReducedDofMap::from_dirichlet_values(
+            n,
+            facets
+                .into_iter()
+                .map(|(facet, value)| (boundary_dof(facet), value)),
+        ),
+        DofReduction1D::Periodic { facets } => {
+            let master = boundary_dof(facets[0]);
+            let slave = boundary_dof(facets[1]);
+            assert_ne!(master, slave, "periodic facets must be distinct");
+            ReducedDofMap::from_representatives(
+                (0..n)
+                    .map(|dof| if dof == slave { master } else { dof })
+                    .collect(),
+            )
+        }
+    }
+}
+
 /// 1D GLL spectral-element problem on interval meshes.
 pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
     mesh: M,
     family: LagrangeElementFamily<f64>,
     cell_data: CellData,
     cell_reduced_dofs: Vec<Vec<Option<usize>>>,
-    dof_lut: Vec<Option<usize>>,
-    n_reduced: usize,
+    cell_prescribed_values: Vec<Vec<Option<f64>>>,
+    dof_map: ReducedDofMap,
     dof_x: Vec<f64>,
     metadata: MeshMetadata,
 }
@@ -180,50 +206,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             dofs[0]
         };
 
-        let (dof_lut, n_reduced) = match reduction {
-            DofReduction1D::None => ((0..n).map(Some).collect(), n),
-            DofReduction1D::Dirichlet {
-                facets_to_eliminate,
-            } => {
-                let mut eliminated = std::collections::HashSet::new();
-                for facet in facets_to_eliminate {
-                    eliminated.insert(boundary_dof(facet));
-                }
-                let mut reduced = 0;
-                let lut: Vec<Option<usize>> = (0..n)
-                    .map(|dof| {
-                        if eliminated.contains(&dof) {
-                            None
-                        } else {
-                            let out = Some(reduced);
-                            reduced += 1;
-                            out
-                        }
-                    })
-                    .collect();
-                (lut, reduced)
-            }
-            DofReduction1D::Periodic { facets } => {
-                let master = boundary_dof(facets[0]);
-                let slave = boundary_dof(facets[1]);
-                assert_ne!(master, slave, "periodic facets must be distinct");
-                let canonical: Vec<usize> = (0..n)
-                    .map(|dof| if dof == slave { master } else { dof })
-                    .collect();
-                let canonical_set: Vec<usize> =
-                    (0..n).filter(|&dof| canonical[dof] == dof).collect();
-                let reduced_index: std::collections::HashMap<usize, usize> = canonical_set
-                    .iter()
-                    .enumerate()
-                    .map(|(reduced, &dof)| (dof, reduced))
-                    .collect();
-                let lut = canonical
-                    .iter()
-                    .map(|dof| Some(reduced_index[dof]))
-                    .collect();
-                (lut, canonical_set.len())
-            }
-        };
+        let dof_map = build_dof_map_1d(n, reduction, boundary_dof);
         let cell_dofs: Vec<Vec<usize>> = (0..ncells)
             .map(|cell| {
                 space
@@ -232,25 +215,22 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     .to_vec()
             })
             .collect();
-        let cell_reduced_dofs = cell_dofs
-            .iter()
-            .map(|dofs| dofs.iter().map(|&dof| dof_lut[dof]).collect())
-            .collect();
+        let (cell_reduced_dofs, cell_prescribed_values) = dof_map.map_cells(&cell_dofs);
 
         Self {
             mesh,
             family,
             cell_data,
             cell_reduced_dofs,
-            dof_lut,
-            n_reduced,
+            cell_prescribed_values,
+            dof_map,
             dof_x,
             metadata,
         }
     }
 
     pub fn target_dof(&self, full: usize) -> Option<usize> {
-        self.dof_lut[full]
+        self.dof_map.target(full)
     }
 
     pub fn mesh(&self) -> &M {
@@ -262,7 +242,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     }
 
     pub fn reduced_size(&self) -> usize {
-        self.n_reduced
+        self.dof_map.reduced_size()
     }
 
     pub fn dof_positions(&self) -> Vec<f64> {
@@ -322,6 +302,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         &self,
         nfields: usize,
         reduced_dofs: &[Option<usize>],
+        prescribed_values: &[Option<f64>],
         state: MatRef<'_, f64>,
         basis_grads: &[f64],
         values: &'a mut [f64],
@@ -333,6 +314,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             self.reduced_size(),
             nfields,
             reduced_dofs,
+            prescribed_values,
             state,
             basis_grads,
             values,
@@ -390,6 +372,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let state_cell = self.prepare_cell_state(
                             nfields,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -504,6 +487,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let state_cell = self.prepare_cell_state(
                             nfields,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -615,6 +599,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let state_cell = self.prepare_cell_state(
                             nfields,
                             reduced_dofs,
+                            &self.cell_prescribed_values[cell_index],
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -809,6 +794,95 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     pub fn assemble_system_linear<K: LinearForm>(&self, kernel: &K) -> Vec<f64> {
         self.assemble_system_linear_at(0.0, kernel)
+    }
+
+    /// Assemble a linear RHS and apply the nonzero Dirichlet correction.
+    pub fn assemble_system_linear_with_dirichlet_at<B, L>(
+        &self,
+        time: f64,
+        bilinear: &B,
+        linear: &L,
+    ) -> Vec<f64>
+    where
+        B: BilinearForm,
+        L: LinearForm,
+    {
+        assert_eq!(
+            bilinear.nfields(),
+            linear.nfields(),
+            "bilinear and linear field counts must match"
+        );
+        let mut rhs = self.assemble_system_linear_at(time, linear);
+        self.apply_dirichlet_rhs_correction_at(time, bilinear, &mut rhs);
+        rhs
+    }
+
+    pub fn assemble_linear_with_dirichlet<B, L>(&self, bilinear: &B, linear: &L) -> Vec<f64>
+    where
+        B: BilinearForm,
+        L: LinearForm,
+    {
+        assert_eq!(
+            bilinear.nfields(),
+            1,
+            "scalar matrix requires a one-field form"
+        );
+        assert_eq!(linear.nfields(), 1, "scalar RHS requires a one-field form");
+        self.assemble_system_linear_with_dirichlet_at(0.0, bilinear, linear)
+    }
+
+    /// Apply the prescribed-DOF contribution `-A_fb u_b` to a reduced RHS.
+    ///
+    /// Call this after assembling a source RHS and before solving a linear
+    /// problem with nonzero Dirichlet values. Homogeneous Dirichlet values and
+    /// problems without Dirichlet reduction are no-ops.
+    pub fn apply_dirichlet_rhs_correction_at<K: BilinearForm>(
+        &self,
+        time: f64,
+        kernel: &K,
+        rhs: &mut [f64],
+    ) {
+        let nfields = kernel.nfields();
+        assert!(nfields > 0, "bilinear form must contain at least one field");
+        assert_eq!(
+            rhs.len(),
+            nfields * self.reduced_size(),
+            "RHS size mismatch"
+        );
+        if !self
+            .cell_prescribed_values
+            .iter()
+            .flatten()
+            .any(Option::is_some)
+        {
+            return;
+        }
+        let cd = &self.cell_data;
+        let mut grads = vec![0.0; cd.ndofs * cd.npts];
+        let local_size = nfields * cd.ndofs;
+        let mut local = vec![0.0; local_size * local_size];
+        for (cell_index, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
+            let prescribed = &self.cell_prescribed_values[cell_index];
+            if !prescribed.iter().any(Option::is_some) {
+                continue;
+            }
+            let ndofs = reduced_dofs.len();
+            let ctx = self.prepare_cell_ctx(time, cell_index, ndofs, &mut grads[..ndofs * cd.npts]);
+            local.fill(0.0);
+            kernel.assemble_local(&ctx, &mut local[..local_size * local_size]);
+            add_dirichlet_rhs_correction(
+                rhs,
+                &local[..local_size * local_size],
+                reduced_dofs,
+                prescribed,
+                nfields,
+                self.reduced_size(),
+            );
+        }
+    }
+
+    pub fn apply_dirichlet_rhs_correction<K: BilinearForm>(&self, kernel: &K, rhs: &mut [f64]) {
+        self.apply_dirichlet_rhs_correction_at(0.0, kernel, rhs);
     }
 
     /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.

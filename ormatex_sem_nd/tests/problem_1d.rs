@@ -151,11 +151,32 @@ fn dirichlet_eliminates_selected_endpoint() {
         mesh(2),
         2,
         DofReduction1D::Dirichlet {
-            facets_to_eliminate: vec![0],
+            facets: vec![(0, 0.0)],
         },
     );
     assert_eq!(problem.reduced_size(), 4);
     assert!(problem.target_dof(0).is_none());
+}
+
+#[test]
+fn nonzero_dirichlet_value_enters_state_and_rhs() {
+    let problem = SEM1DProblem::new(
+        mesh(1),
+        1,
+        DofReduction1D::Dirichlet {
+            facets: vec![(0, 2.0)],
+        },
+    );
+    let kernel = KernelAdvDiff::new(1.0, 0.0);
+    let matrix = problem.assemble_bilinear(&kernel).to_dense();
+    let mut rhs = vec![0.0; problem.reduced_size()];
+    problem.apply_dirichlet_rhs_correction(&kernel, &mut rhs);
+    assert!((matrix[(0, 0)] - 1.0).abs() < 1e-12);
+    assert!((rhs[0] - 2.0).abs() < 1e-12);
+
+    let state = Mat::from_fn(problem.reduced_size(), 1, |_, _| 2.0);
+    let residual = problem.assemble_residual(&kernel, state.as_ref());
+    assert!(residual.iter().all(|value| value.abs() < 1e-12));
 }
 
 #[test]

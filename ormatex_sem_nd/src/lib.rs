@@ -13,8 +13,9 @@ pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{MatrixFreeJacobianProblem, MatrixFreeMinvJacobian, OwnedMinvJacobian};
 pub use kernels::{
     BilinearForm, BoundaryIntegrator, FluxKernel1D, KernelAdvDiff, KernelAdvDiff2D,
-    KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelConservationLaw1D, KernelMass,
-    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, RobinConvection,
+    KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelConservationLaw1D, KernelDiffusion,
+    KernelDiffusion2D, KernelMass, KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel,
+    RobinConvection,
 };
 pub use material::{
     CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,

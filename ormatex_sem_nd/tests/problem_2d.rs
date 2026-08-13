@@ -206,7 +206,7 @@ fn dirichlet_eliminates_every_high_order_facet_dof() {
         mesh,
         2,
         DofReduction2D::Dirichlet {
-            facets_to_eliminate: vec![left_facet],
+            facets: vec![(left_facet, 0.0)],
         },
     );
     let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
@@ -218,6 +218,55 @@ fn dirichlet_eliminates_every_high_order_facet_dof() {
         .iter()
         .all(|&dof| problem.target_dof(dof).is_none()));
     assert_eq!(problem.reduced_size(), 12);
+}
+
+#[test]
+fn nonzero_dirichlet_value_enters_2d_state() {
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+    let left_facet = mesh
+        .entity_iter(ReferenceCellType::Interval)
+        .find(|facet| {
+            facet.geometry().points().all(|point| {
+                let mut xy = [0.0; 2];
+                point.coords(&mut xy);
+                xy[0].abs() < 1e-12
+            })
+        })
+        .unwrap()
+        .local_index();
+    let problem = SEM2DProblem::new(
+        mesh,
+        1,
+        DofReduction2D::Dirichlet {
+            facets: vec![(left_facet, 3.0)],
+        },
+    );
+    let kernel = KernelAdvDiff2D::new(1.0, [0.0, 0.0]);
+    let state = Mat::from_fn(problem.reduced_size(), 1, |_, _| 3.0);
+    let residual = problem.assemble_residual(&kernel, state.as_ref());
+    assert!(residual.iter().all(|value| value.abs() < 1e-12));
+
+    let full_problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        1,
+        DofReduction2D::None,
+    );
+    let full_matrix = full_problem.assemble_bilinear(&kernel).to_dense();
+    let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
+    let boundary_dofs = space
+        .entity_closure_dofs(ReferenceCellType::Interval, left_facet)
+        .unwrap();
+    let mut rhs = vec![0.0; problem.reduced_size()];
+    problem.apply_dirichlet_rhs_correction(&kernel, &mut rhs);
+    for full in 0..full_problem.reduced_size() {
+        if let Some(reduced) = problem.target_dof(full) {
+            let expected: f64 = boundary_dofs
+                .iter()
+                .map(|&boundary| -3.0 * full_matrix[(full, boundary)])
+                .sum();
+            assert!((rhs[reduced] - expected).abs() < 1e-12);
+        }
+    }
 }
 
 #[test]
