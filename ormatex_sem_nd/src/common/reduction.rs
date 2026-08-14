@@ -1,4 +1,5 @@
 /// Mapping from full function-space DOFs to a reduced system.
+#[derive(Clone)]
 pub(crate) struct ReducedDofMap {
     /// Full DOF -> reduced DOF. `Some(i)` retains a DOF at reduced index `i`;
     /// `None` eliminates it. Multiple full DOFs may share one reduced index
@@ -159,5 +160,42 @@ impl ReducedDofMap {
             })
             .collect();
         (reduced, prescribed)
+    }
+}
+
+/// Field-major reduced-DOF layout for a system kernel.
+pub(crate) struct FieldDofLayout {
+    pub(crate) offsets: Vec<usize>,
+    pub(crate) total_size: usize,
+}
+
+impl FieldDofLayout {
+    pub(crate) fn new(
+        common: &ReducedDofMap,
+        fields: Option<&[ReducedDofMap]>,
+        nfields: usize,
+    ) -> Self {
+        assert!(nfields > 0, "field layout requires at least one field");
+        let maps: Vec<&ReducedDofMap> = match fields {
+            Some(fields) => {
+                assert_eq!(
+                    fields.len(),
+                    nfields,
+                    "field-specific reduction count must match kernel field count"
+                );
+                fields.iter().collect()
+            }
+            None => (0..nfields).map(|_| common).collect(),
+        };
+        let mut offsets = Vec::with_capacity(nfields + 1);
+        offsets.push(0);
+        for map in &maps {
+            offsets.push(offsets.last().unwrap() + map.reduced_size());
+        }
+        let total_size = *offsets.last().unwrap();
+        Self {
+            offsets,
+            total_size,
+        }
     }
 }

@@ -14,8 +14,9 @@ pub use jacobian::{MatrixFreeJacobianProblem, MatrixFreeMinvJacobian, OwnedMinvJ
 pub use kernels::{
     BilinearForm, BoundaryIntegrator, FluxKernel1D, KernelAdvDiff, KernelAdvDiff2D,
     KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelConservationLaw1D, KernelDiffusion,
-    KernelDiffusion2D, KernelLinearReaction, KernelMass, KernelVolumeSource, LinearForm,
-    NeumannFlux, ResidualKernel, RobinConvection,
+    KernelDiffusion2D, KernelEdacNavierStokes2D, KernelLinearReaction, KernelMass,
+    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, RobinConvection,
+    SmagorinskyLilly2D,
 };
 pub use material::{
     CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,

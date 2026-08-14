@@ -11,15 +11,16 @@ use super::cell::CellData;
 pub(crate) fn scatter_local_vector(
     out: &mut [f64],
     local: &[f64],
-    reduced_dofs: &[Option<usize>],
+    field_reduced_dofs: &[&[Option<usize>]],
     field_count: usize,
-    reduced_dof_count: usize,
+    field_offsets: &[usize],
 ) {
-    let local_dof_count = reduced_dofs.len();
+    let local_dof_count = field_reduced_dofs[0].len();
     for field in 0..field_count {
-        for (local_dof, &reduced_dof) in reduced_dofs.iter().enumerate() {
+        assert_eq!(field_reduced_dofs[field].len(), local_dof_count);
+        for (local_dof, &reduced_dof) in field_reduced_dofs[field].iter().enumerate() {
             if let Some(reduced_dof) = reduced_dof {
-                out[field * reduced_dof_count + reduced_dof] +=
+                out[field_offsets[field] + reduced_dof] +=
                     local[field * local_dof_count + local_dof];
             }
         }
@@ -36,20 +37,22 @@ pub(crate) fn scatter_local_vector(
 pub(crate) fn push_local_matrix_triplets(
     triplets: &mut Vec<Triplet<usize, usize, f64>>,
     local: &[f64],
-    reduced_dofs: &[Option<usize>],
+    field_reduced_dofs: &[&[Option<usize>]],
     field_count: usize,
-    reduced_dof_count: usize,
+    field_offsets: &[usize],
     keep: impl Fn(f64) -> bool,
 ) {
-    let local_dof_count = reduced_dofs.len();
+    let local_dof_count = field_reduced_dofs[0].len();
     let local_size = field_count * local_dof_count;
     for equation in 0..field_count {
-        for (test_dof, &reduced_test_dof) in reduced_dofs.iter().enumerate() {
+        for (test_dof, &reduced_test_dof) in field_reduced_dofs[equation].iter().enumerate() {
             let Some(reduced_test_dof) = reduced_test_dof else {
                 continue;
             };
             for unknown in 0..field_count {
-                for (trial_dof, &reduced_trial_dof) in reduced_dofs.iter().enumerate() {
+                for (trial_dof, &reduced_trial_dof) in
+                    field_reduced_dofs[unknown].iter().enumerate()
+                {
                     let Some(reduced_trial_dof) = reduced_trial_dof else {
                         continue;
                     };
@@ -58,8 +61,8 @@ pub(crate) fn push_local_matrix_triplets(
                         + trial_dof];
                     if keep(value) {
                         triplets.push(Triplet::new(
-                            equation * reduced_dof_count + reduced_test_dof,
-                            unknown * reduced_dof_count + reduced_trial_dof,
+                            field_offsets[equation] + reduced_test_dof,
+                            field_offsets[unknown] + reduced_trial_dof,
                             value,
                         ));
                     }
@@ -78,18 +81,23 @@ pub(crate) fn push_local_matrix_triplets(
 /// per field.
 pub(crate) fn assemble_lumped_mass(
     cell_data: &CellData,
-    cell_reduced_dofs: &[Vec<Option<usize>>],
-    reduced_dof_count: usize,
+    cell_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_offsets: &[usize],
     field_count: usize,
 ) -> SparseColMat<usize, f64> {
     assert!(field_count > 0, "mass requires at least one field");
     let mut triplets = Vec::with_capacity(cell_reduced_dofs.len() * cell_data.ndofs * field_count);
     for field in 0..field_count {
-        for (cell_index, reduced_dofs) in cell_reduced_dofs.iter().enumerate() {
-            for (local_dof, &reduced_dof) in reduced_dofs.iter().enumerate() {
+        let field_cells = if cell_reduced_dofs.len() == 1 {
+            &cell_reduced_dofs[0]
+        } else {
+            &cell_reduced_dofs[field]
+        };
+        for (cell_index, field_dofs) in field_cells.iter().enumerate() {
+            for (local_dof, &reduced_dof) in field_dofs.iter().enumerate() {
                 if let Some(reduced_dof) = reduced_dof {
                     let quadrature_index = cell_data.nodal_quadrature[local_dof];
-                    let index = field * reduced_dof_count + reduced_dof;
+                    let index = field_offsets[field] + reduced_dof;
                     triplets.push(Triplet::new(
                         index,
                         index,
@@ -100,6 +108,6 @@ pub(crate) fn assemble_lumped_mass(
             }
         }
     }
-    let system_size = field_count * reduced_dof_count;
+    let system_size = *field_offsets.last().unwrap();
     SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
 }

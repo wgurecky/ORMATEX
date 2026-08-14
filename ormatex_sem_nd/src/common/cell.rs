@@ -72,28 +72,32 @@ pub(crate) fn cell_ctx<'a>(
 pub(crate) fn interpolate_cell_state<'a>(
     cell_data: &CellData,
     geometric_dimension: usize,
-    reduced_dof_count: usize,
     field_count: usize,
-    reduced_dofs: &[Option<usize>],
-    prescribed_values: &[Option<f64>],
+    field_reduced_dofs: &[&[Option<usize>]],
+    field_prescribed_values: &[&[Option<f64>]],
+    field_offsets: &[usize],
     state: MatRef<'_, f64>,
     basis_grads: &[f64],
     values: &'a mut [f64],
     field_grads: &'a mut [f64],
 ) -> CellState<'a> {
     let quadrature_point_count = cell_data.npts;
-    assert_eq!(
-        reduced_dofs.len(),
-        prescribed_values.len(),
-        "cell DOF maps must have matching lengths"
-    );
+    assert_eq!(field_reduced_dofs.len(), field_count);
+    assert_eq!(field_prescribed_values.len(), field_count);
+    assert!(field_offsets.len() > field_count);
     values[..field_count * quadrature_point_count].fill(0.0);
     field_grads[..field_count * geometric_dimension * quadrature_point_count].fill(0.0);
     for field_index in 0..field_count {
-        for (local_basis_index, &reduced_dof) in reduced_dofs.iter().enumerate() {
+        assert_eq!(
+            field_reduced_dofs[field_index].len(),
+            field_prescribed_values[field_index].len(),
+            "cell DOF maps must have matching lengths"
+        );
+        for (local_basis_index, &reduced_dof) in field_reduced_dofs[field_index].iter().enumerate()
+        {
             let coefficient = reduced_dof.map_or(
-                prescribed_values[local_basis_index].unwrap_or(0.0),
-                |reduced_dof| state[(field_index * reduced_dof_count + reduced_dof, 0)],
+                field_prescribed_values[field_index][local_basis_index].unwrap_or(0.0),
+                |reduced_dof| state[(field_offsets[field_index] + reduced_dof, 0)],
             );
             for quadrature_index in 0..quadrature_point_count {
                 values[field_index * quadrature_point_count + quadrature_index] += coefficient

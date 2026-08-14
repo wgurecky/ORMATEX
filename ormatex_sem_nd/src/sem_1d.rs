@@ -1,7 +1,7 @@
 use crate::common::{
     add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
     push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, CellData, CellState,
-    FacetCtx, LocalCtx, ReducedDofMap, CELL_BATCH_SIZE,
+    FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap, CELL_BATCH_SIZE,
 };
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
@@ -31,6 +31,11 @@ pub enum DofReduction1D {
     /// its value. Each pair is `(facet_index, prescribed_value)`.
     Dirichlet {
         facets: Vec<(usize, f64)>,
+    },
+    /// Apply one reduction policy per scalar field. The number of policies
+    /// must match the kernel field count during system assembly.
+    FieldSpecific {
+        reductions: Vec<DofReduction1D>,
     },
 }
 
@@ -65,6 +70,9 @@ where
                     .collect(),
             )
         }
+        DofReduction1D::FieldSpecific { .. } => {
+            panic!("field-specific reductions must be passed at the outer level")
+        }
     }
 }
 
@@ -73,9 +81,10 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     mesh: M,
     family: LagrangeElementFamily<f64>,
     cell_data: CellData,
-    cell_reduced_dofs: Vec<Vec<Option<usize>>>,
-    cell_prescribed_values: Vec<Vec<Option<f64>>>,
+    cell_reduced_dofs: Vec<Vec<Vec<Option<usize>>>>,
+    cell_prescribed_values: Vec<Vec<Vec<Option<f64>>>>,
     dof_map: ReducedDofMap,
+    field_dof_maps: Vec<ReducedDofMap>,
     dof_x: Vec<f64>,
     metadata: MeshMetadata,
 }
@@ -206,7 +215,21 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             dofs[0]
         };
 
-        let dof_map = build_dof_map_1d(n, reduction, boundary_dof);
+        let reductions = match reduction {
+            DofReduction1D::FieldSpecific { reductions } => {
+                assert!(
+                    !reductions.is_empty(),
+                    "field-specific reductions cannot be empty"
+                );
+                reductions
+            }
+            reduction => vec![reduction],
+        };
+        let field_dof_maps: Vec<_> = reductions
+            .into_iter()
+            .map(|reduction| build_dof_map_1d(n, reduction, &boundary_dof))
+            .collect();
+        let dof_map = field_dof_maps[0].clone();
         let cell_dofs: Vec<Vec<usize>> = (0..ncells)
             .map(|cell| {
                 space
@@ -215,7 +238,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     .to_vec()
             })
             .collect();
-        let (cell_reduced_dofs, cell_prescribed_values) = dof_map.map_cells(&cell_dofs);
+        let mut cell_reduced_dofs = Vec::with_capacity(field_dof_maps.len());
+        let mut cell_prescribed_values = Vec::with_capacity(field_dof_maps.len());
+        for map in &field_dof_maps {
+            let (reduced, prescribed) = map.map_cells(&cell_dofs);
+            cell_reduced_dofs.push(reduced);
+            cell_prescribed_values.push(prescribed);
+        }
 
         Self {
             mesh,
@@ -224,6 +253,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             cell_reduced_dofs,
             cell_prescribed_values,
             dof_map,
+            field_dof_maps,
             dof_x,
             metadata,
         }
@@ -231,6 +261,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     pub fn target_dof(&self, full: usize) -> Option<usize> {
         self.dof_map.target(full)
+    }
+
+    pub fn target_field_dof(&self, field: usize, full: usize) -> Option<usize> {
+        self.field_dof_maps
+            .get(if self.field_dof_maps.len() == 1 {
+                0
+            } else {
+                field
+            })
+            .expect("field index out of range")
+            .target(full)
     }
 
     pub fn mesh(&self) -> &M {
@@ -243,6 +284,76 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     pub fn reduced_size(&self) -> usize {
         self.dof_map.reduced_size()
+    }
+
+    pub fn system_size(&self, nfields: usize) -> usize {
+        self.field_layout(nfields).total_size
+    }
+
+    pub fn field_offset(&self, field: usize, nfields: usize) -> usize {
+        self.field_layout(nfields).offsets[field]
+    }
+
+    pub fn field_reduced_size(&self, field: usize) -> usize {
+        self.field_dof_maps
+            .get(if self.field_dof_maps.len() == 1 {
+                0
+            } else {
+                field
+            })
+            .expect("field index out of range")
+            .reduced_size()
+    }
+
+    pub fn field_dof_positions(&self, field: usize) -> Vec<f64> {
+        let map = self
+            .field_dof_maps
+            .get(if self.field_dof_maps.len() == 1 {
+                0
+            } else {
+                field
+            })
+            .expect("field index out of range");
+        let mut out = vec![f64::NAN; map.reduced_size()];
+        for (full, &x) in self.dof_x.iter().enumerate() {
+            if let Some(reduced) = map.target(full) {
+                if out[reduced].is_nan() {
+                    out[reduced] = x;
+                }
+            }
+        }
+        out
+    }
+
+    fn field_layout(&self, nfields: usize) -> FieldDofLayout {
+        FieldDofLayout::new(
+            &self.dof_map,
+            (self.field_dof_maps.len() > 1).then_some(&self.field_dof_maps),
+            nfields,
+        )
+    }
+
+    fn cell_field_maps(
+        &self,
+        cell: usize,
+        nfields: usize,
+    ) -> (Vec<&[Option<usize>]>, Vec<&[Option<f64>]>) {
+        if self.cell_reduced_dofs.len() == 1 {
+            (
+                vec![&self.cell_reduced_dofs[0][cell]; nfields],
+                vec![&self.cell_prescribed_values[0][cell]; nfields],
+            )
+        } else {
+            assert_eq!(self.cell_reduced_dofs.len(), nfields);
+            (
+                (0..nfields)
+                    .map(|field| self.cell_reduced_dofs[field][cell].as_slice())
+                    .collect(),
+                (0..nfields)
+                    .map(|field| self.cell_prescribed_values[field][cell].as_slice())
+                    .collect(),
+            )
+        }
     }
 
     pub fn dof_positions(&self) -> Vec<f64> {
@@ -301,8 +412,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     fn prepare_cell_state<'a>(
         &self,
         nfields: usize,
-        reduced_dofs: &[Option<usize>],
-        prescribed_values: &[Option<f64>],
+        field_reduced_dofs: &[&[Option<usize>]],
+        field_prescribed_values: &[&[Option<f64>]],
+        field_offsets: &[usize],
         state: MatRef<'_, f64>,
         basis_grads: &[f64],
         values: &'a mut [f64],
@@ -311,10 +423,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         interpolate_cell_state(
             &self.cell_data,
             1,
-            self.reduced_size(),
             nfields,
-            reduced_dofs,
-            prescribed_values,
+            field_reduced_dofs,
+            field_prescribed_values,
+            field_offsets,
             state,
             basis_grads,
             values,
@@ -333,11 +445,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        assert_eq!(
-            state.nrows(),
-            nfields * self.reduced_size(),
-            "state size mismatch"
-        );
+        let layout = self.field_layout(nfields);
+        assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
             1,
@@ -345,8 +454,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         );
         let cd = &self.cell_data;
         let local_stride = nfields * cd.ndofs;
-        let batches: Vec<Vec<f64>> = self
-            .cell_reduced_dofs
+        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
@@ -364,6 +472,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let (field_maps, field_prescribed) =
+                            self.cell_field_maps(cell_index, nfields);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -371,8 +481,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         );
                         let state_cell = self.prepare_cell_state(
                             nfields,
-                            reduced_dofs,
-                            &self.cell_prescribed_values[cell_index],
+                            &field_maps,
+                            &field_prescribed,
+                            &layout.offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -388,11 +499,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 },
             )
             .collect();
-        let mut residual = vec![0.0; nfields * self.reduced_size()];
+        let mut residual = vec![0.0; layout.total_size];
         for (batch_index, batch) in batches.into_iter().enumerate() {
             let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs.len())]
+            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
+                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
                 .iter()
                 .enumerate()
             {
@@ -400,13 +511,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 let cell_size = nfields * ndofs;
                 let local =
                     &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
-                scatter_local_vector(
-                    &mut residual,
-                    local,
-                    reduced_dofs,
-                    nfields,
-                    self.reduced_size(),
-                );
+                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
+                scatter_local_vector(&mut residual, local, &field_maps, nfields, &layout.offsets);
             }
         }
         residual
@@ -450,8 +556,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        let n = self.reduced_size();
-        assert_eq!(state.nrows(), nfields * n, "state size mismatch");
+        let layout = self.field_layout(nfields);
+        assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
             1,
@@ -459,8 +565,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         );
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
-        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_reduced_dofs
+        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
@@ -479,6 +584,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let (field_maps, field_prescribed) =
+                            self.cell_field_maps(cell_index, nfields);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -486,8 +593,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         );
                         let state_cell = self.prepare_cell_state(
                             nfields,
-                            reduced_dofs,
-                            &self.cell_prescribed_values[cell_index],
+                            &field_maps,
+                            &field_prescribed,
+                            &layout.offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -504,9 +612,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         push_local_matrix_triplets(
                             &mut triplets,
                             &local[..cell_size * cell_size],
-                            reduced_dofs,
+                            &field_maps,
                             nfields,
-                            n,
+                            &layout.offsets,
                             |value| value != 0.0,
                         );
                     }
@@ -515,7 +623,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             )
             .collect();
         let triplets: Vec<_> = batches.into_iter().flatten().collect();
-        let system_size = nfields * n;
+        let system_size = layout.total_size;
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
@@ -558,20 +666,23 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        let n = self.reduced_size();
-        assert_eq!(state.nrows(), nfields * n, "state size mismatch");
+        let layout = self.field_layout(nfields);
+        assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
             1,
             "matrix-free Jacobian requires one state column"
         );
-        assert_eq!(direction.nrows(), nfields * n, "direction size mismatch");
+        assert_eq!(
+            direction.nrows(),
+            layout.total_size,
+            "direction size mismatch"
+        );
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let ncols = direction.ncols();
         let action_stride = local_size * ncols;
-        let batches: Vec<Vec<f64>> = self
-            .cell_reduced_dofs
+        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
@@ -591,6 +702,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let (field_maps, field_prescribed) =
+                            self.cell_field_maps(cell_index, nfields);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -598,8 +711,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         );
                         let state_cell = self.prepare_cell_state(
                             nfields,
-                            reduced_dofs,
-                            &self.cell_prescribed_values[cell_index],
+                            &field_maps,
+                            &field_prescribed,
+                            &layout.offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -609,9 +723,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
                         for column in 0..ncols {
                             for field in 0..nfields {
-                                for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                                for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
                                     local_direction[field * ndofs + local_i] = reduced_i
-                                        .map_or(0.0, |i| direction[(field * n + i, column)]);
+                                        .map_or(0.0, |i| {
+                                            direction[(layout.offsets[field] + i, column)]
+                                        });
                                 }
                             }
                             kernel.apply_local_jacobian(
@@ -629,22 +745,23 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 },
             )
             .collect();
-        let mut out = Mat::<f64>::zeros(nfields * n, direction.ncols());
+        let mut out = Mat::<f64>::zeros(layout.total_size, direction.ncols());
         for (batch_index, batch) in batches.into_iter().enumerate() {
             let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs.len())]
+            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
+                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
                 .iter()
                 .enumerate()
             {
                 let ndofs = reduced_dofs.len();
+                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
                 for column in 0..ncols {
                     let start = cell_offset * action_stride + column * local_size;
                     let local = &batch[start..start + nfields * ndofs];
                     for field in 0..nfields {
-                        for (local_i, &reduced_i) in reduced_dofs.iter().enumerate() {
+                        for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
                             if let Some(reduced_i) = reduced_i {
-                                out[(field * n + reduced_i, column)] +=
+                                out[(layout.offsets[field] + reduced_i, column)] +=
                                     local[field * ndofs + local_i];
                             }
                         }
@@ -694,11 +811,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "bilinear form must contain at least one field");
-        let n = self.reduced_size();
+        let layout = self.field_layout(nfields);
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
-        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self
-            .cell_reduced_dofs
+        let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
@@ -715,6 +831,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let (field_maps, _) = self.cell_field_maps(cell_index, nfields);
                         let ctx = self.prepare_cell_ctx(
                             time,
                             cell_index,
@@ -726,9 +843,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         push_local_matrix_triplets(
                             &mut triplets,
                             &local[..cell_size * cell_size],
-                            reduced_dofs,
+                            &field_maps,
                             nfields,
-                            n,
+                            &layout.offsets,
                             |value| value.abs() > 1e-12,
                         );
                     }
@@ -737,7 +854,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             )
             .collect();
         let triplets: Vec<_> = batches.into_iter().flatten().collect();
-        let system_size = nfields * n;
+        let system_size = layout.total_size;
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
@@ -766,22 +883,24 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     pub fn assemble_system_linear_at<K: LinearForm>(&self, time: f64, kernel: &K) -> Vec<f64> {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "linear form must contain at least one field");
-        let n = self.reduced_size();
+        let layout = self.field_layout(nfields);
         let cd = &self.cell_data;
         let mut grads = vec![0.0; cd.ndofs * cd.npts];
         let mut local = vec![0.0; nfields * cd.ndofs];
-        let mut rhs = vec![0.0; nfields * n];
+        let mut rhs = vec![0.0; layout.total_size];
 
-        for (c, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
+        for c in 0..self.cell_reduced_dofs[0].len() {
+            let reduced_dofs = &self.cell_reduced_dofs[0][c];
             let ndofs = reduced_dofs.len();
+            let (field_maps, _) = self.cell_field_maps(c, nfields);
             let ctx = self.prepare_cell_ctx(time, c, ndofs, &mut grads[..ndofs * cd.npts]);
             kernel.assemble_local_rhs(&ctx, &mut local[..nfields * ndofs]);
             scatter_local_vector(
                 &mut rhs,
                 &local[..nfields * ndofs],
-                reduced_dofs,
+                &field_maps,
                 nfields,
-                n,
+                &layout.offsets,
             );
         }
         rhs
@@ -844,14 +963,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     ) {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "bilinear form must contain at least one field");
-        assert_eq!(
-            rhs.len(),
-            nfields * self.reduced_size(),
-            "RHS size mismatch"
-        );
+        let layout = self.field_layout(nfields);
+        assert_eq!(rhs.len(), layout.total_size, "RHS size mismatch");
         if !self
             .cell_prescribed_values
             .iter()
+            .flatten()
             .flatten()
             .any(Option::is_some)
         {
@@ -861,9 +978,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let mut grads = vec![0.0; cd.ndofs * cd.npts];
         let local_size = nfields * cd.ndofs;
         let mut local = vec![0.0; local_size * local_size];
-        for (cell_index, reduced_dofs) in self.cell_reduced_dofs.iter().enumerate() {
-            let prescribed = &self.cell_prescribed_values[cell_index];
-            if !prescribed.iter().any(Option::is_some) {
+        for cell_index in 0..self.cell_reduced_dofs[0].len() {
+            let reduced_dofs = &self.cell_reduced_dofs[0][cell_index];
+            let (field_maps, field_prescribed) = self.cell_field_maps(cell_index, nfields);
+            if !field_prescribed
+                .iter()
+                .any(|values| values.iter().any(Option::is_some))
+            {
                 continue;
             }
             let ndofs = reduced_dofs.len();
@@ -873,10 +994,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             add_dirichlet_rhs_correction(
                 rhs,
                 &local[..local_size * local_size],
-                reduced_dofs,
-                prescribed,
+                &field_maps,
+                &field_prescribed,
                 nfields,
-                self.reduced_size(),
+                &layout.offsets,
             );
         }
     }
@@ -887,10 +1008,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.
     pub fn assemble_system_lumped_mass(&self, nfields: usize) -> SparseColMat<usize, f64> {
+        let layout = self.field_layout(nfields);
         assemble_lumped_mass(
             &self.cell_data,
             &self.cell_reduced_dofs,
-            self.reduced_size(),
+            &layout.offsets,
             nfields,
         )
     }
@@ -946,7 +1068,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     nfields > 0,
                     "boundary integrator must contain at least one field"
                 );
-                rhs.resize(nfields * self.reduced_size(), 0.0);
+                let layout = self.field_layout(nfields);
+                rhs.resize(layout.total_size, 0.0);
             } else {
                 assert_eq!(
                     kernel.nfields(),
@@ -991,26 +1114,32 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             let mut local_mat = vec![0.0; nfields * nfields];
             kernel.assemble_facet_rhs(&ctx, &mut local_rhs);
             kernel.assemble_facet_mat(&ctx, &mut local_mat);
-            if let Some(reduced) = self.target_dof(point_dofs[0]) {
-                for equation in 0..nfields {
-                    rhs[equation * self.reduced_size() + reduced] += local_rhs[equation];
-                    for unknown in 0..nfields {
-                        let value = local_mat[equation * nfields + unknown];
-                        if value != 0.0 {
-                            triplets.push(Triplet::new(
-                                equation * self.reduced_size() + reduced,
-                                unknown * self.reduced_size() + reduced,
-                                value,
-                            ));
-                        }
+            let layout = self.field_layout(nfields);
+            for equation in 0..nfields {
+                let Some(reduced) = self.target_field_dof(equation, point_dofs[0]) else {
+                    continue;
+                };
+                for unknown in 0..nfields {
+                    let Some(reduced_unknown) = self.target_field_dof(unknown, point_dofs[0])
+                    else {
+                        continue;
+                    };
+                    let value = local_mat[equation * nfields + unknown];
+                    if value != 0.0 {
+                        triplets.push(Triplet::new(
+                            layout.offsets[equation] + reduced,
+                            layout.offsets[unknown] + reduced_unknown,
+                            value,
+                        ));
                     }
                 }
+                rhs[layout.offsets[equation] + reduced] += local_rhs[equation];
             }
         }
         if rhs.is_empty() {
             rhs.resize(self.reduced_size(), 0.0);
         }
-        let system_size = nfields * self.reduced_size();
+        let system_size = self.system_size(nfields);
         BoundaryContributions {
             rhs,
             mat: SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap(),

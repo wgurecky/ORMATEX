@@ -305,4 +305,21 @@ mod tests {
                 })
         }));
     }
+
+    #[test]
+    fn cylinder_example_is_quad_only() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/navier-stokes/cylinder.msh"
+        );
+        let data = gmsh_quad_data(path).unwrap();
+        assert!(data.mesh.entity_count(ReferenceCellType::Quadrilateral) > 0);
+        assert_eq!(
+            data.metadata.physical_names[&PhysicalRegion {
+                dimension: 1,
+                tag: 5,
+            }],
+            "cylinder"
+        );
+    }
 }

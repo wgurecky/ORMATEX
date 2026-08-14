@@ -18,9 +18,7 @@ use ndmesh::traits::Mesh;
 pub trait MatrixFreeJacobianProblem: Sync {
     fn reduced_size(&self) -> usize;
 
-    fn system_size(&self, nfields: usize) -> usize {
-        nfields * self.reduced_size()
-    }
+    fn system_size(&self, nfields: usize) -> usize;
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
@@ -37,6 +35,10 @@ where
 {
     fn reduced_size(&self) -> usize {
         SEM1DProblem::reduced_size(self)
+    }
+
+    fn system_size(&self, nfields: usize) -> usize {
+        SEM1DProblem::system_size(self, nfields)
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
@@ -56,6 +58,10 @@ where
 {
     fn reduced_size(&self) -> usize {
         SEM2DProblem::reduced_size(self)
+    }
+
+    fn system_size(&self, nfields: usize) -> usize {
+        SEM2DProblem::system_size(self, nfields)
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(

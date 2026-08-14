@@ -37,31 +37,26 @@ pub struct BoundaryFacet {
 pub(crate) fn add_dirichlet_rhs_correction(
     rhs: &mut [f64],
     local: &[f64],
-    reduced_dofs: &[Option<usize>],
-    prescribed_values: &[Option<f64>],
+    field_reduced_dofs: &[&[Option<usize>]],
+    field_prescribed_values: &[&[Option<f64>]],
     field_count: usize,
-    reduced_dof_count: usize,
+    field_offsets: &[usize],
 ) {
-    let local_dof_count = reduced_dofs.len();
+    let local_dof_count = field_reduced_dofs[0].len();
     let local_size = field_count * local_dof_count;
-    assert_eq!(
-        prescribed_values.len(),
-        local_dof_count,
-        "cell DOF map length mismatch"
-    );
     for equation in 0..field_count {
-        for (test_dof, &reduced_test_dof) in reduced_dofs.iter().enumerate() {
+        for (test_dof, &reduced_test_dof) in field_reduced_dofs[equation].iter().enumerate() {
             let Some(reduced_test_dof) = reduced_test_dof else {
                 continue;
             };
             let row = equation * local_dof_count + test_dof;
             for unknown in 0..field_count {
-                for (trial_dof, &value) in prescribed_values.iter().enumerate() {
+                for (trial_dof, &value) in field_prescribed_values[unknown].iter().enumerate() {
                     let Some(value) = value else {
                         continue;
                     };
                     let col = unknown * local_dof_count + trial_dof;
-                    rhs[equation * reduced_dof_count + reduced_test_dof] -=
+                    rhs[field_offsets[equation] + reduced_test_dof] -=
                         local[row * local_size + col] * value;
                 }
             }
@@ -89,19 +84,20 @@ pub(crate) fn add_dirichlet_rhs_correction(
 /// Panics if `polynomial_degree` is zero, the mesh is not 2D-in-2D, a selected
 /// kernel has no fields, selected kernels disagree about their field count, or
 /// the mesh has malformed quadrilateral boundary geometry.
-pub(crate) fn assemble_quad_boundaries<'a, M, D, F>(
+pub(crate) fn assemble_quad_boundaries<'a, M, D, S, F>(
     mesh: &M,
     family: &LagrangeElementFamily<f64>,
     polynomial_degree: usize,
-    reduced_dof_count: usize,
     metadata: &MeshMetadata,
     time: f64,
     target_dof: D,
+    field_reduced_size: S,
     mut select_kernel: F,
 ) -> BoundaryContributions
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
-    D: Fn(usize) -> Option<usize>,
+    D: Fn(usize, usize) -> Option<usize>,
+    S: Fn(usize) -> usize,
     F: FnMut(BoundaryFacet) -> Option<&'a dyn BoundaryIntegrator>,
 {
     assert!(
@@ -121,6 +117,7 @@ where
     let xs: Vec<f64> = (0..npts).map(|q| qpts[2 * q + 1]).collect();
     let mut rhs = Vec::new();
     let mut nfields = 1;
+    let mut field_offsets = Vec::new();
     let mut triplets = Vec::new();
     let mut coord = [0.0; 2];
 
@@ -163,7 +160,16 @@ where
                 nfields > 0,
                 "boundary integrator must contain at least one field"
             );
-            rhs.resize(nfields * reduced_dof_count, 0.0);
+            field_offsets = (0..nfields)
+                .scan(0, |offset, field| {
+                    let current = *offset;
+                    *offset += field_reduced_size(field);
+                    Some(current)
+                })
+                .collect();
+            let system_size =
+                field_offsets.last().copied().unwrap_or(0) + field_reduced_size(nfields - 1);
+            rhs.resize(system_size, 0.0);
         } else {
             assert_eq!(
                 kernel.nfields(),
@@ -274,21 +280,20 @@ where
         kernel.assemble_facet_mat(&ctx, &mut local_mat);
         for equation in 0..nfields {
             for (local_i, &full_i) in facet_dofs.iter().enumerate() {
-                let Some(reduced_i) = target_dof(full_i) else {
+                let Some(reduced_i) = target_dof(equation, full_i) else {
                     continue;
                 };
-                rhs[equation * reduced_dof_count + reduced_i] +=
-                    local_rhs[equation * nfacet + local_i];
+                rhs[field_offsets[equation] + reduced_i] += local_rhs[equation * nfacet + local_i];
                 for unknown in 0..nfields {
                     for (local_j, &full_j) in facet_dofs.iter().enumerate() {
-                        if let Some(reduced_j) = target_dof(full_j) {
+                        if let Some(reduced_j) = target_dof(unknown, full_j) {
                             let row = equation * nfacet + local_i;
                             let col = unknown * nfacet + local_j;
                             let value = local_mat[row * local_size + col];
                             if value != 0.0 {
                                 triplets.push(Triplet::new(
-                                    equation * reduced_dof_count + reduced_i,
-                                    unknown * reduced_dof_count + reduced_j,
+                                    field_offsets[equation] + reduced_i,
+                                    field_offsets[unknown] + reduced_j,
                                     value,
                                 ));
                             }
@@ -300,9 +305,13 @@ where
     }
 
     if rhs.is_empty() {
-        rhs.resize(reduced_dof_count, 0.0);
+        rhs.resize(field_reduced_size(0), 0.0);
     }
-    let system_size = nfields * reduced_dof_count;
+    let system_size = if field_offsets.is_empty() {
+        field_reduced_size(0)
+    } else {
+        field_offsets.last().copied().unwrap_or(0) + field_reduced_size(nfields - 1)
+    };
     BoundaryContributions {
         rhs,
         mat: SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap(),
