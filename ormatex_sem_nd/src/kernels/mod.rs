@@ -8,6 +8,7 @@ pub mod kernel_common;
 pub mod kernel_conservation_law_1d;
 pub mod kernel_diffusion_1d;
 pub mod kernel_diffusion_2d;
+pub mod kernel_linear_reaction;
 pub mod kernel_mass;
 pub mod kernel_neumann_flux;
 pub mod kernel_robin_convection;
@@ -23,6 +24,7 @@ pub use kernel_common::{
 pub use kernel_conservation_law_1d::KernelConservationLaw1D;
 pub use kernel_diffusion_1d::KernelDiffusion;
 pub use kernel_diffusion_2d::KernelDiffusion2D;
+pub use kernel_linear_reaction::KernelLinearReaction;
 pub use kernel_mass::KernelMass;
 pub use kernel_neumann_flux::NeumannFlux;
 pub use kernel_robin_convection::RobinConvection;
