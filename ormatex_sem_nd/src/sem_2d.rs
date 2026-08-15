@@ -39,6 +39,9 @@ pub enum DofReduction2D {
     /// its value. Each pair is `(facet_index, prescribed_value)`.
     /// This includes high-order edge DOFs.
     Dirichlet { facets: Vec<(usize, f64)> },
+    /// Eliminate explicitly listed full-space DOFs and prescribe their values.
+    /// This is useful when a boundary value changes at a corner.
+    DirichletValues { values: Vec<(usize, f64)> },
     /// Apply one reduction policy per scalar field. The number of policies
     /// must match the kernel field count during system assembly.
     FieldSpecific { reductions: Vec<DofReduction2D> },
@@ -195,6 +198,9 @@ where
                 prescribed.extend(dofs.into_iter().map(|dof| (dof, value)));
             }
             ReducedDofMap::from_dirichlet_values(n, prescribed)
+        }
+        DofReduction2D::DirichletValues { values } => {
+            ReducedDofMap::from_dirichlet_values(n, values.iter().copied())
         }
         DofReduction2D::FieldSpecific { .. } => {
             panic!("field-specific reductions must be passed at the outer level")

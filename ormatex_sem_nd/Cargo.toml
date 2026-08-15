@@ -14,3 +14,15 @@ rayon = "1"
 
 [dev-dependencies]
 ormatex = { path = "..", default-features = false }
+
+[[example]]
+name = "navier-stokes-cylinder"
+path = "examples/navier-stokes/cylinder.rs"
+
+[[example]]
+name = "navier-stokes-pipe"
+path = "examples/navier-stokes/pipe.rs"
+
+[[example]]
+name = "navier-stokes-cavity"
+path = "examples/navier-stokes/cavity.rs"

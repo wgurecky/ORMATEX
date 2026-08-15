@@ -3,59 +3,19 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use faer::matrix_free::LinOp;
 use faer::prelude::*;
-use ormatex::ode_rk::RkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
-    gmsh_quad_data, DofReduction2D, KernelEdacNavierStokes2D, MatrixFreeMinvJacobian, QuadMesh,
-    SEM2DProblem,
+    gmsh_quad_data, DofReduction2D, KernelEdacNavierStokes2D, MeshMetadata, SEM2DProblem,
 };
 
+#[path = "../support/edac.rs"]
+mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use linear_system::lumped_inverse_mass;
+use edac::{epi3, FluidSystem};
 
-struct FluidSystem<'a> {
-    problem: &'a SEM2DProblem<QuadMesh>,
-    kernel: KernelEdacNavierStokes2D,
-    m_inv: Vec<f64>,
-}
-
-impl<'a> FluidSystem<'a> {
-    fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: KernelEdacNavierStokes2D) -> Self {
-        let mass = problem.assemble_system_lumped_mass(3);
-        Self {
-            problem,
-            kernel,
-            m_inv: lumped_inverse_mass(mass.as_ref()),
-        }
-    }
-}
-
-impl<'a> OdeSys<'a> for FluidSystem<'a> {
-    fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let residual = self
-            .problem
-            .assemble_system_residual_at(t, &self.kernel, state);
-        Mat::from_fn(self.m_inv.len(), 1, |row, _| {
-            -self.m_inv[row] * residual[row]
-        })
-    }
-
-    fn fjac<'b>(&'a self, t: f64, state: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
-        Box::new(MatrixFreeMinvJacobian::new_at(
-            t,
-            self.problem,
-            &self.kernel,
-            state.to_owned(),
-            None,
-            &self.m_inv,
-        ))
-    }
-}
-
-fn boundary_facets(data: &ormatex_sem_nd::MeshMetadata, tag: usize) -> Vec<usize> {
+fn boundary_facets(data: &MeshMetadata, tag: usize) -> Vec<usize> {
     data.facet_regions
         .iter()
         .enumerate()
@@ -97,6 +57,8 @@ fn main() {
     let cylinder = boundary_facets(&metadata, 5);
     assert!(!inlet.is_empty() && !outlet.is_empty() && !cylinder.is_empty());
 
+    // Prescribe the free-stream velocity at the inlet and use a pressure
+    // reference at the outlet. The channel edges are slip/symmetry boundaries.
     let u_in = 1.0;
     let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, u_in)).collect();
     let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
@@ -148,8 +110,9 @@ fn main() {
     let system = FluidSystem::new(&problem, kernel);
     let state0 = Mat::<f64>::zeros(problem.system_size(3), 1);
     let dt = 0.005;
-    let nsteps = 2400;
-    let mut integrator = RkIntegrator::new(0.0, state0.as_ref(), 4);
+    let nsteps = 1000;
+    let mut integrator = epi3(state0.as_ref());
+    std::fs::create_dir_all("target").expect("failed to create output directory");
     let probe_u = nearest(&problem.field_dof_positions(0), (2.0, 0.5));
     let probe_v = nearest(&problem.field_dof_positions(1), (2.0, 0.5));
     let probe_p = nearest(&problem.field_dof_positions(2), (2.0, 0.5));

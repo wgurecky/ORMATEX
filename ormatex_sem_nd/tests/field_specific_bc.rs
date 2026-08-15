@@ -77,6 +77,20 @@ fn two_dimensional_fields_can_have_different_reductions() {
 }
 
 #[test]
+fn explicit_dirichlet_values_can_override_shared_corners() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        1,
+        DofReduction2D::DirichletValues {
+            values: vec![(0, 1.0), (1, 0.0)],
+        },
+    );
+    assert!(problem.target_dof(0).is_none());
+    assert!(problem.target_dof(1).is_none());
+    assert_eq!(problem.reduced_size(), 2);
+}
+
+#[test]
 fn field_specific_offsets_are_used_by_multifield_assembly() {
     let problem = SEM1DProblem::new(
         unit_interval(1),

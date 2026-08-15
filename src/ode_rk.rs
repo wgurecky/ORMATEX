@@ -114,7 +114,7 @@ impl RkIntegrator
             for j in 0..i+1 {
                 y_delta = y_delta.as_ref() + faer::Scale(dt * self.bt.a[i][j]) * k[j].as_ref();
             }
-            let k_i = sys.frhs(t + (dt * self.bt.c[i]), y_delta.as_ref());
+            let k_i = sys.frhs(t + (dt * self.bt.c[i + 1]), y_delta.as_ref());
             k.push(k_i);
         }
         let mut acc = y0.to_owned();
