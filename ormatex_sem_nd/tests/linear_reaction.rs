@@ -1,7 +1,9 @@
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 use ndmesh::shapes::unit_interval;
-use ormatex_sem_nd::{DofReduction1D, KernelLinearReaction, ResidualKernel, SEM1DProblem};
+use ormatex_sem_nd::{
+    DofReduction1D, FieldRegistry, KernelLinearReaction, ResidualKernel, SEM1DProblem,
+};
 
 fn rates() -> [[f64; 3]; 3] {
     [[-0.1, 0.0, 0.0], [0.1, -10.0, 0.0], [0.0, 10.0, -0.01]]
@@ -20,19 +22,29 @@ fn kernel() -> KernelLinearReaction {
             })
         })
         .collect::<Vec<_>>();
-    KernelLinearReaction::new(SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap())
+    KernelLinearReaction::with_field_names(
+        SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap(),
+        ["c0", "c1", "c2"],
+    )
 }
 
 #[test]
 fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
-    let problem = SEM1DProblem::new(unit_interval(1), 2, DofReduction1D::None);
+    let problem = SEM1DProblem::new_with_fields(
+        unit_interval(1),
+        2,
+        FieldRegistry::new(["c0", "c1", "c2"]),
+        DofReduction1D::None,
+    );
     let n = problem.reduced_size();
     let kernel = kernel();
     assert_eq!(ResidualKernel::nfields(&kernel), 3);
 
     let state = Mat::from_fn(3 * n, 1, |row, _| 0.2 + 0.03 * row as f64);
     let direction = Mat::from_fn(3 * n, 1, |row, _| (0.2 * row as f64).sin());
-    let mass = problem.assemble_lumped_mass().to_dense();
+    let mass = SEM1DProblem::new(unit_interval(1), 2, DofReduction1D::None)
+        .assemble_lumped_mass()
+        .to_dense();
     let jacobian = problem
         .assemble_system_residual_jacobian(&kernel, state.as_ref())
         .to_dense();

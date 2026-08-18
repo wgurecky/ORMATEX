@@ -6,7 +6,8 @@ use std::io::{BufWriter, Write};
 use faer::prelude::*;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
-    gmsh_quad_data, DofReduction2D, KernelEdacNavierStokes2D, MeshMetadata, SEM2DProblem,
+    gmsh_quad_data, DofReduction2D, FieldRegistry, KernelEdacNavierStokes2D, MeshMetadata,
+    SEM2DProblem,
 };
 
 #[path = "../support/edac.rs"]
@@ -80,9 +81,10 @@ fn main() {
         .map(|facet| (facet, 0.0))
         .collect();
     let outlet_p: Vec<_> = outlet.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let problem = SEM2DProblem::new_with_metadata(
+    let problem = SEM2DProblem::new_with_fields_and_metadata(
         mesh,
         2,
+        FieldRegistry::new(["u", "v", "p"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![
                 dirichlet(
@@ -108,14 +110,32 @@ fn main() {
     // Keep this example's user-facing setup compact; the kernel owns the model.
     let kernel = KernelEdacNavierStokes2D::new(1.0, 1.0 / 200.0, 4.0, 0.1);
     let system = FluidSystem::new(&problem, kernel);
-    let state0 = Mat::<f64>::zeros(problem.system_size(3), 1);
+    let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let dt = 0.005;
     let nsteps = 1000;
     let mut integrator = epi3(state0.as_ref());
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    let probe_u = nearest(&problem.field_dof_positions(0), (2.0, 0.5));
-    let probe_v = nearest(&problem.field_dof_positions(1), (2.0, 0.5));
-    let probe_p = nearest(&problem.field_dof_positions(2), (2.0, 0.5));
+    let probe_u = nearest(
+        &problem
+            .field_values("u", state0.as_ref())
+            .unwrap()
+            .positions,
+        (2.0, 0.5),
+    );
+    let probe_v = nearest(
+        &problem
+            .field_values("v", state0.as_ref())
+            .unwrap()
+            .positions,
+        (2.0, 0.5),
+    );
+    let probe_p = nearest(
+        &problem
+            .field_values("p", state0.as_ref())
+            .unwrap()
+            .positions,
+        (2.0, 0.5),
+    );
     let mut probe = BufWriter::new(
         File::create("target/navier_stokes_cylinder_probe.csv")
             .expect("failed to create probe csv"),
@@ -127,13 +147,16 @@ fn main() {
             .unwrap_or_else(|error| panic!("EDAC step {step} failed: {}", error.msg));
         integrator.accept_step(result);
         let state = integrator.state();
+        let u = problem.field_values("u", state.as_ref()).unwrap();
+        let v = problem.field_values("v", state.as_ref()).unwrap();
+        let p = problem.field_values("p", state.as_ref()).unwrap();
         writeln!(
             probe,
             "{:.8},{:.9e},{:.9e},{:.9e}",
             integrator.time(),
-            state[(problem.field_offset(0, 3) + probe_u, 0)],
-            state[(problem.field_offset(1, 3) + probe_v, 0)],
-            state[(problem.field_offset(2, 3) + probe_p, 0)],
+            u.values[probe_u],
+            v.values[probe_v],
+            p.values[probe_p],
         )
         .unwrap();
     }
@@ -143,9 +166,12 @@ fn main() {
         File::create("target/navier_stokes_cylinder.csv").expect("failed to create output csv"),
     );
     writeln!(output, "field,x,y,value").unwrap();
-    for field in 0..3 {
-        for (local, (x, y)) in problem.field_dof_positions(field).into_iter().enumerate() {
-            let value = state[(problem.field_offset(field, 3) + local, 0)];
+    for (field, field_values) in [
+        ("u", problem.field_values("u", state.as_ref()).unwrap()),
+        ("v", problem.field_values("v", state.as_ref()).unwrap()),
+        ("p", problem.field_values("p", state.as_ref()).unwrap()),
+    ] {
+        for ((x, y), value) in field_values.positions.into_iter().zip(field_values.values) {
             writeln!(output, "{field},{x:.8},{y:.8},{value:.9e}").unwrap();
         }
     }

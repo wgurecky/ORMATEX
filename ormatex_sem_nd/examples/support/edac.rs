@@ -16,7 +16,7 @@ pub struct FluidSystem<'a> {
 
 impl<'a> FluidSystem<'a> {
     pub fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: KernelEdacNavierStokes2D) -> Self {
-        let mass = problem.assemble_system_lumped_mass(3);
+        let mass = problem.assemble_system_lumped_mass();
         Self {
             problem,
             kernel,

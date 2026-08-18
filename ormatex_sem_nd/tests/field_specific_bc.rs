@@ -6,14 +6,15 @@ use ndmesh::{
     traits::{Entity, Geometry, Mesh, Point},
 };
 use ormatex_sem_nd::{
-    DofReduction1D, DofReduction2D, KernelLinearReaction, SEM1DProblem, SEM2DProblem,
+    DofReduction1D, DofReduction2D, FieldRegistry, KernelLinearReaction, SEM1DProblem, SEM2DProblem,
 };
 
 #[test]
 fn one_dimensional_fields_can_have_different_reductions() {
-    let problem = SEM1DProblem::new(
+    let problem = SEM1DProblem::new_with_fields(
         unit_interval(1),
         1,
+        FieldRegistry::new(["a", "b"]),
         DofReduction1D::FieldSpecific {
             reductions: vec![
                 DofReduction1D::Dirichlet {
@@ -27,7 +28,7 @@ fn one_dimensional_fields_can_have_different_reductions() {
     );
     assert_eq!(problem.field_reduced_size(0), 1);
     assert_eq!(problem.field_reduced_size(1), 1);
-    assert_eq!(problem.system_size(2), 2);
+    assert_eq!(problem.system_size(), 2);
     assert!(problem.target_field_dof(0, 0).is_none());
     assert!(problem.target_field_dof(1, 1).is_none());
 }
@@ -57,9 +58,10 @@ fn two_dimensional_fields_can_have_different_reductions() {
         })
         .unwrap()
         .local_index();
-    let problem = SEM2DProblem::new(
+    let problem = SEM2DProblem::new_with_fields(
         mesh,
         1,
+        FieldRegistry::new(["a", "b"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![
                 DofReduction2D::Dirichlet {
@@ -71,7 +73,7 @@ fn two_dimensional_fields_can_have_different_reductions() {
             ],
         },
     );
-    assert_eq!(problem.system_size(2), 4);
+    assert_eq!(problem.system_size(), 4);
     assert_eq!(problem.field_reduced_size(0), 2);
     assert_eq!(problem.field_reduced_size(1), 2);
 }
@@ -92,9 +94,10 @@ fn explicit_dirichlet_values_can_override_shared_corners() {
 
 #[test]
 fn field_specific_offsets_are_used_by_multifield_assembly() {
-    let problem = SEM1DProblem::new(
+    let problem = SEM1DProblem::new_with_fields(
         unit_interval(1),
         1,
+        FieldRegistry::new(["a", "b"]),
         DofReduction1D::FieldSpecific {
             reductions: vec![
                 DofReduction1D::Dirichlet {
@@ -118,11 +121,47 @@ fn field_specific_offsets_are_used_by_multifield_assembly() {
     )
     .unwrap();
     let kernel = KernelLinearReaction::new(rates);
-    let state = Mat::<f64>::zeros(problem.system_size(2), 1);
+    let state = Mat::<f64>::zeros(problem.system_size(), 1);
     let matrix = problem
         .assemble_system_residual_jacobian(&kernel, state.as_ref())
         .to_dense();
-    assert_eq!(matrix.nrows(), problem.system_size(2));
+    assert_eq!(matrix.nrows(), problem.system_size());
     assert!(matrix[(0, 0)] != 0.0);
     assert!(matrix[(1, 1)] != 0.0);
+}
+
+#[test]
+fn named_field_values_include_reduced_positions() {
+    let problem = SEM1DProblem::new_with_fields(
+        unit_interval(1),
+        1,
+        FieldRegistry::new(["temperature", "pressure"]),
+        DofReduction1D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| row as f64);
+
+    let pressure = problem.field_values("pressure", state.as_ref()).unwrap();
+    assert_eq!(pressure.positions, vec![0.0, 1.0]);
+    assert_eq!(pressure.values, vec![2.0, 3.0]);
+    assert_eq!(problem.field_values("missing", state.as_ref()), None);
+}
+
+#[test]
+#[should_panic(expected = "field names/order do not match")]
+fn named_kernel_must_match_problem_field_order() {
+    let problem = SEM1DProblem::new_with_fields(
+        unit_interval(1),
+        1,
+        FieldRegistry::new(["a", "b"]),
+        DofReduction1D::None,
+    );
+    let rates = SparseColMat::try_new_from_triplets(
+        2,
+        2,
+        &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+    )
+    .unwrap();
+    let kernel = KernelLinearReaction::with_field_names(rates, ["b", "a"]);
+    let state = Mat::zeros(problem.system_size(), 1);
+    problem.assemble_system_residual(&kernel, state.as_ref());
 }

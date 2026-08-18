@@ -3,6 +3,7 @@ use crate::common::{
     push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, CellData, CellState,
     FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap, CELL_BATCH_SIZE,
 };
+use crate::fields::{FieldRegistry, FieldValues};
 use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
 use crate::material::MeshMetadata;
 use faer::prelude::*;
@@ -79,6 +80,7 @@ where
 /// 1D GLL spectral-element problem on interval meshes.
 pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> {
     mesh: M,
+    fields: FieldRegistry,
     family: LagrangeElementFamily<f64>,
     cell_data: CellData,
     cell_reduced_dofs: Vec<Vec<Vec<Option<usize>>>>,
@@ -90,13 +92,40 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
 }
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
+    /// Build a one-field problem using the default field name `field`.
     pub fn new(mesh: M, p: usize, reduction: DofReduction1D) -> Self {
-        Self::new_with_metadata(mesh, p, reduction, MeshMetadata::default())
+        Self::new_with_fields_and_metadata(
+            mesh,
+            p,
+            FieldRegistry::scalar(),
+            reduction,
+            MeshMetadata::default(),
+        )
+    }
+
+    /// Build a problem with named scalar fields in system-vector order.
+    pub fn new_with_fields(
+        mesh: M,
+        p: usize,
+        fields: FieldRegistry,
+        reduction: DofReduction1D,
+    ) -> Self {
+        Self::new_with_fields_and_metadata(mesh, p, fields, reduction, MeshMetadata::default())
     }
 
     pub fn new_with_metadata(
         mesh: M,
         p: usize,
+        reduction: DofReduction1D,
+        metadata: MeshMetadata,
+    ) -> Self {
+        Self::new_with_fields_and_metadata(mesh, p, FieldRegistry::scalar(), reduction, metadata)
+    }
+
+    pub fn new_with_fields_and_metadata(
+        mesh: M,
+        p: usize,
+        fields: FieldRegistry,
         reduction: DofReduction1D,
         metadata: MeshMetadata,
     ) -> Self {
@@ -221,6 +250,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     !reductions.is_empty(),
                     "field-specific reductions cannot be empty"
                 );
+                assert_eq!(
+                    reductions.len(),
+                    fields.len(),
+                    "field-specific reduction count must match problem field count"
+                );
                 reductions
             }
             reduction => vec![reduction],
@@ -248,6 +282,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
         Self {
             mesh,
+            fields,
             family,
             cell_data,
             cell_reduced_dofs,
@@ -263,7 +298,22 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         self.dof_map.target(full)
     }
 
+    /// Return the problem's ordered field registry.
+    pub fn fields(&self) -> &FieldRegistry {
+        &self.fields
+    }
+
+    /// Return the numeric ID for a named field.
+    pub fn field_id(&self, name: &str) -> Option<usize> {
+        self.fields.id(name)
+    }
+
+    pub fn field_names(&self) -> &[String] {
+        self.fields.names()
+    }
+
     pub fn target_field_dof(&self, field: usize, full: usize) -> Option<usize> {
+        assert!(field < self.fields.len(), "field index out of range");
         self.field_dof_maps
             .get(if self.field_dof_maps.len() == 1 {
                 0
@@ -286,15 +336,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         self.dof_map.reduced_size()
     }
 
-    pub fn system_size(&self, nfields: usize) -> usize {
-        self.field_layout(nfields).total_size
+    pub fn system_size(&self) -> usize {
+        self.field_layout().total_size
     }
 
-    pub fn field_offset(&self, field: usize, nfields: usize) -> usize {
-        self.field_layout(nfields).offsets[field]
+    pub fn field_offset(&self, field: usize) -> usize {
+        self.field_layout().offsets[field]
     }
 
     pub fn field_reduced_size(&self, field: usize) -> usize {
+        assert!(field < self.fields.len(), "field index out of range");
         self.field_dof_maps
             .get(if self.field_dof_maps.len() == 1 {
                 0
@@ -306,6 +357,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     }
 
     pub fn field_dof_positions(&self, field: usize) -> Vec<f64> {
+        assert!(field < self.fields.len(), "field index out of range");
         let map = self
             .field_dof_maps
             .get(if self.field_dof_maps.len() == 1 {
@@ -325,12 +377,49 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         out
     }
 
-    fn field_layout(&self, nfields: usize) -> FieldDofLayout {
+    /// Get one named field's reduced values and representative positions.
+    pub fn field_values(&self, name: &str, state: MatRef<'_, f64>) -> Option<FieldValues<f64>> {
+        let field = self.field_id(name)?;
+        assert_eq!(state.nrows(), self.system_size(), "state size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "field extraction requires one state column"
+        );
+        let positions = self.field_dof_positions(field);
+        let offset = self.field_offset(field);
+        let values = (0..positions.len())
+            .map(|local| state[(offset + local, 0)])
+            .collect();
+        Some(FieldValues { positions, values })
+    }
+
+    fn field_layout(&self) -> FieldDofLayout {
         FieldDofLayout::new(
             &self.dof_map,
             (self.field_dof_maps.len() > 1).then_some(&self.field_dof_maps),
-            nfields,
+            self.fields.len(),
         )
+    }
+
+    pub(crate) fn validate_fields(
+        &self,
+        nfields: usize,
+        names: Option<Vec<String>>,
+        context: &str,
+    ) {
+        assert_eq!(
+            nfields,
+            self.fields.len(),
+            "{context} field count does not match the SEM problem"
+        );
+        if let Some(names) = names {
+            assert_eq!(
+                names,
+                self.fields.names(),
+                "{context} field names/order do not match the SEM problem"
+            );
+        }
     }
 
     fn cell_field_maps(
@@ -445,7 +534,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let layout = self.field_layout();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -556,7 +646,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let layout = self.field_layout();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -666,7 +757,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "kernel must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let layout = self.field_layout();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -811,7 +903,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "bilinear form must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "bilinear form");
+        let layout = self.field_layout();
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
@@ -883,7 +976,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     pub fn assemble_system_linear_at<K: LinearForm>(&self, time: f64, kernel: &K) -> Vec<f64> {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "linear form must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "linear form");
+        let layout = self.field_layout();
         let cd = &self.cell_data;
         let mut grads = vec![0.0; cd.ndofs * cd.npts];
         let mut local = vec![0.0; nfields * cd.ndofs];
@@ -963,7 +1057,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     ) {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "bilinear form must contain at least one field");
-        let layout = self.field_layout(nfields);
+        self.validate_fields(nfields, kernel.field_names(), "bilinear form");
+        let layout = self.field_layout();
         assert_eq!(rhs.len(), layout.total_size, "RHS size mismatch");
         if !self
             .cell_prescribed_values
@@ -1006,9 +1101,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         self.apply_dirichlet_rhs_correction_at(0.0, kernel, rhs);
     }
 
-    /// Assemble block-diagonal lumped GLL mass for `nfields` scalar fields.
-    pub fn assemble_system_lumped_mass(&self, nfields: usize) -> SparseColMat<usize, f64> {
-        let layout = self.field_layout(nfields);
+    /// Assemble block-diagonal lumped GLL mass for all problem fields.
+    pub fn assemble_system_lumped_mass(&self) -> SparseColMat<usize, f64> {
+        let nfields = self.fields.len();
+        let layout = self.field_layout();
         assemble_lumped_mass(
             &self.cell_data,
             &self.cell_reduced_dofs,
@@ -1019,7 +1115,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
 
     /// Assemble the diagonal GLL mass matrix for one scalar field.
     pub fn assemble_lumped_mass(&self) -> SparseColMat<usize, f64> {
-        self.assemble_system_lumped_mass(1)
+        assert_eq!(
+            self.fields.len(),
+            1,
+            "scalar mass requires a one-field SEM problem"
+        );
+        self.assemble_system_lumped_mass()
     }
 
     pub fn assemble_boundary_at<'a, F>(&self, time: f64, mut select: F) -> BoundaryContributions
@@ -1029,7 +1130,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let space = FunctionSpaceImpl::new(&self.mesh, &self.family);
         let element = self.family.element(ReferenceCellType::Interval);
         let mut rhs = Vec::new();
-        let mut nfields = 1;
+        let nfields = self.fields.len();
+        let mut selected = false;
         let mut triplets = Vec::new();
         let mut coord = [0.0; 1];
 
@@ -1062,20 +1164,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             }) else {
                 continue;
             };
-            if rhs.is_empty() {
-                nfields = kernel.nfields();
-                assert!(
-                    nfields > 0,
-                    "boundary integrator must contain at least one field"
-                );
-                let layout = self.field_layout(nfields);
+            if !selected {
+                self.validate_fields(nfields, kernel.field_names(), "boundary integrator");
+                selected = true;
+                let layout = self.field_layout();
                 rhs.resize(layout.total_size, 0.0);
             } else {
-                assert_eq!(
-                    kernel.nfields(),
-                    nfields,
-                    "all selected boundary integrators must have the same field count"
-                );
+                self.validate_fields(nfields, kernel.field_names(), "boundary integrator");
             }
             let mut reference_point = rlst_dynamic_array!(f64, [1, 1]);
             *reference_point.get_mut([0, 0]).unwrap() = local_point as f64;
@@ -1114,7 +1209,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             let mut local_mat = vec![0.0; nfields * nfields];
             kernel.assemble_facet_rhs(&ctx, &mut local_rhs);
             kernel.assemble_facet_mat(&ctx, &mut local_mat);
-            let layout = self.field_layout(nfields);
+            let layout = self.field_layout();
             for equation in 0..nfields {
                 let Some(reduced) = self.target_field_dof(equation, point_dofs[0]) else {
                     continue;
@@ -1137,9 +1232,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             }
         }
         if rhs.is_empty() {
-            rhs.resize(self.reduced_size(), 0.0);
+            rhs.resize(self.system_size(), 0.0);
         }
-        let system_size = self.system_size(nfields);
+        let system_size = self.system_size();
         BoundaryContributions {
             rhs,
             mat: SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap(),

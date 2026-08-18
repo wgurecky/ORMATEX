@@ -10,7 +10,9 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
-use ormatex_sem_nd::{DofReduction1D, KernelAdvDiff, KernelLinearReaction, SEM1DProblem};
+use ormatex_sem_nd::{
+    DofReduction1D, FieldRegistry, KernelAdvDiff, KernelLinearReaction, SEM1DProblem,
+};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;
@@ -72,9 +74,10 @@ fn main() {
     let dt = 0.01;
     let nsteps = 100;
 
-    let problem = SEM1DProblem::new(
+    let problem = SEM1DProblem::new_with_fields(
         unit_interval(nx),
         p,
+        FieldRegistry::new(["c0", "c1", "c2"]),
         DofReduction1D::Periodic { facets: [0, nx] },
     );
     let n = problem.reduced_size();
@@ -82,9 +85,12 @@ fn main() {
         problem.assemble_bilinear(&KernelAdvDiff::new(diffusivity, velocity)),
         3,
     );
-    let reaction = problem.assemble_system_bilinear(&KernelLinearReaction::new(reaction_matrix()));
+    let reaction = problem.assemble_system_bilinear(&KernelLinearReaction::with_field_names(
+        reaction_matrix(),
+        ["c0", "c1", "c2"],
+    ));
     let operator = sparse_add(transport.as_ref(), reaction.as_ref());
-    let mass = problem.assemble_system_lumped_mass(3);
+    let mass = problem.assemble_system_lumped_mass();
     let system = LinearOdeSys::new(mass, operator, vec![0.0; 3 * n]);
 
     let positions = problem.dof_positions();
@@ -95,17 +101,23 @@ fn main() {
     assert!(y0.get(n..3 * n, ..).norm_max() == 0.0);
 
     let state = run_epi3(&system, y0.as_ref(), dt, nsteps);
+    let c0 = problem.field_values("c0", state.as_ref()).unwrap();
+    let c1 = problem.field_values("c1", state.as_ref()).unwrap();
+    let c2 = problem.field_values("c2", state.as_ref()).unwrap();
     let mut output = File::create("target/ex_nd_1d_linear_reaction_out.csv")
         .expect("failed to create output csv");
     writeln!(output, "x,c0,c1,c2").unwrap();
-    for i in 0..n {
+    for (((x, c0_value), (_, c1_value)), (_, c2_value)) in c0
+        .positions
+        .iter()
+        .zip(&c0.values)
+        .zip(c1.positions.iter().zip(&c1.values))
+        .zip(c2.positions.iter().zip(&c2.values))
+    {
         writeln!(
             output,
             "{:.6},{:.9e},{:.9e},{:.9e}",
-            positions[i],
-            state[(i, 0)],
-            state[(n + i, 0)],
-            state[(2 * n + i, 0)]
+            x, c0_value, c1_value, c2_value,
         )
         .unwrap();
     }

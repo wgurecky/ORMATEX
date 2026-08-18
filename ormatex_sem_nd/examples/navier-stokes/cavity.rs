@@ -16,7 +16,9 @@ use ndmesh::{
     shapes::unit_square,
     traits::{Entity, Geometry, Mesh, Point, Topology},
 };
-use ormatex_sem_nd::{DofReduction2D, KernelEdacNavierStokes2D, QuadMesh, SEM2DProblem};
+use ormatex_sem_nd::{
+    DofReduction2D, FieldRegistry, KernelEdacNavierStokes2D, QuadMesh, SEM2DProblem,
+};
 
 #[path = "../support/edac.rs"]
 mod edac;
@@ -87,9 +89,10 @@ fn main() {
     let family = LagrangeElementFamily::<f64>::new(2, Continuity::Standard, LagrangeVariant::GLL);
     let space = FunctionSpaceImpl::new(&mesh, &family);
     let (u_values, v_values, pressure_dof) = boundary_facet_values(&mesh, &space);
-    let problem = SEM2DProblem::new(
+    let problem = SEM2DProblem::new_with_fields(
         mesh,
         2,
+        FieldRegistry::new(["u", "v", "p"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![
                 DofReduction2D::DirichletValues {
@@ -106,12 +109,13 @@ fn main() {
     );
     let kernel = KernelEdacNavierStokes2D::new(1.0, 0.1, 10.0, 0.0);
     let system = FluidSystem::new(&problem, kernel);
-    let state0 = Mat::<f64>::zeros(problem.system_size(3), 1);
+    let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let state = advance(&system, state0.as_ref(), 0.01, 300);
     std::fs::create_dir_all("target").expect("failed to create output directory");
 
-    let u_positions = problem.field_dof_positions(0);
-    let v_positions = problem.field_dof_positions(1);
+    let u = problem.field_values("u", state.as_ref()).unwrap();
+    let v = problem.field_values("v", state.as_ref()).unwrap();
+    let p = problem.field_values("p", state.as_ref()).unwrap();
     let mut min_u = f64::INFINITY;
     let mut max_abs_v: f64 = 0.0;
     let mut output = BufWriter::new(
@@ -119,20 +123,14 @@ fn main() {
             .expect("failed to create cavity output csv"),
     );
     writeln!(output, "field,x,y,value").unwrap();
-    for field in 0..3 {
-        let positions = match field {
-            0 => &u_positions,
-            1 => &v_positions,
-            _ => &problem.field_dof_positions(2),
-        };
-        for (local, &(x, y)) in positions.iter().enumerate() {
-            let value = state[(problem.field_offset(field, 3) + local, 0)];
+    for (field, field_values) in [("u", u), ("v", v), ("p", p)] {
+        for (&(x, y), &value) in field_values.positions.iter().zip(&field_values.values) {
             assert!(value.is_finite(), "non-finite cavity state");
             writeln!(output, "{field},{x:.9},{y:.9},{value:.9e}").unwrap();
-            if field == 0 && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
+            if field == "u" && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
                 min_u = min_u.min(value);
             }
-            if field == 1 && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
+            if field == "v" && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
                 max_abs_v = max_abs_v.max(value.abs());
             }
         }

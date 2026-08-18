@@ -18,6 +18,10 @@ impl<F: FluxKernel1D> ResidualKernel for KernelConservationLaw1D<F> {
         self.flux.nfields()
     }
 
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.flux.field_names()
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

@@ -29,6 +29,15 @@ impl FluxKernel1D for Euler1D {
         3
     }
 
+    fn field_names(&self) -> Option<Vec<String>> {
+        Some(
+            ["rho", "momentum", "total_energy"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
     fn flux(&self, _ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64 {
         let momentum = state.value(1, q);
         let energy = state.value(2, q);

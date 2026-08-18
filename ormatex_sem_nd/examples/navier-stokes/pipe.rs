@@ -9,7 +9,9 @@ use ndmesh::{
     traits::{Builder, Entity, Geometry, Mesh, Point, Topology},
     SingleElementMeshBuilder,
 };
-use ormatex_sem_nd::{DofReduction2D, KernelEdacNavierStokes2D, QuadMesh, SEM2DProblem};
+use ormatex_sem_nd::{
+    DofReduction2D, FieldRegistry, KernelEdacNavierStokes2D, QuadMesh, SEM2DProblem,
+};
 
 #[path = "../support/edac.rs"]
 mod edac;
@@ -98,9 +100,10 @@ fn main() {
         .collect();
     assert!(!walls.is_empty() && !inlet.is_empty() && !outlet.is_empty());
 
-    let problem = SEM2DProblem::new(
+    let problem = SEM2DProblem::new_with_fields(
         mesh,
         2,
+        FieldRegistry::new(["u", "v", "p"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![
                 DofReduction2D::Dirichlet {
@@ -115,12 +118,13 @@ fn main() {
     );
     let kernel = KernelEdacNavierStokes2D::new(rho, nu, 10.0, 0.0);
     let system = FluidSystem::new(&problem, kernel);
-    let state0 = Mat::<f64>::zeros(problem.system_size(3), 1);
+    let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let state = advance(&system, state0.as_ref(), 0.02, 500);
     std::fs::create_dir_all("target").expect("failed to create output directory");
 
-    let u_positions = problem.field_dof_positions(0);
-    let v_positions = problem.field_dof_positions(1);
+    let u = problem.field_values("u", state.as_ref()).unwrap();
+    let v = problem.field_values("v", state.as_ref()).unwrap();
+    let p = problem.field_values("p", state.as_ref()).unwrap();
     let mut profile = BufWriter::new(
         File::create("target/navier_stokes_pipe_profile.csv")
             .expect("failed to create pipe profile csv"),
@@ -129,8 +133,7 @@ fn main() {
     let mut max_error: f64 = 0.0;
     let mut max_v: f64 = 0.0;
     let mut profile_count = 0;
-    for (local, &(x, y)) in u_positions.iter().enumerate() {
-        let value = state[(problem.field_offset(0, 3) + local, 0)];
+    for (&(x, y), &value) in u.positions.iter().zip(&u.values) {
         assert!(value.is_finite(), "non-finite pipe velocity");
         if (x - 0.5 * length).abs() < EPS {
             let analytic = delta_p * y * (height - y) / (2.0 * rho * nu * length);
@@ -139,16 +142,12 @@ fn main() {
             writeln!(profile, "{y:.9},{value:.9e},{analytic:.9e}").unwrap();
         }
     }
-    for (local, _) in v_positions.iter().enumerate() {
-        let value = state[(problem.field_offset(1, 3) + local, 0)];
+    for &value in &v.values {
         assert!(value.is_finite(), "non-finite pipe transverse velocity");
         max_v = max_v.max(value.abs());
     }
-    for local in 0..problem.field_reduced_size(2) {
-        assert!(
-            state[(problem.field_offset(2, 3) + local, 0)].is_finite(),
-            "non-finite pipe pressure"
-        );
+    for &value in &p.values {
+        assert!(value.is_finite(), "non-finite pipe pressure");
     }
     assert!(profile_count > 0, "no centerline pipe profile DOFs");
     assert!(max_v < 1e-2, "transverse pipe velocity too large: {max_v}");

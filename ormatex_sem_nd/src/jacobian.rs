@@ -20,6 +20,8 @@ pub trait MatrixFreeJacobianProblem: Sync {
 
     fn system_size(&self, nfields: usize) -> usize;
 
+    fn validate_kernel_fields<K: ResidualKernel>(&self, _kernel: &K) {}
+
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
         &self,
         time: f64,
@@ -38,7 +40,21 @@ where
     }
 
     fn system_size(&self, nfields: usize) -> usize {
-        SEM1DProblem::system_size(self, nfields)
+        assert_eq!(
+            nfields,
+            self.fields().len(),
+            "kernel/problem field count mismatch"
+        );
+        SEM1DProblem::system_size(self)
+    }
+
+    fn validate_kernel_fields<K: ResidualKernel>(&self, kernel: &K) {
+        SEM1DProblem::validate_fields(
+            self,
+            kernel.nfields(),
+            kernel.field_names(),
+            "residual kernel",
+        );
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
@@ -61,7 +77,21 @@ where
     }
 
     fn system_size(&self, nfields: usize) -> usize {
-        SEM2DProblem::system_size(self, nfields)
+        assert_eq!(
+            nfields,
+            self.fields().len(),
+            "kernel/problem field count mismatch"
+        );
+        SEM2DProblem::system_size(self)
+    }
+
+    fn validate_kernel_fields<K: ResidualKernel>(&self, kernel: &K) {
+        SEM2DProblem::validate_fields(
+            self,
+            kernel.nfields(),
+            kernel.field_names(),
+            "residual kernel",
+        );
     }
 
     fn apply_residual_jacobian_matfree<K: ResidualKernel + Sync>(
@@ -165,6 +195,7 @@ impl<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> MatrixFreeMinvJacobian
         fixed_jacobian: Option<SparseColMatRef<'a, usize, f64>>,
         m_inv: &'a [f64],
     ) -> Self {
+        problem.validate_kernel_fields(kernel);
         let n = problem.system_size(kernel.nfields());
         assert_eq!(state.nrows(), n, "state/problem size mismatch");
         assert_eq!(

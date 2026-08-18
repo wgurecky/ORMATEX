@@ -106,6 +106,10 @@ impl ResidualKernel for KernelEdacNavierStokes2D {
         3
     }
 
+    fn field_names(&self) -> Option<Vec<String>> {
+        Some(["u", "v", "p"].into_iter().map(str::to_owned).collect())
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

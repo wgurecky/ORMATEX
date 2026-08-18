@@ -1,6 +1,7 @@
 //! Spectral-element finite-element infrastructure built on `ndmesh`.
 
 pub mod common;
+pub mod fields;
 pub mod gmsh;
 pub mod jacobian;
 pub mod kernels;
@@ -9,6 +10,7 @@ pub mod sem_1d;
 pub mod sem_2d;
 
 pub use common::{BoundaryContributions, BoundaryFacet, CellState, FacetCtx, LocalCtx, ShapeFn};
+pub use fields::{FieldRegistry, FieldValues};
 pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{MatrixFreeJacobianProblem, MatrixFreeMinvJacobian, OwnedMinvJacobian};
 pub use kernels::{

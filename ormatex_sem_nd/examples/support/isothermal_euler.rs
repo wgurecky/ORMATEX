@@ -24,6 +24,10 @@ impl FluxKernel1D for IsothermalEuler1D {
         2
     }
 
+    fn field_names(&self) -> Option<Vec<String>> {
+        Some(["u", "rho"].into_iter().map(str::to_owned).collect())
+    }
+
     fn flux(&self, _ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64 {
         let u = state.value(0, q);
         let rho = self.density(state, q);

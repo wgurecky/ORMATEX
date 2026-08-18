@@ -1,6 +1,7 @@
 use faer::sparse::SparseColMat;
 
 use crate::common::{CellState, LocalCtx};
+use crate::fields::FieldRegistry;
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
 
@@ -10,6 +11,7 @@ use super::kernel_common::{BilinearForm, ResidualKernel};
 /// treated as zero, and each entry is coupled through the scalar FEM mass form.
 pub struct KernelLinearReaction {
     interactions: Vec<Vec<(usize, f64)>>,
+    field_names: Option<Vec<String>>,
 }
 
 impl KernelLinearReaction {
@@ -33,7 +35,27 @@ impl KernelLinearReaction {
                 }
             }
         }
-        Self { interactions }
+        Self {
+            interactions,
+            field_names: None,
+        }
+    }
+
+    /// Attach the ordered solution-field names represented by the reaction matrix.
+    pub fn with_field_names<I, S>(rates: SparseColMat<usize, f64>, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut kernel = Self::new(rates);
+        let names = FieldRegistry::new(names);
+        assert_eq!(
+            names.len(),
+            kernel.interactions.len(),
+            "reaction field-name count must match the matrix"
+        );
+        kernel.field_names = Some(names.names().to_vec());
+        kernel
     }
 
     fn coefficient(&self, equation: usize, unknown: usize) -> f64 {
@@ -47,6 +69,10 @@ impl KernelLinearReaction {
 impl BilinearForm for KernelLinearReaction {
     fn nfields(&self) -> usize {
         self.interactions.len()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
     }
 
     fn integrand(
@@ -66,6 +92,10 @@ impl BilinearForm for KernelLinearReaction {
 impl ResidualKernel for KernelLinearReaction {
     fn nfields(&self) -> usize {
         self.interactions.len()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
     }
 
     fn residual_integrand(

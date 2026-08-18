@@ -8,7 +8,7 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
-    DofReduction1D, KernelConservationLaw1D, MatrixFreeMinvJacobian, ResidualKernel, SEM1DProblem,
+    DofReduction1D, FieldRegistry, KernelConservationLaw1D, MatrixFreeMinvJacobian, SEM1DProblem,
 };
 
 #[path = "support/isothermal_euler.rs"]
@@ -31,7 +31,7 @@ impl<'a> IsothermalEulerSystem<'a> {
         problem: &'a SEM1DProblem<IntervalMesh>,
         kernel: KernelConservationLaw1D<IsothermalEuler1D>,
     ) -> Self {
-        let mass = problem.assemble_system_lumped_mass(kernel.nfields());
+        let mass = problem.assemble_system_lumped_mass();
         let m_inv = lumped_inverse_mass(mass.as_ref());
         Self {
             problem,
@@ -77,7 +77,12 @@ fn main() {
     let nsteps = 25;
 
     let mesh = unit_interval(nx);
-    let problem = SEM1DProblem::new(mesh, p, DofReduction1D::Periodic { facets: [0, nx] });
+    let problem = SEM1DProblem::new_with_fields(
+        mesh,
+        p,
+        FieldRegistry::new(["u", "rho"]),
+        DofReduction1D::Periodic { facets: [0, nx] },
+    );
     let kernel = KernelConservationLaw1D::new(IsothermalEuler1D::new(sound_speed));
     let system = IsothermalEulerSystem::new(&problem, kernel);
     let n = problem.reduced_size();
@@ -90,18 +95,18 @@ fn main() {
     }
 
     let y = implicit_euler_final_state(&system, y0.as_ref(), dt, nsteps, 1e-10);
+    let u = problem.field_values("u", y.as_ref()).unwrap();
+    let rho = problem.field_values("rho", y.as_ref()).unwrap();
 
     let mut output = File::create("target/ex_nd_1d_isothermal_euler_out.csv")
         .expect("failed to create output csv");
     writeln!(output, "x,u,rho").unwrap();
-    for i in 0..n {
-        writeln!(
-            output,
-            "{:.6},{:.9e},{:.9e}",
-            x[i],
-            y[(i, 0)],
-            y[(n + i, 0)]
-        )
-        .unwrap();
+    for ((x, u_value), (_, rho_value)) in u
+        .positions
+        .iter()
+        .zip(&u.values)
+        .zip(rho.positions.iter().zip(&rho.values))
+    {
+        writeln!(output, "{:.6},{:.9e},{:.9e}", x, u_value, rho_value,).unwrap();
     }
 }

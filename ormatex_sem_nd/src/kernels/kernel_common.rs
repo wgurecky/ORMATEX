@@ -9,6 +9,11 @@ pub trait BilinearForm {
         1
     }
 
+    /// Optional ordered names for fields whose meaning is part of the form.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Bare integrand for one equation/unknown block and test/trial pair.
     fn integrand(
         &self,
@@ -58,6 +63,11 @@ pub trait LinearForm {
         1
     }
 
+    /// Optional ordered names for fields whose meaning is part of the form.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Bare integrand for one equation and test dof.
     fn integrand(&self, ctx: &LocalCtx, equation: usize, q: usize, test_i: usize) -> f64;
 
@@ -84,6 +94,11 @@ pub trait ResidualKernel {
     /// Number of scalar PDE fields/equations in this kernel.
     fn nfields(&self) -> usize {
         1
+    }
+
+    /// Optional ordered names for fields whose meaning is part of the kernel.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
     }
 
     fn residual_integrand(
@@ -189,6 +204,11 @@ pub trait ResidualKernel {
 pub trait FluxKernel1D {
     fn nfields(&self) -> usize;
 
+    /// Optional ordered names for fields whose meaning is part of the flux.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
     fn flux(&self, ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64;
 
     fn flux_jacobian(
@@ -206,6 +226,11 @@ pub trait BoundaryIntegrator {
     /// Number of scalar equation/unknown fields in this boundary form.
     fn nfields(&self) -> usize {
         1
+    }
+
+    /// Optional ordered names for fields whose meaning is part of the boundary form.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
     }
 
     fn integrand_rhs(&self, ctx: &FacetCtx, equation: usize, q: usize, test_i: usize) -> f64;

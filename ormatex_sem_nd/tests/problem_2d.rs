@@ -7,8 +7,8 @@ use ndmesh::{
     SingleElementMesh, SingleElementMeshBuilder,
 };
 use ormatex_sem_nd::{
-    BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, KernelAdvDiff2D, KernelAdvDiffSUPG2D,
-    KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
+    BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, FieldRegistry, KernelAdvDiff2D,
+    KernelAdvDiffSUPG2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
 };
 use ormatex_sem_nd::{ConstantCoefficient, MeshMetadata, PhysicalRegion, RegionCoefficient};
 
@@ -272,7 +272,8 @@ fn nonzero_dirichlet_value_enters_2d_state() {
 #[test]
 fn volume_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem =
+        SEM2DProblem::new_with_fields(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
     assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
@@ -376,7 +377,8 @@ fn periodic_pairs_reject_interior_facets() {
 #[test]
 fn boundary_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem =
+        SEM2DProblem::new_with_fields(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
     let flux = YFlux;
     let boundary =
         problem.assemble_boundary(|facet| (facet.midpoint[0].abs() < 1e-12).then_some(&flux));
@@ -404,7 +406,12 @@ fn residual_kernel_jacobian_matches_directional_difference() {
 #[test]
 fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new_with_fields(
+        mesh,
+        2,
+        FieldRegistry::new(["a", "b"]),
+        DofReduction2D::None,
+    );
     let n = problem.reduced_size();
     let state = Mat::from_fn(2 * n, 1, |i, _| 0.2 + 0.02 * i as f64);
     let direction = Mat::from_fn(2 * n, 1, |i, _| (0.17 * i as f64).sin());

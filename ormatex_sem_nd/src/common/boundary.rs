@@ -9,6 +9,7 @@ use ndmesh::traits::{Entity, Geometry, GeometryMap, Mesh, Point, Topology};
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rlst::{rlst_dynamic_array, DynArray};
 
+use crate::fields::FieldRegistry;
 use crate::kernels::kernel_common::BoundaryIntegrator;
 use crate::material::{MeshMetadata, PhysicalRegion};
 
@@ -89,6 +90,7 @@ pub(crate) fn assemble_quad_boundaries<'a, M, D, S, F>(
     family: &LagrangeElementFamily<f64>,
     polynomial_degree: usize,
     metadata: &MeshMetadata,
+    fields: &FieldRegistry,
     time: f64,
     target_dof: D,
     field_reduced_size: S,
@@ -116,7 +118,8 @@ where
     let npts = wts.len();
     let xs: Vec<f64> = (0..npts).map(|q| qpts[2 * q + 1]).collect();
     let mut rhs = Vec::new();
-    let mut nfields = 1;
+    let nfields = fields.len();
+    let mut selected = false;
     let mut field_offsets = Vec::new();
     let mut triplets = Vec::new();
     let mut coord = [0.0; 2];
@@ -154,12 +157,20 @@ where
         }) else {
             continue;
         };
-        if rhs.is_empty() {
-            nfields = kernel.nfields();
-            assert!(
-                nfields > 0,
-                "boundary integrator must contain at least one field"
+        if !selected {
+            assert_eq!(
+                kernel.nfields(),
+                nfields,
+                "boundary integrator field count does not match the SEM problem"
             );
+            if let Some(names) = kernel.field_names() {
+                assert_eq!(
+                    names.as_slice(),
+                    fields.names(),
+                    "boundary integrator field names/order do not match the SEM problem"
+                );
+            }
+            selected = true;
             field_offsets = (0..nfields)
                 .scan(0, |offset, field| {
                     let current = *offset;
@@ -176,6 +187,13 @@ where
                 nfields,
                 "all selected boundary integrators must have the same field count"
             );
+            if let Some(names) = kernel.field_names() {
+                assert_eq!(
+                    names.as_slice(),
+                    fields.names(),
+                    "boundary integrator field names/order do not match the SEM problem"
+                );
+            }
         }
 
         let cell = mesh
@@ -304,14 +322,14 @@ where
         }
     }
 
-    if rhs.is_empty() {
-        rhs.resize(field_reduced_size(0), 0.0);
-    }
     let system_size = if field_offsets.is_empty() {
-        field_reduced_size(0)
+        (0..nfields).map(|field| field_reduced_size(field)).sum()
     } else {
         field_offsets.last().copied().unwrap_or(0) + field_reduced_size(nfields - 1)
     };
+    if rhs.is_empty() {
+        rhs.resize(system_size, 0.0);
+    }
     BoundaryContributions {
         rhs,
         mat: SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap(),
