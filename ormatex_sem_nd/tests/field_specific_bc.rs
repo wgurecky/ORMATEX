@@ -11,7 +11,7 @@ use ormatex_sem_nd::{
 
 #[test]
 fn one_dimensional_fields_can_have_different_reductions() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(1),
         1,
         FieldRegistry::new(["a", "b"]),
@@ -58,7 +58,7 @@ fn two_dimensional_fields_can_have_different_reductions() {
         })
         .unwrap()
         .local_index();
-    let problem = SEM2DProblem::new_with_fields(
+    let problem = SEM2DProblem::new(
         mesh,
         1,
         FieldRegistry::new(["a", "b"]),
@@ -83,6 +83,7 @@ fn explicit_dirichlet_values_can_override_shared_corners() {
     let problem = SEM2DProblem::new(
         unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
         1,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::DirichletValues {
             values: vec![(0, 1.0), (1, 0.0)],
         },
@@ -94,7 +95,7 @@ fn explicit_dirichlet_values_can_override_shared_corners() {
 
 #[test]
 fn field_specific_offsets_are_used_by_multifield_assembly() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(1),
         1,
         FieldRegistry::new(["a", "b"]),
@@ -132,7 +133,7 @@ fn field_specific_offsets_are_used_by_multifield_assembly() {
 
 #[test]
 fn named_field_values_include_reduced_positions() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(1),
         1,
         FieldRegistry::new(["temperature", "pressure"]),
@@ -149,7 +150,7 @@ fn named_field_values_include_reduced_positions() {
 #[test]
 #[should_panic(expected = "field names/order do not match")]
 fn named_kernel_must_match_problem_field_order() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(1),
         1,
         FieldRegistry::new(["a", "b"]),

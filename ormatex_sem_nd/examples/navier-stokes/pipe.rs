@@ -100,7 +100,7 @@ fn main() {
         .collect();
     assert!(!walls.is_empty() && !inlet.is_empty() && !outlet.is_empty());
 
-    let problem = SEM2DProblem::new_with_fields(
+    let problem = SEM2DProblem::new(
         mesh,
         2,
         FieldRegistry::new(["u", "v", "p"]),

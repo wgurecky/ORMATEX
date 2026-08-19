@@ -10,7 +10,9 @@ use ndmesh::{
     traits::{Entity, Geometry, Mesh, Point, Topology},
     SingleElementMesh,
 };
-use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, KernelVolumeSource, SEM2DProblem};
+use ormatex_sem_nd::{
+    DofReduction2D, FieldRegistry, KernelAdvDiff2D, KernelVolumeSource, SEM2DProblem,
+};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;
@@ -23,6 +25,7 @@ fn main() {
     let problem = SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["u"]),
         DofReduction2D::Periodic {
             facet_pairs,
             tolerance: 1e-12,

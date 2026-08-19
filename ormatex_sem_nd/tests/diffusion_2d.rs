@@ -6,8 +6,8 @@ use ndmesh::{
     SingleElementMesh,
 };
 use ormatex_sem_nd::{
-    DofReduction2D, KernelDiffusion2D, KernelVolumeSource, NeumannFlux, RobinConvection,
-    SEM2DProblem,
+    DofReduction2D, FieldRegistry, KernelDiffusion2D, KernelVolumeSource, NeumannFlux,
+    RobinConvection, SEM2DProblem,
 };
 
 #[path = "../examples/support/linear_system.rs"]
@@ -46,6 +46,7 @@ fn p2_transient_diffusion_reaches_constant_dirichlet_temperature() {
     let problem = SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Dirichlet {
             facets: facets
                 .into_iter()
@@ -67,6 +68,7 @@ fn p2_transient_diffusion_reaches_neumann_robin_linear_x_profile() {
     let problem = SEM2DProblem::new(
         unit_square(4, 4, ReferenceCellType::Quadrilateral, 1),
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::None,
     );
     let diffusivity = 0.4;

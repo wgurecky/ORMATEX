@@ -77,7 +77,7 @@ fn main() {
     let nsteps = 25;
 
     let mesh = unit_interval(nx);
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         mesh,
         p,
         FieldRegistry::new(["u", "rho"]),

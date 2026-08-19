@@ -81,7 +81,7 @@ fn main() {
         .map(|facet| (facet, 0.0))
         .collect();
     let outlet_p: Vec<_> = outlet.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let problem = SEM2DProblem::new_with_fields_and_metadata(
+    let problem = SEM2DProblem::new_with_metadata(
         mesh,
         2,
         FieldRegistry::new(["u", "v", "p"]),

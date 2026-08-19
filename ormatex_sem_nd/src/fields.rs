@@ -30,10 +30,6 @@ impl FieldRegistry {
         Self { names, ids }
     }
 
-    pub(crate) fn scalar() -> Self {
-        Self::new(["field"])
-    }
-
     /// Number of registered fields.
     pub fn len(&self) -> usize {
         self.names.len()

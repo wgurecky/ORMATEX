@@ -30,7 +30,7 @@ fn kernel() -> KernelLinearReaction {
 
 #[test]
 fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(1),
         2,
         FieldRegistry::new(["c0", "c1", "c2"]),
@@ -42,9 +42,7 @@ fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
 
     let state = Mat::from_fn(3 * n, 1, |row, _| 0.2 + 0.03 * row as f64);
     let direction = Mat::from_fn(3 * n, 1, |row, _| (0.2 * row as f64).sin());
-    let mass = SEM1DProblem::new(unit_interval(1), 2, DofReduction1D::None)
-        .assemble_lumped_mass()
-        .to_dense();
+    let mass = problem.assemble_system_lumped_mass().to_dense();
     let jacobian = problem
         .assemble_system_residual_jacobian(&kernel, state.as_ref())
         .to_dense();

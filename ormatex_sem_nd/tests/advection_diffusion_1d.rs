@@ -5,7 +5,7 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
-use ormatex_sem_nd::{DofReduction1D, KernelAdvDiff, SEM1DProblem};
+use ormatex_sem_nd::{DofReduction1D, FieldRegistry, KernelAdvDiff, SEM1DProblem};
 
 #[path = "../examples/support/linear_system.rs"]
 mod linear_system;
@@ -45,6 +45,7 @@ fn p2_epi3_krylov_advects_and_diffuses_periodic_gaussian() {
     let problem = SEM1DProblem::new(
         unit_interval(nx),
         2,
+        FieldRegistry::new(["u"]),
         DofReduction1D::Periodic { facets: [0, nx] },
     );
     let mass = problem.assemble_lumped_mass();

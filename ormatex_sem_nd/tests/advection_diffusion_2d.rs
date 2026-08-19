@@ -9,7 +9,7 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
-use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, SEM2DProblem};
+use ormatex_sem_nd::{DofReduction2D, FieldRegistry, KernelAdvDiff2D, SEM2DProblem};
 
 #[path = "../examples/support/linear_system.rs"]
 mod linear_system;
@@ -103,6 +103,7 @@ fn p2_epi3_krylov_advects_and_diffuses_periodic_gaussian() {
     let problem = SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["u"]),
         DofReduction2D::Periodic {
             facet_pairs,
             tolerance: 1e-12,

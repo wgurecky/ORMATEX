@@ -6,8 +6,8 @@ use faer::sparse::SparseColMat;
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use ormatex_sem_nd::{
-    BoundaryContributions, BoundaryFacet, DofReduction2D, KernelAdvDiff2D, MeshMetadata,
-    NeumannFlux, RobinConvection, SEM2DProblem,
+    BoundaryContributions, BoundaryFacet, DofReduction2D, FieldRegistry, KernelAdvDiff2D,
+    MeshMetadata, NeumannFlux, RobinConvection, SEM2DProblem,
 };
 
 use super::linear_system::{implicit_euler_final_state, sparse_add, LinearOdeSys};
@@ -20,7 +20,13 @@ pub fn diffusion_neumann_problem<M>(
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
-    let problem = SEM2DProblem::new_with_metadata(mesh, p, DofReduction2D::None, metadata);
+    let problem = SEM2DProblem::new_with_metadata(
+        mesh,
+        p,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+        metadata,
+    );
     let mass = problem.assemble_lumped_mass();
     (problem, mass, KernelAdvDiff2D::new(0.1, [0.0, 0.0]))
 }

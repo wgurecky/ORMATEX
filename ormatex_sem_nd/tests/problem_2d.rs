@@ -205,6 +205,7 @@ fn dirichlet_eliminates_every_high_order_facet_dof() {
     let problem = SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Dirichlet {
             facets: vec![(left_facet, 0.0)],
         },
@@ -237,6 +238,7 @@ fn nonzero_dirichlet_value_enters_2d_state() {
     let problem = SEM2DProblem::new(
         mesh,
         1,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Dirichlet {
             facets: vec![(left_facet, 3.0)],
         },
@@ -249,6 +251,7 @@ fn nonzero_dirichlet_value_enters_2d_state() {
     let full_problem = SEM2DProblem::new(
         unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
         1,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::None,
     );
     let full_matrix = full_problem.assemble_bilinear(&kernel).to_dense();
@@ -272,8 +275,7 @@ fn nonzero_dirichlet_value_enters_2d_state() {
 #[test]
 fn volume_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem =
-        SEM2DProblem::new_with_fields(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
+    let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
     assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
@@ -284,6 +286,7 @@ fn lumped_mass_matches_generic_gll_mass() {
     let problem = SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Periodic {
             facet_pairs,
             tolerance: 1e-12,
@@ -306,6 +309,7 @@ fn periodic_pairs_identify_translated_reversed_high_order_facets() {
     let problem = SEM2DProblem::new(
         mesh,
         3,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Periodic {
             facet_pairs: vec![[source, target]],
             tolerance: 1e-12,
@@ -341,6 +345,7 @@ fn periodic_pairs_reject_nontranslated_facets() {
     SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Periodic {
             facet_pairs: vec![[pairs[0][0], pairs.last().unwrap()[0]]],
             tolerance: 1e-12,
@@ -367,6 +372,7 @@ fn periodic_pairs_reject_interior_facets() {
     SEM2DProblem::new(
         mesh,
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction2D::Periodic {
             facet_pairs: vec![[interior, boundary]],
             tolerance: 1e-12,
@@ -377,8 +383,7 @@ fn periodic_pairs_reject_interior_facets() {
 #[test]
 fn boundary_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem =
-        SEM2DProblem::new_with_fields(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
+    let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
     let flux = YFlux;
     let boundary =
         problem.assemble_boundary(|facet| (facet.midpoint[0].abs() < 1e-12).then_some(&flux));
@@ -388,7 +393,12 @@ fn boundary_kernel_reads_physical_quadrature_points() {
 #[test]
 fn residual_kernel_jacobian_matches_directional_difference() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new(
+        mesh,
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (0.3 * i as f64).sin());
@@ -406,7 +416,7 @@ fn residual_kernel_jacobian_matches_directional_difference() {
 #[test]
 fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new_with_fields(
+    let problem = SEM2DProblem::new(
         mesh,
         2,
         FieldRegistry::new(["a", "b"]),
@@ -431,7 +441,12 @@ fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
 #[test]
 fn supg_2d_zero_tau_matches_advection_diffusion() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new(
+        mesh,
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
     let plain = problem
         .assemble_bilinear(&KernelAdvDiff2D::new(0.1, [0.4, -0.2]))
         .to_dense();
@@ -456,7 +471,13 @@ fn region_coefficient_changes_2d_material_operator() {
         ..MeshMetadata::default()
     };
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new_with_metadata(mesh, 2, DofReduction2D::None, metadata);
+    let problem = SEM2DProblem::new_with_metadata(
+        mesh,
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+        metadata,
+    );
     let region_diffusion =
         RegionCoefficient::new(std::collections::HashMap::from([(region, 3.0)]), 1.0);
     let region_kernel = KernelAdvDiff2D::with_coefficients(

@@ -4,7 +4,9 @@ use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
-use ormatex_sem_nd::{DofReduction2D, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem};
+use ormatex_sem_nd::{
+    DofReduction2D, FieldRegistry, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem,
+};
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
 
@@ -23,7 +25,12 @@ fn build_problem() -> (
     ormatex_sem_nd::BoundaryContributions,
 ) {
     let mesh = unit_square(32, 2, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new(
+        mesh,
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
     let mass = problem.assemble_lumped_mass();
     let neumann = NeumannFlux::new(1.0);
     let robin = RobinConvection::new(0.1, 0.0);
@@ -42,7 +49,12 @@ fn build_problem() -> (
 
 fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat<f64>, Mat<f64>) {
     let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral, 1);
-    let problem = SEM2DProblem::new(mesh, 2, DofReduction2D::None);
+    let problem = SEM2DProblem::new(
+        mesh,
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.25 + i as f64 / n as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (i as f64 * 0.17).sin());

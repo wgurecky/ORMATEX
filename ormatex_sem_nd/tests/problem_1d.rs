@@ -151,6 +151,7 @@ fn dirichlet_eliminates_selected_endpoint() {
     let problem = SEM1DProblem::new(
         mesh(2),
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction1D::Dirichlet {
             facets: vec![(0, 0.0)],
         },
@@ -164,6 +165,7 @@ fn nonzero_dirichlet_value_enters_state_and_rhs() {
     let problem = SEM1DProblem::new(
         mesh(1),
         1,
+        FieldRegistry::new(["temperature"]),
         DofReduction1D::Dirichlet {
             facets: vec![(0, 2.0)],
         },
@@ -182,7 +184,12 @@ fn nonzero_dirichlet_value_enters_state_and_rhs() {
 
 #[test]
 fn periodic_identifies_selected_endpoints() {
-    let problem = SEM1DProblem::new(mesh(2), 2, DofReduction1D::Periodic { facets: [0, 2] });
+    let problem = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::Periodic { facets: [0, 2] },
+    );
     let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
     let left = space
         .entity_closure_dofs(ReferenceCellType::Point, 0)
@@ -195,14 +202,18 @@ fn periodic_identifies_selected_endpoints() {
 
 #[test]
 fn volume_kernel_reads_physical_points() {
-    let problem =
-        SEM1DProblem::new_with_fields(mesh(2), 2, FieldRegistry::new(["x"]), DofReduction1D::None);
+    let problem = SEM1DProblem::new(mesh(2), 2, FieldRegistry::new(["x"]), DofReduction1D::None);
     assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
 #[test]
 fn lumped_mass_matches_generic_gll_mass() {
-    let problem = SEM1DProblem::new(mesh(2), 2, DofReduction1D::Periodic { facets: [0, 2] });
+    let problem = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::Periodic { facets: [0, 2] },
+    );
     let generic = problem.assemble_bilinear(&KernelMass::new()).to_dense();
     let lumped = problem.assemble_lumped_mass().to_dense();
     for i in 0..generic.nrows() {
@@ -214,7 +225,12 @@ fn lumped_mass_matches_generic_gll_mass() {
 
 #[test]
 fn boundary_kernel_reads_endpoint_coordinates_and_normal() {
-    let problem = SEM1DProblem::new(mesh(1), 2, DofReduction1D::None);
+    let problem = SEM1DProblem::new(
+        mesh(1),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
     let flux = EndpointFlux;
     let boundary = problem.assemble_boundary(|_| Some(&flux));
     assert!((boundary.rhs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
@@ -222,7 +238,12 @@ fn boundary_kernel_reads_endpoint_coordinates_and_normal() {
 
 #[test]
 fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
-    let problem = SEM1DProblem::new(mesh(2), 2, DofReduction1D::None);
+    let problem = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (0.4 * i as f64).sin());
@@ -249,7 +270,7 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
 
 #[test]
 fn coupled_system_assembles_cross_field_blocks_and_matrix_free_action() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         mesh(2),
         2,
         FieldRegistry::new(["a", "b"]),
@@ -273,7 +294,7 @@ fn coupled_system_assembles_cross_field_blocks_and_matrix_free_action() {
 
 #[test]
 fn coupled_lumped_mass_repeats_scalar_blocks_without_cross_terms() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         mesh(2),
         2,
         FieldRegistry::new(["a", "b"]),
@@ -281,9 +302,14 @@ fn coupled_lumped_mass_repeats_scalar_blocks_without_cross_terms() {
     );
     let n = problem.reduced_size();
     let block = problem.assemble_system_lumped_mass().to_dense();
-    let scalar = SEM1DProblem::new(mesh(2), 2, DofReduction1D::None)
-        .assemble_lumped_mass()
-        .to_dense();
+    let scalar = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    )
+    .assemble_lumped_mass()
+    .to_dense();
     assert_eq!(block.nrows(), 2 * n);
     for i in 0..n {
         for j in 0..n {
@@ -297,7 +323,7 @@ fn coupled_lumped_mass_repeats_scalar_blocks_without_cross_terms() {
 
 #[test]
 fn coupled_system_jacobian_matches_directional_difference() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         mesh(1),
         2,
         FieldRegistry::new(["a", "b"]),
@@ -382,8 +408,7 @@ fn conservative_euler_flux_jacobian_matches_finite_difference() {
 
 #[test]
 fn coefficient_receives_explicit_time_and_space() {
-    let problem =
-        SEM1DProblem::new_with_fields(mesh(1), 2, FieldRegistry::new(["x"]), DofReduction1D::None);
+    let problem = SEM1DProblem::new(mesh(1), 2, FieldRegistry::new(["x"]), DofReduction1D::None);
     let kernel = KernelAdvDiff::with_coefficients(
         |ctx: &MaterialContext<'_>| 1.0 + ctx.time + ctx.point[0],
         ConstantCoefficient(0.0),
@@ -397,7 +422,7 @@ fn coefficient_receives_explicit_time_and_space() {
 
 #[test]
 fn nonlinear_coefficient_derivative_is_included_in_jacobian() {
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         mesh(1),
         2,
         FieldRegistry::new(["temperature"]),
@@ -420,7 +445,12 @@ fn nonlinear_coefficient_derivative_is_included_in_jacobian() {
 
 #[test]
 fn matrix_free_jacobian_uses_explicit_material_time() {
-    let problem = SEM1DProblem::new(mesh(1), 2, DofReduction1D::None);
+    let problem = SEM1DProblem::new(
+        mesh(1),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
     let n = problem.reduced_size();
     let kernel = KernelAdvDiff::with_coefficients(
         |ctx: &MaterialContext<'_>| 1.0 + ctx.time,

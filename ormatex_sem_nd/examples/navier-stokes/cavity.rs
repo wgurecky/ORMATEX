@@ -89,7 +89,7 @@ fn main() {
     let family = LagrangeElementFamily::<f64>::new(2, Continuity::Standard, LagrangeVariant::GLL);
     let space = FunctionSpaceImpl::new(&mesh, &family);
     let (u_values, v_values, pressure_dof) = boundary_facet_values(&mesh, &space);
-    let problem = SEM2DProblem::new_with_fields(
+    let problem = SEM2DProblem::new(
         mesh,
         2,
         FieldRegistry::new(["u", "v", "p"]),

@@ -74,7 +74,7 @@ fn main() {
     let dt = 0.01;
     let nsteps = 100;
 
-    let problem = SEM1DProblem::new_with_fields(
+    let problem = SEM1DProblem::new(
         unit_interval(nx),
         p,
         FieldRegistry::new(["c0", "c1", "c2"]),

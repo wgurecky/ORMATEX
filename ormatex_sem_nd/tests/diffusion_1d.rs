@@ -3,7 +3,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::shapes::unit_interval;
 use ndmesh::SingleElementMesh;
 use ormatex_sem_nd::{
-    DofReduction1D, KernelDiffusion, KernelVolumeSource, NeumannFlux, RobinConvection, SEM1DProblem,
+    DofReduction1D, FieldRegistry, KernelDiffusion, KernelVolumeSource, NeumannFlux,
+    RobinConvection, SEM1DProblem,
 };
 
 #[path = "../examples/support/linear_system.rs"]
@@ -31,6 +32,7 @@ fn p2_transient_diffusion_reaches_dirichlet_linear_profile() {
     let problem = SEM1DProblem::new(
         unit_interval(nx),
         2,
+        FieldRegistry::new(["temperature"]),
         DofReduction1D::Dirichlet {
             facets: vec![(0, left_temperature), (nx, right_temperature)],
         },
@@ -47,7 +49,12 @@ fn p2_transient_diffusion_reaches_dirichlet_linear_profile() {
 
 #[test]
 fn p2_transient_diffusion_reaches_neumann_robin_linear_profile() {
-    let problem = SEM1DProblem::new(unit_interval(8), 2, DofReduction1D::None);
+    let problem = SEM1DProblem::new(
+        unit_interval(8),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
     let diffusivity = 0.4;
     let flux = 1.2;
     let h = 0.8;

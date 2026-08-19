@@ -10,7 +10,8 @@ use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
-    DofReduction1D, KernelAdvDiff, KernelAdvDiffSUPG, KernelVolumeSource, SEM1DProblem,
+    DofReduction1D, FieldRegistry, KernelAdvDiff, KernelAdvDiffSUPG, KernelVolumeSource,
+    SEM1DProblem,
 };
 
 #[path = "support/linear_system.rs"]
@@ -29,7 +30,12 @@ fn main() {
     let snapshot_every = 20;
 
     let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> = unit_interval(nx);
-    let problem = SEM1DProblem::new(mesh, p, DofReduction1D::Periodic { facets: [0, nx] });
+    let problem = SEM1DProblem::new(
+        mesh,
+        p,
+        FieldRegistry::new(["u"]),
+        DofReduction1D::Periodic { facets: [0, nx] },
+    );
     let mass = problem.assemble_lumped_mass();
     let operator = problem.assemble_bilinear(&KernelAdvDiff::new(nu, vel));
     let n = mass.nrows();

@@ -227,32 +227,13 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     /// Build a GLL quadrilateral spectral-element problem.
-    /// Build a one-field problem using the default field name `field`.
-    pub fn new(mesh: M, p: usize, bc: DofReduction2D) -> Self {
-        Self::new_with_fields_and_metadata(
-            mesh,
-            p,
-            FieldRegistry::scalar(),
-            bc,
-            MeshMetadata::default(),
-        )
-    }
-
     /// Build a problem with named scalar fields in system-vector order.
-    pub fn new_with_fields(mesh: M, p: usize, fields: FieldRegistry, bc: DofReduction2D) -> Self {
-        Self::new_with_fields_and_metadata(mesh, p, fields, bc, MeshMetadata::default())
+    pub fn new(mesh: M, p: usize, fields: FieldRegistry, bc: DofReduction2D) -> Self {
+        Self::new_with_metadata(mesh, p, fields, bc, MeshMetadata::default())
     }
 
+    /// Build a problem with named scalar fields and mesh metadata.
     pub fn new_with_metadata(
-        mesh: M,
-        p: usize,
-        bc: DofReduction2D,
-        metadata: MeshMetadata,
-    ) -> Self {
-        Self::new_with_fields_and_metadata(mesh, p, FieldRegistry::scalar(), bc, metadata)
-    }
-
-    pub fn new_with_fields_and_metadata(
         mesh: M,
         p: usize,
         fields: FieldRegistry,
