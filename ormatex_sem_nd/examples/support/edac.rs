@@ -4,18 +4,18 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
-use ormatex_sem_nd::{KernelEdacNavierStokes2D, MatrixFreeMinvJacobian, QuadMesh, SEM2DProblem};
+use ormatex_sem_nd::{MatrixFreeMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem};
 
 use super::linear_system::lumped_inverse_mass;
 
-pub struct FluidSystem<'a> {
+pub struct FluidSystem<'a, K> {
     pub problem: &'a SEM2DProblem<QuadMesh>,
-    pub kernel: KernelEdacNavierStokes2D,
+    pub kernel: K,
     m_inv: Vec<f64>,
 }
 
-impl<'a> FluidSystem<'a> {
-    pub fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: KernelEdacNavierStokes2D) -> Self {
+impl<'a, K> FluidSystem<'a, K> {
+    pub fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: K) -> Self {
         let mass = problem.assemble_system_lumped_mass();
         Self {
             problem,
@@ -25,7 +25,10 @@ impl<'a> FluidSystem<'a> {
     }
 }
 
-impl<'a> OdeSys<'a> for FluidSystem<'a> {
+impl<'a, K> OdeSys<'a> for FluidSystem<'a, K>
+where
+    K: ResidualKernel + Sync + Send,
+{
     fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
         let residual = self
             .problem
@@ -54,7 +57,7 @@ pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
 }
 
 pub fn advance(
-    system: &FluidSystem<'_>,
+    system: &FluidSystem<'_, impl ResidualKernel + Sync + Send>,
     state0: MatRef<'_, f64>,
     dt: f64,
     nsteps: usize,

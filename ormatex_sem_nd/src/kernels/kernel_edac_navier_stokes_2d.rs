@@ -3,7 +3,8 @@ use crate::common::{CellState, LocalCtx};
 use super::kernel_common::ResidualKernel;
 use super::kernel_smagorinsky_lilly_2d::SmagorinskyLilly2D;
 
-/// Three-field EDAC Navier-Stokes kernel with fields `[u, v, p]`.
+/// Three-field entropically damped artifical compressibility (EDAC)
+/// Navier-Stokes kernel with fields `[u, v, p]`.
 ///
 /// The momentum convection and pressure gradient use their strong first-order
 /// forms; viscous and EDAC pressure diffusion terms use the weak gradient form.

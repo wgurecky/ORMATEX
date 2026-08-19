@@ -1,5 +1,8 @@
 use ormatex_sem_nd::{
-    CellState, KernelEdacNavierStokes2D, LocalCtx, ResidualKernel, SmagorinskyLilly2D,
+    CellState, EdacNavierStokes2DConfig, KernelEdacMomentumConvection2D, KernelEdacNavierStokes2D,
+    KernelEdacPressureAdvection2D, KernelEdacPressureDiffusion2D, KernelEdacPressureDivergence2D,
+    KernelEdacPressureGradient2D, KernelEdacViscousStress2D, LocalCtx, ResidualKernel,
+    ResidualKernelSum, SmagorinskyLilly2D,
 };
 
 fn context() -> LocalCtx<'static> {
@@ -71,4 +74,30 @@ fn edac_jacobian_matches_directional_difference() {
         })
         .sum::<f64>();
     assert!((finite_difference - analytic).abs() < 1e-6);
+}
+
+#[test]
+fn decomposed_edac_matches_fused_at_every_local_block() {
+    let ctx = context();
+    let state = state([1.1, -0.2, 0.3], [0.4, 0.2, -0.3, 0.5, 0.7, -0.1]);
+    let fused = KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1);
+    let config = EdacNavierStokes2DConfig::new(1.0, 0.01, 4.0, 0.1);
+    let composed = ResidualKernelSum::from_kernel(KernelEdacMomentumConvection2D::new(config))
+        .with(KernelEdacPressureGradient2D::new(config))
+        .with(KernelEdacViscousStress2D::new(config))
+        .with(KernelEdacPressureDivergence2D::new(config))
+        .with(KernelEdacPressureAdvection2D::new(config))
+        .with(KernelEdacPressureDiffusion2D::new(config));
+
+    for equation in 0..3 {
+        for unknown in 0..3 {
+            let fused_jacobian = fused.jacobian_integrand(&ctx, &state, equation, unknown, 0, 0, 0);
+            let composed_jacobian =
+                composed.jacobian_integrand(&ctx, &state, equation, unknown, 0, 0, 0);
+            assert!((fused_jacobian - composed_jacobian).abs() < 1e-12);
+        }
+        let fused_residual = fused.residual_integrand(&ctx, &state, equation, 0, 0);
+        let composed_residual = composed.residual_integrand(&ctx, &state, equation, 0, 0);
+        assert!((fused_residual - composed_residual).abs() < 1e-12);
+    }
 }

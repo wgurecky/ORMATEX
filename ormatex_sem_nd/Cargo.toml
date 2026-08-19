@@ -26,3 +26,7 @@ path = "examples/navier-stokes/pipe.rs"
 [[example]]
 name = "navier-stokes-cavity"
 path = "examples/navier-stokes/cavity.rs"
+
+[[example]]
+name = "navier-stokes-cavity-comp"
+path = "examples/navier-stokes/cavity_comp.rs"

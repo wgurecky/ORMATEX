@@ -14,11 +14,13 @@ pub use fields::{FieldRegistry, FieldValues};
 pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{MatrixFreeJacobianProblem, MatrixFreeMinvJacobian, OwnedMinvJacobian};
 pub use kernels::{
-    BilinearForm, BoundaryIntegrator, FluxKernel1D, KernelAdvDiff, KernelAdvDiff2D,
-    KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelConservationLaw1D, KernelDiffusion,
-    KernelDiffusion2D, KernelEdacNavierStokes2D, KernelLinearReaction, KernelMass,
-    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, RobinConvection,
-    SmagorinskyLilly2D,
+    BilinearForm, BoundaryIntegrator, EdacNavierStokes2DConfig, FluxKernel1D, KernelAdvDiff,
+    KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
+    KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D, KernelEdacMomentumConvection2D,
+    KernelEdacNavierStokes2D, KernelEdacPressureAdvection2D, KernelEdacPressureDiffusion2D,
+    KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacViscousStress2D,
+    KernelLinearReaction, KernelMass, KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel,
+    ResidualKernelSum, RobinConvection, SmagorinskyLilly2D,
 };
 pub use material::{
     CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,

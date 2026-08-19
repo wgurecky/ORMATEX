@@ -200,6 +200,134 @@ pub trait ResidualKernel {
     }
 }
 
+/// Additive composition of state-aware cell kernels.
+///
+/// Each child must describe the same ordered system fields. The parent SEM
+/// assembly still interpolates the state and scatters the local result once;
+/// only the pointwise residual or Jacobian integrands are summed here.
+pub struct ResidualKernelSum<'a> {
+    kernels: Vec<Box<dyn ResidualKernel + Send + Sync + 'a>>,
+    nfields: usize,
+    field_names: Option<Vec<String>>,
+}
+
+impl<'a> ResidualKernelSum<'a> {
+    /// Build a sum from heterogeneous residual kernels.
+    pub fn new(kernels: Vec<Box<dyn ResidualKernel + Send + Sync + 'a>>) -> Self {
+        let mut kernels = kernels.into_iter();
+        let first = kernels
+            .next()
+            .expect("residual kernel sum must contain at least one kernel");
+        let nfields = first.nfields();
+        assert!(
+            nfields > 0,
+            "residual kernel sum must contain at least one field"
+        );
+        let mut field_names = first.field_names();
+        Self::validate_field_names(&field_names, nfields);
+
+        let mut sum = Self {
+            kernels: vec![first],
+            nfields,
+            field_names: field_names.take(),
+        };
+        for kernel in kernels {
+            sum.push(kernel);
+        }
+        sum
+    }
+
+    /// Start a sum with one concrete kernel.
+    pub fn from_kernel<K>(kernel: K) -> Self
+    where
+        K: ResidualKernel + Send + Sync + 'a,
+    {
+        let kernel: Box<dyn ResidualKernel + Send + Sync + 'a> = Box::new(kernel);
+        Self::new(vec![kernel])
+    }
+
+    /// Add one concrete kernel to this sum.
+    pub fn with<K>(mut self, kernel: K) -> Self
+    where
+        K: ResidualKernel + Send + Sync + 'a,
+    {
+        let kernel: Box<dyn ResidualKernel + Send + Sync + 'a> = Box::new(kernel);
+        self.push(kernel);
+        self
+    }
+
+    fn push(&mut self, kernel: Box<dyn ResidualKernel + Send + Sync + 'a>) {
+        assert_eq!(
+            kernel.nfields(),
+            self.nfields,
+            "residual kernel sum field count mismatch"
+        );
+        let names = kernel.field_names();
+        Self::validate_field_names(&names, self.nfields);
+        match (&mut self.field_names, names) {
+            (Some(expected), Some(actual)) => assert_eq!(
+                *expected, actual,
+                "residual kernel sum field names/order mismatch"
+            ),
+            (None, Some(actual)) => self.field_names = Some(actual),
+            _ => {}
+        }
+        self.kernels.push(kernel);
+    }
+
+    fn validate_field_names(names: &Option<Vec<String>>, nfields: usize) {
+        if let Some(names) = names {
+            assert_eq!(
+                names.len(),
+                nfields,
+                "residual kernel field-name count does not match field count"
+            );
+        }
+    }
+}
+
+impl ResidualKernel for ResidualKernelSum<'_> {
+    fn nfields(&self) -> usize {
+        self.nfields
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
+    }
+
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.kernels
+            .iter()
+            .map(|kernel| kernel.residual_integrand(ctx, state, equation, q, test_i))
+            .sum()
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.kernels
+            .iter()
+            .map(|kernel| {
+                kernel.jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            })
+            .sum()
+    }
+}
+
 /// Pointwise flux provider for one-dimensional conservation laws.
 pub trait FluxKernel1D {
     fn nfields(&self) -> usize;
