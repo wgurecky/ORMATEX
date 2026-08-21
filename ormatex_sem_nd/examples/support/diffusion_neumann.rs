@@ -33,16 +33,16 @@ where
 
 pub fn unit_square_neumann_robin_boundary<M>(problem: &SEM2DProblem<M>) -> BoundaryContributions
 where
-    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     let neumann = NeumannFlux::new(1.0);
     let robin = RobinConvection::new(0.1, 0.0);
     problem.assemble_boundary(|facet: BoundaryFacet| {
         const EPS: f64 = 1e-9;
         if facet.midpoint[0] < EPS {
-            Some(&neumann)
+            Some(&neumann as &dyn ormatex_sem_nd::BoundaryIntegrator)
         } else if facet.midpoint[0] > 1.0 - EPS {
-            Some(&robin)
+            Some(&robin as &dyn ormatex_sem_nd::BoundaryIntegrator)
         } else {
             None
         }

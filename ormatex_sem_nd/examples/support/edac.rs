@@ -4,7 +4,10 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
-use ormatex_sem_nd::{MatrixFreeMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem};
+use ormatex_sem_nd::{
+    KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, MatrixFreeMinvCompleteJacobian,
+    QuadMesh, ResidualKernel, SEM2DProblem, StateBoundaryTerms,
+};
 
 use super::linear_system::lumped_inverse_mass;
 
@@ -12,6 +15,7 @@ pub struct FluidSystem<'a, K> {
     pub problem: &'a SEM2DProblem<QuadMesh>,
     pub kernel: K,
     m_inv: Vec<f64>,
+    terms: StateBoundaryTerms,
 }
 
 impl<'a, K> FluidSystem<'a, K> {
@@ -21,7 +25,39 @@ impl<'a, K> FluidSystem<'a, K> {
             problem,
             kernel,
             m_inv: lumped_inverse_mass(mass.as_ref()),
+            terms: StateBoundaryTerms::new(),
         }
+    }
+
+    pub fn with_state_boundary(mut self, terms: StateBoundaryTerms) -> Self {
+        self.terms = terms;
+        self
+    }
+
+    pub fn with_split_boundary(self) -> Self {
+        self.with_state_boundary(
+            StateBoundaryTerms::new().with_default(KernelEdacSplitBoundaryFlux2D),
+        )
+    }
+
+    pub fn with_dong_outflow(
+        self,
+        kernel: KernelEdacDongOutflow2D,
+        facets: Vec<usize>,
+        split_form: bool,
+    ) -> Self {
+        assert!(
+            !facets.is_empty(),
+            "Dong outflow requires at least one facet"
+        );
+        let terms = if split_form {
+            StateBoundaryTerms::new()
+                .with_default(KernelEdacSplitBoundaryFlux2D)
+                .with_entities(facets, kernel.with_split_flux())
+        } else {
+            StateBoundaryTerms::new().with_entities(facets, kernel)
+        };
+        self.with_state_boundary(terms)
     }
 }
 
@@ -30,21 +66,24 @@ where
     K: ResidualKernel + Sync + Send,
 {
     fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let residual = self
+        let operator = self
             .problem
-            .assemble_system_residual_at(t, &self.kernel, state);
+            .residual_operator_at(t, &self.kernel)
+            .with_state_boundary(self.terms.clone());
+        let residual = operator.residual(state);
         Mat::from_fn(self.m_inv.len(), 1, |row, _| {
             -self.m_inv[row] * residual[row]
         })
     }
 
     fn fjac<'b>(&'a self, t: f64, state: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
-        Box::new(MatrixFreeMinvJacobian::new_at(
-            t,
-            self.problem,
-            &self.kernel,
+        let operator = self
+            .problem
+            .residual_operator_at(t, &self.kernel)
+            .with_state_boundary(self.terms.clone());
+        Box::new(MatrixFreeMinvCompleteJacobian::new(
+            operator,
             state.to_owned(),
-            None,
             &self.m_inv,
         ))
     }

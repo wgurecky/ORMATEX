@@ -13,6 +13,17 @@ use crate::{SEM1DProblem, SEM2DProblem};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 
+/// Complete nonlinear residual operator, including any boundary terms.
+pub trait CompleteResidualOperator: Sync {
+    fn system_size(&self) -> usize;
+
+    fn residual(&self, state: MatRef<f64>) -> Vec<f64>;
+
+    fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64>;
+
+    fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64>;
+}
+
 /// A finite-element problem that can apply a residual Jacobian without
 /// assembling a global sparse matrix.
 pub trait MatrixFreeJacobianProblem: Sync {
@@ -173,7 +184,88 @@ pub struct MatrixFreeMinvJacobian<'a, P: MatrixFreeJacobianProblem, K: ResidualK
     time: f64,
     state: Mat<f64>,
     fixed_jacobian: Option<SparseColMatRef<'a, usize, f64>>,
+    owned_fixed_jacobian: Option<SparseColMat<usize, f64>>,
     m_inv: &'a [f64],
+}
+
+/// Applies `-M^-1 J` for a complete residual operator. Both volume and
+/// state-dependent boundary Jacobian actions remain matrix-free.
+pub struct MatrixFreeMinvCompleteJacobian<'a, O: CompleteResidualOperator> {
+    operator: O,
+    state: Mat<f64>,
+    m_inv: &'a [f64],
+}
+
+impl<'a, O: CompleteResidualOperator> MatrixFreeMinvCompleteJacobian<'a, O> {
+    pub fn new(operator: O, state: Mat<f64>, m_inv: &'a [f64]) -> Self {
+        assert_eq!(
+            state.nrows(),
+            operator.system_size(),
+            "state/operator size mismatch"
+        );
+        assert_eq!(
+            state.ncols(),
+            1,
+            "matrix-free Jacobian requires one state column"
+        );
+        assert_eq!(
+            m_inv.len(),
+            operator.system_size(),
+            "mass/operator size mismatch"
+        );
+        Self {
+            operator,
+            state,
+            m_inv,
+        }
+    }
+}
+
+impl<O: CompleteResidualOperator> fmt::Debug for MatrixFreeMinvCompleteJacobian<'_, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MatrixFreeMinvCompleteJacobian")
+            .field("ndofs", &self.m_inv.len())
+            .finish()
+    }
+}
+
+impl<O: CompleteResidualOperator> LinOp<f64> for MatrixFreeMinvCompleteJacobian<'_, O> {
+    fn apply_scratch(&self, _rhs_ncols: usize, _par: Par) -> StackReq {
+        StackReq::empty()
+    }
+
+    fn nrows(&self) -> usize {
+        self.m_inv.len()
+    }
+
+    fn ncols(&self) -> usize {
+        self.m_inv.len()
+    }
+
+    fn apply(
+        &self,
+        mut out: MatMut<'_, f64>,
+        rhs: MatRef<'_, f64>,
+        _par: Par,
+        _stack: &mut MemStack,
+    ) {
+        let action = self.operator.apply_jacobian(self.state.as_ref(), rhs);
+        for column in 0..out.ncols() {
+            for row in 0..out.nrows() {
+                out[(row, column)] = -self.m_inv[row] * action[(row, column)];
+            }
+        }
+    }
+
+    fn conj_apply(
+        &self,
+        out: MatMut<'_, f64>,
+        rhs: MatRef<'_, f64>,
+        par: Par,
+        stack: &mut MemStack,
+    ) {
+        self.apply(out, rhs, par, stack);
+    }
 }
 
 impl<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> MatrixFreeMinvJacobian<'a, P, K> {
@@ -214,6 +306,39 @@ impl<'a, P: MatrixFreeJacobianProblem, K: ResidualKernel> MatrixFreeMinvJacobian
             time,
             state,
             fixed_jacobian,
+            owned_fixed_jacobian: None,
+            m_inv,
+        }
+    }
+
+    pub fn new_at_with_owned_fixed_jacobian(
+        time: f64,
+        problem: &'a P,
+        kernel: &'a K,
+        state: Mat<f64>,
+        fixed_jacobian: Option<SparseColMat<usize, f64>>,
+        m_inv: &'a [f64],
+    ) -> Self {
+        problem.validate_kernel_fields(kernel);
+        let n = problem.system_size(kernel.nfields());
+        assert_eq!(state.nrows(), n, "state/problem size mismatch");
+        assert_eq!(
+            state.ncols(),
+            1,
+            "matrix-free Jacobian requires one state column"
+        );
+        assert_eq!(m_inv.len(), n, "mass/problem size mismatch");
+        if let Some(ref fixed) = fixed_jacobian {
+            assert_eq!(fixed.nrows(), n, "fixed Jacobian/problem row mismatch");
+            assert_eq!(fixed.ncols(), n, "fixed Jacobian/problem column mismatch");
+        }
+        Self {
+            problem,
+            kernel,
+            time,
+            state,
+            fixed_jacobian: None,
+            owned_fixed_jacobian: fixed_jacobian,
             m_inv,
         }
     }
@@ -259,6 +384,8 @@ impl<P: MatrixFreeJacobianProblem, K: ResidualKernel + Sync> LinOp<f64>
         );
         if let Some(fixed) = self.fixed_jacobian {
             action += fixed * rhs;
+        } else if let Some(fixed) = self.owned_fixed_jacobian.as_ref() {
+            action += fixed.as_ref() * rhs;
         }
         for column in 0..out.ncols() {
             for row in 0..out.nrows() {

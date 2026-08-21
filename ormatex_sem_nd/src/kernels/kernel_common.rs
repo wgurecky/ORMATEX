@@ -1,6 +1,8 @@
 //! Shared kernel traits and default local assembly loops.
 
 use crate::common::{CellState, FacetCtx, LocalCtx};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Per-cell bilinear-form kernel.
 pub trait BilinearForm {
@@ -421,5 +423,170 @@ pub trait BoundaryIntegrator {
                 }
             }
         }
+    }
+}
+
+/// State-aware nonlinear boundary form.
+///
+/// Unlike [`BoundaryIntegrator`], this form receives the interpolated state at
+/// facet quadrature points and can therefore represent nonlinear conditions
+/// such as backflow-stabilizing outflow traction.
+pub trait StateBoundaryIntegrator: Send + Sync {
+    /// Number of scalar equation/unknown fields in this boundary form.
+    fn nfields(&self) -> usize {
+        1
+    }
+
+    /// Optional ordered names for fields whose meaning is part of the form.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn residual_integrand(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64;
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64;
+
+    fn apply_local_jacobian(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        direction: &[f64],
+        out: &mut [f64],
+    ) {
+        let nf = self.nfields();
+        let n = ctx.ndofs;
+        let local_size = nf * n;
+        assert_eq!(
+            direction.len(),
+            local_size,
+            "boundary direction size mismatch"
+        );
+        assert_eq!(out.len(), local_size, "boundary action size mismatch");
+        for equation in 0..nf {
+            for ti in 0..n {
+                let mut acc = 0.0;
+                for unknown in 0..nf {
+                    for si in 0..n {
+                        for q in 0..ctx.npts {
+                            acc += ctx.wts[q]
+                                * ctx.jfacet_det[q]
+                                * self.jacobian_integrand(ctx, state, equation, unknown, q, ti, si)
+                                * direction[unknown * n + si];
+                        }
+                    }
+                }
+                out[equation * n + ti] = acc;
+            }
+        }
+    }
+
+    fn assemble_local_residual(&self, ctx: &FacetCtx, state: &CellState, out: &mut [f64]) {
+        let nf = self.nfields();
+        let n = ctx.ndofs;
+        assert!(
+            nf > 0,
+            "state boundary form must contain at least one field"
+        );
+        assert_eq!(state.nfields, nf, "boundary/state field count mismatch");
+        assert_eq!(out.len(), nf * n, "local boundary residual size mismatch");
+        for equation in 0..nf {
+            for ti in 0..n {
+                let mut acc = 0.0;
+                for q in 0..ctx.npts {
+                    acc += ctx.wts[q]
+                        * ctx.jfacet_det[q]
+                        * self.residual_integrand(ctx, state, equation, q, ti);
+                }
+                out[equation * n + ti] = acc;
+            }
+        }
+    }
+
+    fn assemble_local_jacobian(&self, ctx: &FacetCtx, state: &CellState, out: &mut [f64]) {
+        let nf = self.nfields();
+        let n = ctx.ndofs;
+        let local_size = nf * n;
+        assert_eq!(state.nfields, nf, "boundary/state field count mismatch");
+        assert_eq!(
+            out.len(),
+            local_size * local_size,
+            "local boundary Jacobian size mismatch"
+        );
+        for equation in 0..nf {
+            for unknown in 0..nf {
+                for ti in 0..n {
+                    for si in 0..n {
+                        let mut acc = 0.0;
+                        for q in 0..ctx.npts {
+                            acc += ctx.wts[q]
+                                * ctx.jfacet_det[q]
+                                * self.jacobian_integrand(ctx, state, equation, unknown, q, ti, si);
+                        }
+                        let row = equation * n + ti;
+                        let col = unknown * n + si;
+                        out[row * local_size + col] = acc;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Immutable state-dependent boundary terms selected by mesh entity index.
+#[derive(Clone, Default)]
+pub struct StateBoundaryTerms {
+    default: Option<Arc<dyn StateBoundaryIntegrator>>,
+    overrides: HashMap<usize, Arc<dyn StateBoundaryIntegrator>>,
+}
+
+impl StateBoundaryTerms {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_default<K>(mut self, kernel: K) -> Self
+    where
+        K: StateBoundaryIntegrator + 'static,
+    {
+        self.default = Some(Arc::new(kernel));
+        self
+    }
+
+    pub fn with_entities<K, I>(mut self, entities: I, kernel: K) -> Self
+    where
+        K: StateBoundaryIntegrator + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        let kernel: Arc<dyn StateBoundaryIntegrator> = Arc::new(kernel);
+        for entity in entities {
+            assert!(
+                self.overrides.insert(entity, Arc::clone(&kernel)).is_none(),
+                "state boundary entity configured more than once"
+            );
+        }
+        self
+    }
+
+    pub(crate) fn kernel_for(&self, entity: usize) -> Option<&dyn StateBoundaryIntegrator> {
+        self.overrides
+            .get(&entity)
+            .or(self.default.as_ref())
+            .map(AsRef::as_ref)
     }
 }

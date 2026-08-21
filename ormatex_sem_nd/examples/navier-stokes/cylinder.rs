@@ -6,8 +6,11 @@ use std::io::{BufWriter, Write};
 use faer::prelude::*;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
-    gmsh_quad_data, DofReduction2D, FieldRegistry, KernelEdacNavierStokes2D, MeshMetadata,
-    SEM2DProblem,
+    gmsh_quad_data, DofReduction2D, EdacNavierStokes2DConfig, FieldRegistry,
+    KernelEdacDongOutflow2D, KernelEdacMomentumConvectionSplit2D,
+    KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
+    KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacViscousStress2D,
+    MeshMetadata, ResidualKernelSum, SEM2DProblem,
 };
 
 #[path = "../support/edac.rs"]
@@ -45,7 +48,18 @@ fn nearest(positions: &[(f64, f64)], target: (f64, f64)) -> usize {
         .expect("field has no retained DOFs")
 }
 
+fn split_kernel() -> ResidualKernelSum<'static> {
+    let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
+    ResidualKernelSum::from_kernel(KernelEdacMomentumConvectionSplit2D::new(config))
+        .with(KernelEdacPressureGradient2D::new(config))
+        .with(KernelEdacViscousStress2D::new(config))
+        .with(KernelEdacPressureDivergence2D::new(config))
+        .with(KernelEdacPressureAdvectionSplit2D::new(config))
+        .with(KernelEdacPressureDiffusion2D::new(config))
+}
+
 fn main() {
+    let dong = std::env::args().any(|arg| arg == "--dong");
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/navier-stokes/cylinder.msh"
@@ -58,8 +72,8 @@ fn main() {
     let cylinder = boundary_facets(&metadata, 5);
     assert!(!inlet.is_empty() && !outlet.is_empty() && !cylinder.is_empty());
 
-    // Prescribe the free-stream velocity at the inlet and use a pressure
-    // reference at the outlet. The channel edges are slip/symmetry boundaries.
+    // Prescribe the free-stream velocity at the inlet. The default outlet uses
+    // a pressure reference; --dong replaces it with a split EDAC OBC-C outlet.
     let u_in = 1.0;
     let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, u_in)).collect();
     let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
@@ -101,15 +115,25 @@ fn main() {
                         .copied()
                         .collect::<Vec<_>>(),
                 ),
-                dirichlet(&outlet_p),
+                if dong {
+                    DofReduction2D::None
+                } else {
+                    dirichlet(&outlet_p)
+                },
             ],
         },
         metadata,
     );
 
-    // Keep this example's user-facing setup compact; the kernel owns the model.
-    let kernel = KernelEdacNavierStokes2D::new(1.0, 1.0 / 200.0, 4.0, 0.1);
-    let system = FluidSystem::new(&problem, kernel);
+    let system = if dong {
+        FluidSystem::new(&problem, split_kernel()).with_dong_outflow(
+            KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0),
+            outlet,
+            true,
+        )
+    } else {
+        FluidSystem::new(&problem, split_kernel()).with_split_boundary()
+    };
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let dt = 0.005;
     let nsteps = 1000;

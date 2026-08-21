@@ -1,10 +1,14 @@
 use crate::common::{
-    add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
-    push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, CellData, CellState,
-    FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap, CELL_BATCH_SIZE,
+    add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx,
+    interpolate_cell_state, push_local_matrix_triplets, scatter_local_vector,
+    BoundaryContributions, CellData, CellState, FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap,
+    StateBoundaryContributions, CELL_BATCH_SIZE,
 };
 use crate::fields::{FieldRegistry, FieldValues};
-use crate::kernels::kernel_common::{BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel};
+use crate::jacobian::CompleteResidualOperator;
+use crate::kernels::kernel_common::{
+    BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms,
+};
 use crate::material::MeshMetadata;
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
@@ -91,7 +95,111 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     metadata: MeshMetadata,
 }
 
+pub struct SEM1DResidualOperator<'p, 'k, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+{
+    problem: &'p SEM1DProblem<M>,
+    kernel: &'k K,
+    time: f64,
+    terms: StateBoundaryTerms,
+}
+
+impl<'p, 'k, M, K> SEM1DResidualOperator<'p, 'k, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    K: ResidualKernel + Sync,
+{
+    pub fn system_size(&self) -> usize {
+        self.problem.system_size()
+    }
+
+    pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        self.problem
+            .assemble_system_residual_with_state_boundary_at(
+                self.time,
+                self.kernel,
+                state,
+                &self.terms,
+            )
+    }
+
+    pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        self.problem
+            .assemble_system_residual_jacobian_with_state_boundary_at(
+                self.time,
+                self.kernel,
+                state,
+                &self.terms,
+            )
+    }
+
+    pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        self.problem
+            .apply_system_jacobian_matfree_with_state_boundary_at(
+                self.time,
+                self.kernel,
+                state,
+                direction,
+                &self.terms,
+            )
+    }
+
+    pub fn with_state_boundary(mut self, terms: StateBoundaryTerms) -> Self {
+        self.terms = terms;
+        self
+    }
+}
+
+impl<M, K> CompleteResidualOperator for SEM1DResidualOperator<'_, '_, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    K: ResidualKernel + Sync,
+{
+    fn system_size(&self) -> usize {
+        SEM1DResidualOperator::system_size(self)
+    }
+
+    fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        SEM1DResidualOperator::residual(self, state)
+    }
+
+    fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        SEM1DResidualOperator::assemble_jacobian(self, state)
+    }
+
+    fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        SEM1DResidualOperator::apply_jacobian(self, state, direction)
+    }
+}
+
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
+    pub fn residual_operator_at<'p, 'k, K: ResidualKernel + Sync>(
+        &'p self,
+        time: f64,
+        kernel: &'k K,
+    ) -> SEM1DResidualOperator<'p, 'k, M, K>
+    where
+        M: Sync,
+    {
+        self.validate_fields(kernel.nfields(), kernel.field_names(), "residual kernel");
+        SEM1DResidualOperator {
+            problem: self,
+            kernel,
+            time,
+            terms: StateBoundaryTerms::new(),
+        }
+    }
+
+    pub fn residual_operator<'p, 'k, K: ResidualKernel + Sync>(
+        &'p self,
+        kernel: &'k K,
+    ) -> SEM1DResidualOperator<'p, 'k, M, K>
+    where
+        M: Sync,
+    {
+        self.residual_operator_at(0.0, kernel)
+    }
     /// Build a problem with named scalar fields in system-vector order.
     pub fn new(mesh: M, p: usize, fields: FieldRegistry, reduction: DofReduction1D) -> Self {
         Self::new_with_metadata(mesh, p, fields, reduction, MeshMetadata::default())
@@ -611,6 +719,349 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         self.assemble_system_residual_at(0.0, kernel, state)
     }
 
+    pub fn assemble_state_boundary_at(
+        &self,
+        time: f64,
+        state: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> StateBoundaryContributions {
+        let layout = self.field_layout();
+        let nfields = self.fields.len();
+        assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
+        assert_eq!(state.ncols(), 1, "boundary state requires one column");
+        let space = FunctionSpaceImpl::new(&self.mesh, &self.family);
+        let element = self.family.element(ReferenceCellType::Interval);
+        let mut residual = vec![0.0; layout.total_size];
+        let mut triplets = Vec::new();
+        let mut coord = [0.0; 1];
+        let mut selected = false;
+
+        for point in self.mesh.entity_iter(ReferenceCellType::Point) {
+            let point_index = point.local_index();
+            let Some(kernel) = terms.kernel_for(point_index) else {
+                continue;
+            };
+            let topology = point.topology();
+            let mut cells = topology.connected_entity_iter(ReferenceCellType::Interval);
+            let Some(cell_index) = cells.next() else {
+                continue;
+            };
+            if cells.next().is_some() {
+                continue;
+            }
+            point.geometry().points().next().unwrap().coords(&mut coord);
+            let cell = self
+                .mesh
+                .entity(ReferenceCellType::Interval, cell_index)
+                .unwrap();
+            let local_point = cell
+                .topology()
+                .sub_entity_iter(ReferenceCellType::Point)
+                .position(|index| index == point_index)
+                .expect("boundary point missing from owning interval");
+            let normal = if local_point == 0 { -1.0 } else { 1.0 };
+            assert_eq!(
+                kernel.nfields(),
+                nfields,
+                "state boundary field count mismatch"
+            );
+            if let Some(names) = kernel.field_names() {
+                assert_eq!(
+                    names,
+                    self.fields.names(),
+                    "state boundary field names/order mismatch"
+                );
+            }
+            selected = true;
+
+            let mut reference_point = rlst_dynamic_array!(f64, [1, 1]);
+            *reference_point.get_mut([0, 0]).unwrap() = local_point as f64;
+            let mut table = DynArray::<f64, 4>::from_shape(element.tabulate_array_shape(1, 1));
+            element.tabulate(&reference_point, 1, &mut table);
+            let cell_dofs = space
+                .entity_closure_dofs(ReferenceCellType::Interval, cell_index)
+                .unwrap();
+            let point_dofs = space
+                .entity_closure_dofs(ReferenceCellType::Point, point_index)
+                .unwrap();
+            assert_eq!(point_dofs.len(), 1, "a scalar boundary point has one DOF");
+            let cell_dof = cell_dofs
+                .iter()
+                .position(|&dof| dof == point_dofs[0])
+                .expect("point DOF missing from owning interval");
+            let values = [*table.get([0, 0, cell_dof, 0]).unwrap()];
+            let grad = [*table.get([1, 0, cell_dof, 0]).unwrap()
+                * self
+                    .cell_data
+                    .jinv_cache
+                    .get([0, 0, 0, cell_index])
+                    .unwrap()];
+            let points = [coord[0]];
+            let normals = [normal];
+            let ctx = FacetCtx {
+                time,
+                facet: self.metadata.facet(point_index),
+                tdim: 0,
+                gdim: 1,
+                ncomp: 1,
+                npts: 1,
+                ndofs: 1,
+                wts: &[1.0],
+                jfacet_det: &[1.0],
+                points: &points,
+                normal: &normals,
+                values: &values,
+                grads: &grad,
+            };
+            let (field_maps, field_prescribed) = self.cell_field_maps(cell_index, nfields);
+            let mut state_values = vec![0.0; nfields];
+            let mut state_grads = vec![0.0; nfields];
+            for field in 0..nfields {
+                state_values[field] = field_maps[field][cell_dof].map_or(
+                    field_prescribed[field][cell_dof].unwrap_or(0.0),
+                    |reduced| state[(layout.offsets[field] + reduced, 0)],
+                ) * values[0];
+                for (local_i, _) in cell_dofs.iter().enumerate() {
+                    let coefficient = field_maps[field][local_i]
+                        .map_or(field_prescribed[field][local_i].unwrap_or(0.0), |reduced| {
+                            state[(layout.offsets[field] + reduced, 0)]
+                        });
+                    state_grads[field] += coefficient
+                        * *table.get([1, 0, local_i, 0]).unwrap()
+                        * self
+                            .cell_data
+                            .jinv_cache
+                            .get([0, 0, 0, cell_index])
+                            .unwrap();
+                }
+            }
+            let facet_state = CellState {
+                nfields,
+                npts: 1,
+                gdim: 1,
+                values: &state_values,
+                grads: &state_grads,
+            };
+            let mut local_residual = vec![0.0; nfields];
+            let mut local_jacobian = vec![0.0; nfields * nfields];
+            kernel.assemble_local_residual(&ctx, &facet_state, &mut local_residual);
+            kernel.assemble_local_jacobian(&ctx, &facet_state, &mut local_jacobian);
+            for equation in 0..nfields {
+                let Some(reduced) = field_maps[equation][cell_dof] else {
+                    continue;
+                };
+                residual[layout.offsets[equation] + reduced] += local_residual[equation];
+                for unknown in 0..nfields {
+                    let Some(reduced_unknown) = field_maps[unknown][cell_dof] else {
+                        continue;
+                    };
+                    let value = local_jacobian[equation * nfields + unknown];
+                    if value != 0.0 {
+                        triplets.push(Triplet::new(
+                            layout.offsets[equation] + reduced,
+                            layout.offsets[unknown] + reduced_unknown,
+                            value,
+                        ));
+                    }
+                }
+            }
+        }
+        if !selected {
+            triplets.clear();
+        }
+        StateBoundaryContributions {
+            residual,
+            jacobian: SparseColMat::try_new_from_triplets(
+                layout.total_size,
+                layout.total_size,
+                &triplets,
+            )
+            .unwrap(),
+        }
+    }
+
+    pub fn assemble_state_boundary(
+        &self,
+        state: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> StateBoundaryContributions {
+        self.assemble_state_boundary_at(0.0, state, terms)
+    }
+
+    pub fn assemble_system_residual_with_state_boundary_at<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Vec<f64>
+    where
+        M: Sync,
+    {
+        let mut residual = self.assemble_system_residual_at(time, kernel, state);
+        let boundary = self.assemble_state_boundary_at(time, state, terms);
+        for (volume, boundary) in residual.iter_mut().zip(boundary.residual) {
+            *volume += boundary;
+        }
+        residual
+    }
+
+    pub fn assemble_system_residual_with_state_boundary<K: ResidualKernel + Sync>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Vec<f64>
+    where
+        M: Sync,
+    {
+        self.assemble_system_residual_with_state_boundary_at(0.0, kernel, state, terms)
+    }
+
+    pub fn apply_state_boundary_jacobian_matfree_at(
+        &self,
+        time: f64,
+        state: MatRef<'_, f64>,
+        direction: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Mat<f64> {
+        let layout = self.field_layout();
+        let nfields = self.fields.len();
+        assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
+        assert_eq!(state.ncols(), 1, "boundary state requires one column");
+        assert_eq!(
+            direction.nrows(),
+            layout.total_size,
+            "boundary direction size mismatch"
+        );
+        let space = FunctionSpaceImpl::new(&self.mesh, &self.family);
+        let element = self.family.element(ReferenceCellType::Interval);
+        let mut out = Mat::<f64>::zeros(layout.total_size, direction.ncols());
+        let mut coord = [0.0; 1];
+        for point in self.mesh.entity_iter(ReferenceCellType::Point) {
+            let point_index = point.local_index();
+            let Some(kernel) = terms.kernel_for(point_index) else {
+                continue;
+            };
+            let topology = point.topology();
+            let mut cells = topology.connected_entity_iter(ReferenceCellType::Interval);
+            let Some(cell_index) = cells.next() else {
+                continue;
+            };
+            if cells.next().is_some() {
+                continue;
+            }
+            point.geometry().points().next().unwrap().coords(&mut coord);
+            let cell = self
+                .mesh
+                .entity(ReferenceCellType::Interval, cell_index)
+                .unwrap();
+            let local_point = cell
+                .topology()
+                .sub_entity_iter(ReferenceCellType::Point)
+                .position(|index| index == point_index)
+                .expect("boundary point missing from owning interval");
+            let normal = if local_point == 0 { -1.0 } else { 1.0 };
+            let mut reference_point = rlst_dynamic_array!(f64, [1, 1]);
+            *reference_point.get_mut([0, 0]).unwrap() = local_point as f64;
+            let mut table = DynArray::<f64, 4>::from_shape(element.tabulate_array_shape(1, 1));
+            element.tabulate(&reference_point, 1, &mut table);
+            let cell_dofs = space
+                .entity_closure_dofs(ReferenceCellType::Interval, cell_index)
+                .unwrap();
+            let point_dofs = space
+                .entity_closure_dofs(ReferenceCellType::Point, point_index)
+                .unwrap();
+            let cell_dof = cell_dofs
+                .iter()
+                .position(|&dof| dof == point_dofs[0])
+                .unwrap();
+            let values = [*table.get([0, 0, cell_dof, 0]).unwrap()];
+            let grad = [*table.get([1, 0, cell_dof, 0]).unwrap()
+                * self
+                    .cell_data
+                    .jinv_cache
+                    .get([0, 0, 0, cell_index])
+                    .unwrap()];
+            let points = [coord[0]];
+            let normals = [normal];
+            let ctx = FacetCtx {
+                time,
+                facet: self.metadata.facet(point_index),
+                tdim: 0,
+                gdim: 1,
+                ncomp: 1,
+                npts: 1,
+                ndofs: 1,
+                wts: &[1.0],
+                jfacet_det: &[1.0],
+                points: &points,
+                normal: &normals,
+                values: &values,
+                grads: &grad,
+            };
+            let (field_maps, field_prescribed) = self.cell_field_maps(cell_index, nfields);
+            let mut state_values = vec![0.0; nfields];
+            let mut state_grads = vec![0.0; nfields];
+            for field in 0..nfields {
+                state_values[field] = field_maps[field][cell_dof].map_or(
+                    field_prescribed[field][cell_dof].unwrap_or(0.0),
+                    |reduced| state[(layout.offsets[field] + reduced, 0)],
+                ) * values[0];
+                for (local_i, _) in cell_dofs.iter().enumerate() {
+                    let coefficient = field_maps[field][local_i]
+                        .map_or(field_prescribed[field][local_i].unwrap_or(0.0), |reduced| {
+                            state[(layout.offsets[field] + reduced, 0)]
+                        });
+                    state_grads[field] += coefficient
+                        * *table.get([1, 0, local_i, 0]).unwrap()
+                        * self
+                            .cell_data
+                            .jinv_cache
+                            .get([0, 0, 0, cell_index])
+                            .unwrap();
+                }
+            }
+            let facet_state = CellState {
+                nfields,
+                npts: 1,
+                gdim: 1,
+                values: &state_values,
+                grads: &state_grads,
+            };
+            let mut local_direction = vec![0.0; nfields];
+            let mut local_action = vec![0.0; nfields];
+            for column in 0..direction.ncols() {
+                for field in 0..nfields {
+                    local_direction[field] = field_maps[field][cell_dof].map_or(0.0, |reduced| {
+                        direction[(layout.offsets[field] + reduced, column)]
+                    });
+                }
+                kernel.apply_local_jacobian(
+                    &ctx,
+                    &facet_state,
+                    &local_direction,
+                    &mut local_action,
+                );
+                for field in 0..nfields {
+                    if let Some(reduced) = field_maps[field][cell_dof] {
+                        out[(layout.offsets[field] + reduced, column)] += local_action[field];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn apply_state_boundary_jacobian_matfree(
+        &self,
+        state: MatRef<'_, f64>,
+        direction: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Mat<f64> {
+        self.apply_state_boundary_jacobian_matfree_at(0.0, state, direction, terms)
+    }
+
     pub fn assemble_system_residual_jacobian_at<K: ResidualKernel + Sync>(
         &self,
         time: f64,
@@ -719,6 +1170,33 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         M: Sync,
     {
         self.assemble_system_residual_jacobian_at(0.0, kernel, state)
+    }
+
+    pub fn assemble_system_residual_jacobian_with_state_boundary_at<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
+        let volume = self.assemble_system_residual_jacobian_at(time, kernel, state);
+        let boundary = self.assemble_state_boundary_at(time, state, terms);
+        volume.as_ref() + boundary.jacobian.as_ref()
+    }
+
+    pub fn assemble_system_residual_jacobian_with_state_boundary<K: ResidualKernel + Sync>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> SparseColMat<usize, f64>
+    where
+        M: Sync,
+    {
+        self.assemble_system_residual_jacobian_with_state_boundary_at(0.0, kernel, state, terms)
     }
 
     pub fn apply_system_jacobian_matfree_at<K: ResidualKernel + Sync>(
@@ -867,6 +1345,36 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         M: Sync,
     {
         self.apply_system_jacobian_matfree_at(0.0, kernel, state, direction)
+    }
+
+    pub fn apply_system_jacobian_matfree_with_state_boundary_at<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Mat<f64>
+    where
+        M: Sync,
+    {
+        self.apply_system_jacobian_matfree_at(time, kernel, state, direction)
+            + self.apply_state_boundary_jacobian_matfree_at(time, state, direction, terms)
+    }
+
+    pub fn apply_system_jacobian_matfree_with_state_boundary<K: ResidualKernel + Sync>(
+        &self,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Mat<f64>
+    where
+        M: Sync,
+    {
+        self.apply_system_jacobian_matfree_with_state_boundary_at(
+            0.0, kernel, state, direction, terms,
+        )
     }
 
     pub fn assemble_system_bilinear_at<K: BilinearForm + Sync>(

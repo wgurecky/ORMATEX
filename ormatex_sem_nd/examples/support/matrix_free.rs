@@ -25,7 +25,7 @@ pub struct ResidualDiffusionNeumannSys<'a, M: Mesh<EntityDescriptor = ReferenceC
 
 impl<'a, M> ResidualDiffusionNeumannSys<'a, M>
 where
-    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     pub fn new(
         problem: &'a SEM2DProblem<M>,

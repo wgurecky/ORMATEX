@@ -10,7 +10,10 @@ use ormatex_sem_nd::{
     BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, FieldRegistry, KernelAdvDiff2D,
     KernelAdvDiffSUPG2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
 };
-use ormatex_sem_nd::{ConstantCoefficient, MeshMetadata, PhysicalRegion, RegionCoefficient};
+use ormatex_sem_nd::{
+    ConstantCoefficient, KernelEdacSplitBoundaryFlux2D, MeshMetadata, PhysicalRegion,
+    RegionCoefficient, StateBoundaryTerms,
+};
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 
@@ -268,6 +271,78 @@ fn nonzero_dirichlet_value_enters_2d_state() {
                 .map(|&boundary| -3.0 * full_matrix[(full, boundary)])
                 .sum();
             assert!((rhs[reduced] - expected).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn state_boundary_assembly_interpolates_and_scatters_fields() {
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+    let problem = SEM2DProblem::new(
+        mesh,
+        1,
+        FieldRegistry::new(["u", "v", "p"]),
+        DofReduction2D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| match row {
+        0..=3 => 1.0,
+        4..=7 => 0.5,
+        _ => 0.3,
+    });
+    let split_flux = KernelEdacSplitBoundaryFlux2D;
+    let right = problem.assemble_state_boundary(state.as_ref(), |facet| {
+        ((facet.midpoint[0] - 1.0).abs() < 1e-12)
+            .then_some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
+    });
+    assert!((right.residual[0..4].iter().sum::<f64>() - 0.5).abs() < 1e-12);
+    assert!((right.residual[4..8].iter().sum::<f64>() - 0.25).abs() < 1e-12);
+    assert!((right.residual[8..12].iter().sum::<f64>() - 0.15).abs() < 1e-12);
+
+    let direction = Mat::from_fn(problem.system_size(), 1, |row, _| 0.1 * (row + 1) as f64);
+    let epsilon = 1e-7;
+    let perturbed = Mat::from_fn(problem.system_size(), 1, |row, _| {
+        state[(row, 0)] + epsilon * direction[(row, 0)]
+    });
+    let perturbed_right = problem.assemble_state_boundary(perturbed.as_ref(), |facet| {
+        ((facet.midpoint[0] - 1.0).abs() < 1e-12)
+            .then_some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
+    });
+    let finite_difference = right
+        .residual
+        .iter()
+        .zip(perturbed_right.residual)
+        .map(|(base, perturbed)| (perturbed - base) / epsilon)
+        .collect::<Vec<_>>();
+    let analytic = right.jacobian.as_ref() * direction.as_ref();
+    for row in 0..problem.system_size() {
+        assert!((finite_difference[row] - analytic[(row, 0)]).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn state_boundary_matrix_free_action_matches_assembled_jacobian() {
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+    let problem = SEM2DProblem::new(
+        mesh,
+        1,
+        FieldRegistry::new(["u", "v", "p"]),
+        DofReduction2D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| 0.2 + 0.03 * row as f64);
+    let direction = Mat::from_fn(problem.system_size(), 2, |row, column| {
+        0.1 * (row + 1) as f64 * (column as f64 + 1.0)
+    });
+    let split_flux = KernelEdacSplitBoundaryFlux2D;
+    let terms = StateBoundaryTerms::new().with_default(KernelEdacSplitBoundaryFlux2D);
+    let assembled = problem.assemble_state_boundary(state.as_ref(), |_facet| {
+        Some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
+    });
+    let action =
+        problem.apply_state_boundary_jacobian_matfree(state.as_ref(), direction.as_ref(), &terms);
+    let expected = assembled.jacobian.as_ref() * direction.as_ref();
+    for row in 0..problem.system_size() {
+        for column in 0..direction.ncols() {
+            assert!((action[(row, column)] - expected[(row, column)]).abs() < 1e-12);
         }
     }
 }

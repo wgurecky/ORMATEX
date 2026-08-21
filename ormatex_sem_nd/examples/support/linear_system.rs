@@ -31,18 +31,7 @@ pub fn sparse_add(
     assert_eq!(a.ncols(), n);
     assert_eq!(b.nrows(), n);
     assert_eq!(b.ncols(), n);
-    let mut triplets = Vec::new();
-    for mat in [a, b] {
-        let (symbolic, values) = mat.parts();
-        let columns = symbolic.col_ptr();
-        let rows = symbolic.row_idx();
-        for column in 0..n {
-            for entry in columns[column]..columns[column + 1] {
-                triplets.push(Triplet::new(rows[entry], column, values[entry]));
-            }
-        }
-    }
-    SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+    a + b
 }
 
 pub fn implicit_euler_final_state<'a>(

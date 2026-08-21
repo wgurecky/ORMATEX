@@ -11,7 +11,7 @@ use ormatex_sem_nd::material::{
 use ormatex_sem_nd::{
     BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry, FluxKernel1D,
     KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian, ResidualKernel,
-    SEM1DProblem,
+    SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms,
 };
 
 #[path = "../examples/support/euler_1d.rs"]
@@ -36,6 +36,37 @@ struct EndpointFlux;
 impl BoundaryIntegrator for EndpointFlux {
     fn integrand_rhs(&self, ctx: &FacetCtx, _equation: usize, q: usize, test_i: usize) -> f64 {
         ctx.point(q)[0] * ctx.normal[0] * ctx.test(test_i, 0).v(q)
+    }
+}
+
+struct EndpointQuadratic;
+
+impl StateBoundaryIntegrator for EndpointQuadratic {
+    fn residual_integrand(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        _equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        state.value(0, q).powi(2) * ctx.normal[0] * ctx.test(test_i, 0).v(q)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        _equation: usize,
+        _unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        2.0 * state.value(0, q)
+            * ctx.normal[0]
+            * ctx.test(test_i, 0).v(q)
+            * ctx.trial(trial_i, 0).v(q)
     }
 }
 
@@ -234,6 +265,26 @@ fn boundary_kernel_reads_endpoint_coordinates_and_normal() {
     let flux = EndpointFlux;
     let boundary = problem.assemble_boundary(|_| Some(&flux));
     assert!((boundary.rhs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn state_boundary_1d_paths_match() {
+    let problem = SEM1DProblem::new(
+        unit_interval(1),
+        2,
+        FieldRegistry::new(["u"]),
+        DofReduction1D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| 0.2 + row as f64 * 0.1);
+    let direction = Mat::from_fn(problem.system_size(), 1, |row, _| 0.3 - row as f64 * 0.04);
+    let terms = StateBoundaryTerms::new().with_default(EndpointQuadratic);
+    let assembled = problem.assemble_state_boundary(state.as_ref(), &terms);
+    let action =
+        problem.apply_state_boundary_jacobian_matfree(state.as_ref(), direction.as_ref(), &terms);
+    let expected = assembled.jacobian.as_ref() * direction.as_ref();
+    for row in 0..problem.system_size() {
+        assert!((action[(row, 0)] - expected[(row, 0)]).abs() < 1e-12);
+    }
 }
 
 #[test]
