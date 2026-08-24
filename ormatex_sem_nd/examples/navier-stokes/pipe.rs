@@ -1,8 +1,5 @@
 //! Pressure-driven 2D channel validation for the EDAC solver.
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-
 use faer::prelude::*;
 use ndelement::types::ReferenceCellType;
 use ndmesh::{
@@ -17,7 +14,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, FluidSystem};
+use edac::{advance, write_spatial_csv, FluidSystem};
 
 const EPS: f64 = 1e-12;
 
@@ -125,11 +122,6 @@ fn main() {
     let u = problem.field_values("u", state.as_ref()).unwrap();
     let v = problem.field_values("v", state.as_ref()).unwrap();
     let p = problem.field_values("p", state.as_ref()).unwrap();
-    let mut profile = BufWriter::new(
-        File::create("target/navier_stokes_pipe_profile.csv")
-            .expect("failed to create pipe profile csv"),
-    );
-    writeln!(profile, "y,u,analytic_u").unwrap();
     let mut max_error: f64 = 0.0;
     let mut max_v: f64 = 0.0;
     let mut profile_count = 0;
@@ -139,7 +131,6 @@ fn main() {
             let analytic = delta_p * y * (height - y) / (2.0 * rho * nu * length);
             max_error = max_error.max((value - analytic).abs());
             profile_count += 1;
-            writeln!(profile, "{y:.9},{value:.9e},{analytic:.9e}").unwrap();
         }
     }
     for &value in &v.values {
@@ -154,6 +145,10 @@ fn main() {
     assert!(
         max_error < 2e-2,
         "pipe profile error too large: {max_error}"
+    );
+    write_spatial_csv(
+        "target/navier_stokes_pipe.csv",
+        [("u", u), ("v", v), ("p", p)],
     );
     println!("pipe validation: max profile error={max_error:.3e}, max |v|={max_v:.3e}");
 }

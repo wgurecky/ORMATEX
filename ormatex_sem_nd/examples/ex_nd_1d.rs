@@ -37,7 +37,7 @@ fn main() {
         DofReduction1D::Periodic { facets: [0, nx] },
     );
     let mass = problem.assemble_lumped_mass();
-    let operator = problem.assemble_bilinear(&KernelAdvDiff::new(nu, vel));
+    let operator = problem.assemble_bilinear(0.0, &KernelAdvDiff::new(nu, vel));
     let n = mass.nrows();
     println!(
         "reduced ndofs = {}, mass nnz = {}, adv_diff nnz = {}",
@@ -48,7 +48,7 @@ fn main() {
 
     let plain = operator.to_dense();
     let supg_zero = problem
-        .assemble_bilinear(&KernelAdvDiffSUPG::new(nu, vel, 0.0))
+        .assemble_bilinear(0.0, &KernelAdvDiffSUPG::new(nu, vel, 0.0))
         .to_dense();
     for i in 0..n {
         for j in 0..n {
@@ -57,7 +57,7 @@ fn main() {
     }
     assert!(
         (problem
-            .assemble_linear(&KernelVolumeSource::new(1.0))
+            .assemble_linear(0.0, &KernelVolumeSource::new(1.0))
             .iter()
             .sum::<f64>()
             - 1.0)

@@ -58,9 +58,7 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let mut residual = self
-            .problem
-            .assemble_system_residual_at(t, &self.kernel, state);
+        let mut residual = self.problem.assemble_residual(t, &self.kernel, state);
         let robin_state = self.robin.as_ref() * state;
         for row in 0..residual.len() {
             residual[row] += robin_state[(row, 0)] - self.source[row];
@@ -75,7 +73,7 @@ where
             JacobianBackend::Assembled => Box::new(OwnedMinvJacobian::new(
                 sparse_add(
                     self.problem
-                        .assemble_system_residual_jacobian_at(t, &self.kernel, state)
+                        .assemble_residual_jacobian(t, &self.kernel, state)
                         .as_ref(),
                     self.robin.as_ref(),
                 ),

@@ -32,11 +32,11 @@ fn main() {
         },
     );
     let mass = problem.assemble_lumped_mass();
-    let operator = problem.assemble_bilinear(&KernelAdvDiff2D::new(0.001, [0.5, 0.1]));
+    let operator = problem.assemble_bilinear(0.0, &KernelAdvDiff2D::new(0.001, [0.5, 0.1]));
     let n = mass.nrows();
     assert!(
         (problem
-            .assemble_linear(&KernelVolumeSource::new(1.0))
+            .assemble_linear(0.0, &KernelVolumeSource::new(1.0))
             .iter()
             .sum::<f64>()
             - 1.0)

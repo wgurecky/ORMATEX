@@ -43,12 +43,12 @@ fn large_2d_diffusion_assembled_jacobian_runtime() {
 
     let start = Instant::now();
     let serial =
-        serial_pool.install(|| problem.assemble_residual_jacobian(&kernel, state.as_ref()));
+        serial_pool.install(|| problem.assemble_residual_jacobian(0.0, &kernel, state.as_ref()));
     let serial_time = start.elapsed();
 
     let start = Instant::now();
     let parallel =
-        parallel_pool.install(|| problem.assemble_residual_jacobian(&kernel, state.as_ref()));
+        parallel_pool.install(|| problem.assemble_residual_jacobian(0.0, &kernel, state.as_ref()));
     let parallel_time = start.elapsed();
 
     assert_eq!(serial.nrows(), problem.reduced_size());

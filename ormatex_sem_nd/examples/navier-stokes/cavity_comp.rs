@@ -1,8 +1,6 @@
 //! Lid-driven cavity comparison between fused and composed EDAC kernels.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
@@ -29,7 +27,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, FluidSystem};
+use edac::{advance, write_spatial_csv, FluidSystem};
 
 const EPS: f64 = 1e-12;
 const STEPS: usize = 300;
@@ -148,17 +146,10 @@ fn write_state(problem: &SEM2DProblem<QuadMesh>, state: MatRef<'_, f64>) {
     let u = problem.field_values("u", state).unwrap();
     let v = problem.field_values("v", state).unwrap();
     let p = problem.field_values("p", state).unwrap();
-    let mut output = BufWriter::new(
-        File::create("target/navier_stokes_lid_driven_cavity_comp.csv")
-            .expect("failed to create composed cavity output csv"),
+    write_spatial_csv(
+        "target/navier_stokes_lid_driven_cavity_comp.csv",
+        [("u", u), ("v", v), ("p", p)],
     );
-    writeln!(output, "field,x,y,value").unwrap();
-    for (field, field_values) in [("u", u), ("v", v), ("p", p)] {
-        for (&(x, y), &value) in field_values.positions.iter().zip(&field_values.values) {
-            assert!(value.is_finite(), "non-finite cavity state");
-            writeln!(output, "{field},{x:.9},{y:.9},{value:.9e}").unwrap();
-        }
-    }
 }
 
 fn main() {

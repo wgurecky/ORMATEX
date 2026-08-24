@@ -48,7 +48,7 @@ pub(crate) fn assemble_quad_state_boundary_terms<M>(
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
 {
-    assemble_quad_state_boundary(
+    let (residual, jacobian) = assemble_quad_state_boundary_impl(
         mesh,
         family,
         polynomial_degree,
@@ -60,7 +60,83 @@ where
         field_prescribed_values,
         field_offsets,
         |facet| terms.kernel_for(facet.index),
+        true,
+        true,
+    );
+    StateBoundaryContributions {
+        residual: residual.unwrap(),
+        jacobian: jacobian.unwrap(),
+    }
+}
+
+pub(crate) fn assemble_quad_state_boundary_residual<M>(
+    mesh: &M,
+    family: &LagrangeElementFamily<f64>,
+    polynomial_degree: usize,
+    metadata: &MeshMetadata,
+    fields: &FieldRegistry,
+    time: f64,
+    state: MatRef<'_, f64>,
+    field_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &[Vec<Vec<Option<f64>>>],
+    field_offsets: &[usize],
+    terms: &StateBoundaryTerms,
+) -> Vec<f64>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+{
+    assemble_quad_state_boundary_impl(
+        mesh,
+        family,
+        polynomial_degree,
+        metadata,
+        fields,
+        time,
+        state,
+        field_reduced_dofs,
+        field_prescribed_values,
+        field_offsets,
+        |facet| terms.kernel_for(facet.index),
+        true,
+        false,
     )
+    .0
+    .unwrap()
+}
+
+pub(crate) fn assemble_quad_state_boundary_jacobian<M>(
+    mesh: &M,
+    family: &LagrangeElementFamily<f64>,
+    polynomial_degree: usize,
+    metadata: &MeshMetadata,
+    fields: &FieldRegistry,
+    time: f64,
+    state: MatRef<'_, f64>,
+    field_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &[Vec<Vec<Option<f64>>>],
+    field_offsets: &[usize],
+    terms: &StateBoundaryTerms,
+) -> SparseColMat<usize, f64>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+{
+    assemble_quad_state_boundary_impl(
+        mesh,
+        family,
+        polynomial_degree,
+        metadata,
+        fields,
+        time,
+        state,
+        field_reduced_dofs,
+        field_prescribed_values,
+        field_offsets,
+        |facet| terms.kernel_for(facet.index),
+        false,
+        true,
+    )
+    .1
+    .unwrap()
 }
 
 pub(crate) fn apply_quad_state_boundary_terms<M>(
@@ -269,7 +345,7 @@ where
         }
         let mut state_grads = vec![0.0; nfields * 2 * npts];
         for field in 0..nfields {
-            for (facet_i, &cell_i) in facet_cell_indices.iter().enumerate() {
+            for &cell_i in &facet_cell_indices {
                 let coefficient = maps[field][cell_i]
                     .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
                         state[(field_offsets[field] + reduced, 0)]
@@ -629,10 +705,7 @@ where
     }
 }
 
-/// Assemble selected nonlinear state-dependent boundary forms on quadrilateral
-/// facets. The returned residual is added directly to the positive spatial
-/// residual, and the Jacobian is the derivative of that residual.
-pub(crate) fn assemble_quad_state_boundary<'a, M, F>(
+fn assemble_quad_state_boundary_impl<'a, M, F>(
     mesh: &M,
     family: &LagrangeElementFamily<f64>,
     polynomial_degree: usize,
@@ -644,7 +717,9 @@ pub(crate) fn assemble_quad_state_boundary<'a, M, F>(
     field_prescribed_values: &[Vec<Vec<Option<f64>>>],
     field_offsets: &[usize],
     mut select_kernel: F,
-) -> StateBoundaryContributions
+    include_residual: bool,
+    include_jacobian: bool,
+) -> (Option<Vec<f64>>, Option<SparseColMat<usize, f64>>)
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
     F: FnMut(BoundaryFacet) -> Option<&'a dyn StateBoundaryIntegrator>,
@@ -673,7 +748,7 @@ where
     let npts = wts.len();
     let xs: Vec<f64> = (0..npts).map(|q| qpts[2 * q + 1]).collect();
     let system_size = *field_offsets.last().unwrap();
-    let mut residual = vec![0.0; system_size];
+    let mut residual = include_residual.then(|| vec![0.0; system_size]);
     let mut triplets = Vec::new();
     let mut coord = [0.0; 2];
 
@@ -874,10 +949,14 @@ where
         };
 
         let local_size = nfields * nfacet;
-        let mut local_residual = vec![0.0; local_size];
-        let mut local_jacobian = vec![0.0; local_size * local_size];
-        kernel.assemble_local_residual(&ctx, &facet_state, &mut local_residual);
-        kernel.assemble_local_jacobian(&ctx, &facet_state, &mut local_jacobian);
+        let mut local_residual = include_residual.then(|| vec![0.0; local_size]);
+        let mut local_jacobian = include_jacobian.then(|| vec![0.0; local_size * local_size]);
+        if let Some(local_residual) = local_residual.as_mut() {
+            kernel.assemble_local_residual(&ctx, &facet_state, local_residual);
+        }
+        if let Some(local_jacobian) = local_jacobian.as_mut() {
+            kernel.assemble_local_jacobian(&ctx, &facet_state, local_jacobian);
+        }
         for equation in 0..nfields {
             for (local_i, &full_i) in facet_dofs.iter().enumerate() {
                 let cell_i = cell_i_for_dof(&cell_dofs, full_i);
@@ -889,38 +968,41 @@ where
                 let Some(reduced_i) = target else {
                     continue;
                 };
-                residual[field_offsets[equation] + reduced_i] +=
-                    local_residual[equation * nfacet + local_i];
-                for unknown in 0..nfields {
-                    for (local_j, &full_j) in facet_dofs.iter().enumerate() {
-                        let cell_j = cell_i_for_dof(&cell_dofs, full_j);
-                        let target = if field_reduced_dofs.len() == 1 {
-                            field_reduced_dofs[0][cell_index][cell_j]
-                        } else {
-                            field_reduced_dofs[unknown][cell_index][cell_j]
-                        };
-                        let Some(reduced_j) = target else {
-                            continue;
-                        };
-                        let row = equation * nfacet + local_i;
-                        let col = unknown * nfacet + local_j;
-                        let value = local_jacobian[row * local_size + col];
-                        if value != 0.0 {
-                            triplets.push(Triplet::new(
-                                field_offsets[equation] + reduced_i,
-                                field_offsets[unknown] + reduced_j,
-                                value,
-                            ));
+                if let Some(residual) = residual.as_mut() {
+                    residual[field_offsets[equation] + reduced_i] +=
+                        local_residual.as_ref().unwrap()[equation * nfacet + local_i];
+                }
+                if let Some(local_jacobian) = local_jacobian.as_ref() {
+                    for unknown in 0..nfields {
+                        for (local_j, &full_j) in facet_dofs.iter().enumerate() {
+                            let cell_j = cell_i_for_dof(&cell_dofs, full_j);
+                            let target = if field_reduced_dofs.len() == 1 {
+                                field_reduced_dofs[0][cell_index][cell_j]
+                            } else {
+                                field_reduced_dofs[unknown][cell_index][cell_j]
+                            };
+                            let Some(reduced_j) = target else {
+                                continue;
+                            };
+                            let row = equation * nfacet + local_i;
+                            let col = unknown * nfacet + local_j;
+                            let value = local_jacobian[row * local_size + col];
+                            if value != 0.0 {
+                                triplets.push(Triplet::new(
+                                    field_offsets[equation] + reduced_i,
+                                    field_offsets[unknown] + reduced_j,
+                                    value,
+                                ));
+                            }
                         }
                     }
                 }
             }
         }
     }
-    StateBoundaryContributions {
-        residual,
-        jacobian: SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap(),
-    }
+    let jacobian = include_jacobian
+        .then(|| SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap());
+    (residual, jacobian)
 }
 
 fn cell_i_for_dof(cell_dofs: &[usize], full_dof: usize) -> usize {

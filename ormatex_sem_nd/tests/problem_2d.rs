@@ -248,7 +248,7 @@ fn nonzero_dirichlet_value_enters_2d_state() {
     );
     let kernel = KernelAdvDiff2D::new(1.0, [0.0, 0.0]);
     let state = Mat::from_fn(problem.reduced_size(), 1, |_, _| 3.0);
-    let residual = problem.assemble_residual(&kernel, state.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
     assert!(residual.iter().all(|value| value.abs() < 1e-12));
 
     let full_problem = SEM2DProblem::new(
@@ -257,13 +257,13 @@ fn nonzero_dirichlet_value_enters_2d_state() {
         FieldRegistry::new(["temperature"]),
         DofReduction2D::None,
     );
-    let full_matrix = full_problem.assemble_bilinear(&kernel).to_dense();
+    let full_matrix = full_problem.assemble_bilinear(0.0, &kernel).to_dense();
     let space = FunctionSpaceImpl::new(problem.mesh(), problem.family());
     let boundary_dofs = space
         .entity_closure_dofs(ReferenceCellType::Interval, left_facet)
         .unwrap();
     let mut rhs = vec![0.0; problem.reduced_size()];
-    problem.apply_dirichlet_rhs_correction(&kernel, &mut rhs);
+    problem.apply_dirichlet_rhs_correction(0.0, &kernel, &mut rhs);
     for full in 0..full_problem.reduced_size() {
         if let Some(reduced) = problem.target_dof(full) {
             let expected: f64 = boundary_dofs
@@ -289,11 +289,26 @@ fn state_boundary_assembly_interpolates_and_scatters_fields() {
         4..=7 => 0.5,
         _ => 0.3,
     });
-    let split_flux = KernelEdacSplitBoundaryFlux2D;
-    let right = problem.assemble_state_boundary(state.as_ref(), |facet| {
-        ((facet.midpoint[0] - 1.0).abs() < 1e-12)
-            .then_some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
-    });
+    let right_facet = problem
+        .mesh()
+        .entity_iter(ReferenceCellType::Interval)
+        .find(|facet| {
+            let mut midpoint = [0.0; 2];
+            let mut count = 0.0;
+            for point in facet.geometry().points() {
+                let mut xy = [0.0; 2];
+                point.coords(&mut xy);
+                midpoint[0] += xy[0];
+                midpoint[1] += xy[1];
+                count += 1.0;
+            }
+            midpoint[0] / count > 1.0 - 1e-12
+        })
+        .unwrap()
+        .local_index();
+    let terms =
+        StateBoundaryTerms::new().with_entities([right_facet], KernelEdacSplitBoundaryFlux2D);
+    let right = problem.assemble_state_boundary(0.0, state.as_ref(), &terms);
     assert!((right.residual[0..4].iter().sum::<f64>() - 0.5).abs() < 1e-12);
     assert!((right.residual[4..8].iter().sum::<f64>() - 0.25).abs() < 1e-12);
     assert!((right.residual[8..12].iter().sum::<f64>() - 0.15).abs() < 1e-12);
@@ -303,10 +318,7 @@ fn state_boundary_assembly_interpolates_and_scatters_fields() {
     let perturbed = Mat::from_fn(problem.system_size(), 1, |row, _| {
         state[(row, 0)] + epsilon * direction[(row, 0)]
     });
-    let perturbed_right = problem.assemble_state_boundary(perturbed.as_ref(), |facet| {
-        ((facet.midpoint[0] - 1.0).abs() < 1e-12)
-            .then_some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
-    });
+    let perturbed_right = problem.assemble_state_boundary(0.0, perturbed.as_ref(), &terms);
     let finite_difference = right
         .residual
         .iter()
@@ -332,13 +344,10 @@ fn state_boundary_matrix_free_action_matches_assembled_jacobian() {
     let direction = Mat::from_fn(problem.system_size(), 2, |row, column| {
         0.1 * (row + 1) as f64 * (column as f64 + 1.0)
     });
-    let split_flux = KernelEdacSplitBoundaryFlux2D;
     let terms = StateBoundaryTerms::new().with_default(KernelEdacSplitBoundaryFlux2D);
-    let assembled = problem.assemble_state_boundary(state.as_ref(), |_facet| {
-        Some(&split_flux as &dyn ormatex_sem_nd::StateBoundaryIntegrator)
-    });
+    let assembled = problem.assemble_state_boundary(0.0, state.as_ref(), &terms);
     let action =
-        problem.apply_state_boundary_jacobian_matfree(state.as_ref(), direction.as_ref(), &terms);
+        problem.apply_state_boundary_jacobian(0.0, state.as_ref(), direction.as_ref(), &terms);
     let expected = assembled.jacobian.as_ref() * direction.as_ref();
     for row in 0..problem.system_size() {
         for column in 0..direction.ncols() {
@@ -351,7 +360,7 @@ fn state_boundary_matrix_free_action_matches_assembled_jacobian() {
 fn volume_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
-    assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
+    assert!((problem.assemble_linear(0.0, &XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
 #[test]
@@ -367,7 +376,9 @@ fn lumped_mass_matches_generic_gll_mass() {
             tolerance: 1e-12,
         },
     );
-    let generic = problem.assemble_bilinear(&KernelMass::new()).to_dense();
+    let generic = problem
+        .assemble_bilinear(0.0, &KernelMass::new())
+        .to_dense();
     let lumped = problem.assemble_lumped_mass().to_dense();
     for i in 0..generic.nrows() {
         for j in 0..generic.ncols() {
@@ -460,8 +471,9 @@ fn boundary_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
     let flux = YFlux;
-    let boundary =
-        problem.assemble_boundary(|facet| (facet.midpoint[0].abs() < 1e-12).then_some(&flux));
+    let boundary = problem.assemble_boundary(0.0, |facet| {
+        (facet.midpoint[0].abs() < 1e-12).then_some(&flux as &dyn BoundaryIntegrator)
+    });
     assert!((boundary.rhs.iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
@@ -478,11 +490,11 @@ fn residual_kernel_jacobian_matches_directional_difference() {
     let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (0.3 * i as f64).sin());
     let kernel = QuadraticReaction;
-    let action = problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let eps = 1e-7;
     let perturbed = state.as_ref() + faer::Scale(eps) * direction.as_ref();
-    let residual = problem.assemble_residual(&kernel, state.as_ref());
-    let perturbed_residual = problem.assemble_residual(&kernel, perturbed.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
+    let perturbed_residual = problem.assemble_residual(0.0, &kernel, perturbed.as_ref());
     for i in 0..n {
         assert!((action[(i, 0)] - (perturbed_residual[i] - residual[i]) / eps).abs() < 1e-7);
     }
@@ -502,11 +514,11 @@ fn coupled_2d_system_assembles_cross_field_blocks_and_matrix_free_action() {
     let direction = Mat::from_fn(2 * n, 1, |i, _| (0.17 * i as f64).sin());
     let kernel = CoupledReaction;
     let assembled = problem
-        .assemble_system_residual_jacobian(&kernel, state.as_ref())
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
         .to_dense();
     assert!(assembled[(0, n)] != 0.0);
     assert!(assembled[(n, 0)] != 0.0);
-    let action = problem.apply_system_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let expected = assembled.as_ref() * direction.as_ref();
     for row in 0..2 * n {
         assert!((action[(row, 0)] - expected[(row, 0)]).abs() < 1e-11);
@@ -523,10 +535,10 @@ fn supg_2d_zero_tau_matches_advection_diffusion() {
         DofReduction2D::None,
     );
     let plain = problem
-        .assemble_bilinear(&KernelAdvDiff2D::new(0.1, [0.4, -0.2]))
+        .assemble_bilinear(0.0, &KernelAdvDiff2D::new(0.1, [0.4, -0.2]))
         .to_dense();
     let supg = problem
-        .assemble_bilinear(&KernelAdvDiffSUPG2D::new(0.1, [0.4, -0.2], 0.0))
+        .assemble_bilinear(0.0, &KernelAdvDiffSUPG2D::new(0.1, [0.4, -0.2], 0.0))
         .to_dense();
     for i in 0..plain.nrows() {
         for j in 0..plain.ncols() {
@@ -559,11 +571,9 @@ fn region_coefficient_changes_2d_material_operator() {
         region_diffusion,
         [ConstantCoefficient(0.0), ConstantCoefficient(0.0)],
     );
-    let selected = problem
-        .assemble_system_bilinear_at(0.0, &region_kernel)
-        .to_dense();
+    let selected = problem.assemble_bilinear(0.0, &region_kernel).to_dense();
     let expected = problem
-        .assemble_bilinear(&KernelAdvDiff2D::new(3.0, [0.0, 0.0]))
+        .assemble_bilinear(0.0, &KernelAdvDiff2D::new(3.0, [0.0, 0.0]))
         .to_dense();
     for i in 0..selected.nrows() {
         for j in 0..selected.ncols() {

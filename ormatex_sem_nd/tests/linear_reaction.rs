@@ -42,9 +42,9 @@ fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
 
     let state = Mat::from_fn(3 * n, 1, |row, _| 0.2 + 0.03 * row as f64);
     let direction = Mat::from_fn(3 * n, 1, |row, _| (0.2 * row as f64).sin());
-    let mass = problem.assemble_system_lumped_mass().to_dense();
+    let mass = problem.assemble_lumped_mass().to_dense();
     let jacobian = problem
-        .assemble_system_residual_jacobian(&kernel, state.as_ref())
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
         .to_dense();
     let matrix = rates();
 
@@ -65,13 +65,13 @@ fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
     assert_ne!(jacobian[(2 * n, n)], 0.0);
     assert_eq!(jacobian[(0, n)], 0.0);
 
-    let residual = problem.assemble_system_residual(&kernel, state.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
     let expected_residual = jacobian.as_ref() * state.as_ref();
     for row in 0..3 * n {
         assert!((residual[row] - expected_residual[(row, 0)]).abs() < 1e-12);
     }
 
-    let action = problem.apply_system_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let expected_action = jacobian.as_ref() * direction.as_ref();
     for row in 0..3 * n {
         assert!((action[(row, 0)] - expected_action[(row, 0)]).abs() < 1e-12);

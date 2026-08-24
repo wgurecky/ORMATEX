@@ -37,7 +37,7 @@ where
 {
     let neumann = NeumannFlux::new(1.0);
     let robin = RobinConvection::new(0.1, 0.0);
-    problem.assemble_boundary(|facet: BoundaryFacet| {
+    problem.assemble_boundary(0.0, |facet: BoundaryFacet| {
         const EPS: f64 = 1e-9;
         if facet.midpoint[0] < EPS {
             Some(&neumann as &dyn ormatex_sem_nd::BoundaryIntegrator)
@@ -90,7 +90,7 @@ pub fn run_diffusion_neumann_with_metadata<M, F>(
 
     let (problem, mass, kernel) = diffusion_neumann_problem(mesh, p, metadata);
     let n = problem.reduced_size();
-    let k_diff = problem.assemble_bilinear(&kernel);
+    let k_diff = problem.assemble_bilinear(0.0, &kernel);
     let boundary = assemble_boundary(&problem);
     let b = boundary.rhs;
     let k_eff = sparse_add(k_diff.as_ref(), boundary.mat.as_ref());

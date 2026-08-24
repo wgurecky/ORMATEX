@@ -16,7 +16,7 @@ pub use common::{
 pub use fields::{FieldRegistry, FieldValues};
 pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{
-    CompleteResidualOperator, MatrixFreeJacobianProblem, MatrixFreeMinvCompleteJacobian,
+    CompleteResidualOperator, MatrixFreeJacobianProblem, MatrixFreeJacobianSource,
     MatrixFreeMinvJacobian, OwnedMinvJacobian,
 };
 pub use kernels::{

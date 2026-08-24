@@ -82,15 +82,15 @@ fn main() {
     );
     let n = problem.reduced_size();
     let transport = block_diagonal(
-        problem.assemble_bilinear(&KernelAdvDiff::new(diffusivity, velocity)),
+        problem.assemble_bilinear(0.0, &KernelAdvDiff::new(diffusivity, velocity)),
         3,
     );
-    let reaction = problem.assemble_system_bilinear(&KernelLinearReaction::with_field_names(
-        reaction_matrix(),
-        ["c0", "c1", "c2"],
-    ));
+    let reaction = problem.assemble_bilinear(
+        0.0,
+        &KernelLinearReaction::with_field_names(reaction_matrix(), ["c0", "c1", "c2"]),
+    );
     let operator = sparse_add(transport.as_ref(), reaction.as_ref());
-    let mass = problem.assemble_system_lumped_mass();
+    let mass = problem.assemble_lumped_mass();
     let system = LinearOdeSys::new(mass, operator, vec![0.0; 3 * n]);
 
     let positions = problem.dof_positions();

@@ -38,8 +38,9 @@ fn p2_transient_diffusion_reaches_dirichlet_linear_profile() {
         },
     );
     let diffusion = KernelDiffusion::new(0.4);
-    let source = problem.assemble_linear_with_dirichlet(&diffusion, &KernelVolumeSource::new(0.0));
-    let state = run_to_steady_state(&problem, problem.assemble_bilinear(&diffusion), source);
+    let source =
+        problem.assemble_linear_with_dirichlet(0.0, &diffusion, &KernelVolumeSource::new(0.0));
+    let state = run_to_steady_state(&problem, problem.assemble_bilinear(0.0, &diffusion), source);
 
     for (row, x) in problem.dof_positions().into_iter().enumerate() {
         let expected = left_temperature + (right_temperature - left_temperature) * x;
@@ -62,7 +63,7 @@ fn p2_transient_diffusion_reaches_neumann_robin_linear_profile() {
     let diffusion = KernelDiffusion::new(diffusivity);
     let neumann = NeumannFlux::new(flux);
     let robin = RobinConvection::new(h, ambient);
-    let boundary = problem.assemble_boundary(|point| {
+    let boundary = problem.assemble_boundary(0.0, |point| {
         if point.coordinate < 1e-12 {
             Some(&neumann)
         } else if point.coordinate > 1.0 - 1e-12 {
@@ -72,7 +73,7 @@ fn p2_transient_diffusion_reaches_neumann_robin_linear_profile() {
         }
     });
     let stiffness = sparse_add(
-        problem.assemble_bilinear(&diffusion).as_ref(),
+        problem.assemble_bilinear(0.0, &diffusion).as_ref(),
         boundary.mat.as_ref(),
     );
     let state = run_to_steady_state(&problem, stiffness, boundary.rhs);

@@ -110,7 +110,7 @@ fn p2_epi3_krylov_advects_and_diffuses_periodic_gaussian() {
         },
     );
     let mass = problem.assemble_lumped_mass();
-    let operator = problem.assemble_bilinear(&KernelAdvDiff2D::new(diffusivity, velocity));
+    let operator = problem.assemble_bilinear(0.0, &KernelAdvDiff2D::new(diffusivity, velocity));
     let n = problem.reduced_size();
     let positions = problem.dof_positions();
     let y0 = Mat::from_fn(n, 1, |row, _| {

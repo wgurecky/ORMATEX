@@ -1,15 +1,15 @@
 use crate::common::{
     add_dirichlet_rhs_correction, apply_quad_state_boundary_terms, assemble_lumped_mass,
-    assemble_quad_boundaries, assemble_quad_state_boundary, assemble_quad_state_boundary_terms,
-    cell_ctx, interpolate_cell_state, push_local_matrix_triplets, scatter_local_vector,
+    assemble_quad_boundaries, assemble_quad_state_boundary_jacobian,
+    assemble_quad_state_boundary_residual, assemble_quad_state_boundary_terms, cell_ctx,
+    interpolate_cell_state, push_local_matrix_triplets, scatter_local_vector,
     BoundaryContributions, BoundaryFacet, CellData, CellState, FieldDofLayout, LocalCtx,
     ReducedDofMap, StateBoundaryContributions, CELL_BATCH_SIZE,
 };
 use crate::fields::{FieldRegistry, FieldValues};
 use crate::jacobian::CompleteResidualOperator;
 use crate::kernels::kernel_common::{
-    BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryIntegrator,
-    StateBoundaryTerms,
+    BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms,
 };
 use crate::material::MeshMetadata;
 use faer::prelude::*;
@@ -230,17 +230,17 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     metadata: MeshMetadata,
 }
 
-pub struct SEM2DResidualOperator<'p, 'k, M, K>
+pub struct SEM2DResidualOperator<'p, 'k, 'b, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     problem: &'p SEM2DProblem<M>,
     kernel: &'k K,
     time: f64,
-    terms: StateBoundaryTerms,
+    terms: Option<&'b StateBoundaryTerms>,
 }
 
-impl<'p, 'k, M, K> SEM2DResidualOperator<'p, 'k, M, K>
+impl<'p, 'k, 'b, M, K> SEM2DResidualOperator<'p, 'k, 'b, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: ResidualKernel + Sync,
@@ -250,43 +250,63 @@ where
     }
 
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
-        self.problem
-            .assemble_system_residual_with_state_boundary_at(
-                self.time,
-                self.kernel,
-                state,
-                &self.terms,
-            )
+        match &self.terms {
+            Some(terms) => {
+                self.problem
+                    .assemble_complete_residual(self.time, self.kernel, state, terms)
+            }
+            None => self
+                .problem
+                .assemble_residual(self.time, self.kernel, state),
+        }
     }
 
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
-        self.problem
-            .assemble_system_residual_jacobian_with_state_boundary_at(
-                self.time,
-                self.kernel,
-                state,
-                &self.terms,
-            )
+        match &self.terms {
+            Some(terms) => {
+                self.problem
+                    .assemble_complete_jacobian(self.time, self.kernel, state, terms)
+            }
+            None => self
+                .problem
+                .assemble_residual_jacobian(self.time, self.kernel, state),
+        }
     }
 
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
-        self.problem
-            .apply_system_jacobian_matfree_with_state_boundary_at(
+        match &self.terms {
+            Some(terms) => self.problem.apply_complete_jacobian(
                 self.time,
                 self.kernel,
                 state,
                 direction,
-                &self.terms,
-            )
+                terms,
+            ),
+            None => self
+                .problem
+                .apply_jacobian(self.time, self.kernel, state, direction),
+        }
     }
 
-    pub fn with_state_boundary(mut self, terms: StateBoundaryTerms) -> Self {
-        self.terms = terms;
+    pub fn at_time(mut self, time: f64) -> Self {
+        self.time = time;
         self
+    }
+
+    pub fn with_state_boundary<'terms>(
+        self,
+        terms: &'terms StateBoundaryTerms,
+    ) -> SEM2DResidualOperator<'p, 'k, 'terms, M, K> {
+        SEM2DResidualOperator {
+            problem: self.problem,
+            kernel: self.kernel,
+            time: self.time,
+            terms: Some(terms),
+        }
     }
 }
 
-impl<M, K> CompleteResidualOperator for SEM2DResidualOperator<'_, '_, M, K>
+impl<M, K> CompleteResidualOperator for SEM2DResidualOperator<'_, '_, '_, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: ResidualKernel + Sync,
@@ -309,11 +329,10 @@ where
 }
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
-    pub fn residual_operator_at<'p, 'k, K: ResidualKernel + Sync>(
+    pub fn residual_operator<'p, 'k, K: ResidualKernel + Sync>(
         &'p self,
-        time: f64,
         kernel: &'k K,
-    ) -> SEM2DResidualOperator<'p, 'k, M, K>
+    ) -> SEM2DResidualOperator<'p, 'k, 'static, M, K>
     where
         M: Sync,
     {
@@ -321,19 +340,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         SEM2DResidualOperator {
             problem: self,
             kernel,
-            time,
-            terms: StateBoundaryTerms::new(),
+            time: 0.0,
+            terms: None,
         }
-    }
-
-    pub fn residual_operator<'p, 'k, K: ResidualKernel + Sync>(
-        &'p self,
-        kernel: &'k K,
-    ) -> SEM2DResidualOperator<'p, 'k, M, K>
-    where
-        M: Sync,
-    {
-        self.residual_operator_at(0.0, kernel)
     }
     /// Build a GLL quadrilateral spectral-element problem.
     /// Build a problem with named scalar fields in system-vector order.
@@ -812,7 +821,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
 
     /// Assemble the positive weak spatial residual `R(U)` of a state-aware
     /// kernel. Semi-discrete systems apply the lumped inverse mass separately.
-    pub fn assemble_system_residual_at<K: ResidualKernel + Sync>(
+    pub fn assemble_residual<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -902,46 +911,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         residual
     }
 
-    pub fn assemble_residual<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-    ) -> Vec<f64>
-    where
-        M: Sync,
-    {
-        assert_eq!(
-            kernel.nfields(),
-            1,
-            "scalar residual requires a one-field kernel"
-        );
-        self.assemble_system_residual_at(0.0, kernel, state)
-    }
-
-    pub fn assemble_system_residual<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-    ) -> Vec<f64>
-    where
-        M: Sync,
-    {
-        self.assemble_system_residual_at(0.0, kernel, state)
-    }
-
-    pub fn assemble_system_residual_with_state_boundary_at<K: ResidualKernel + Sync>(
+    fn assemble_state_boundary_residual(
         &self,
         time: f64,
-        kernel: &K,
         state: MatRef<f64>,
         terms: &StateBoundaryTerms,
-    ) -> Vec<f64>
-    where
-        M: Sync,
-    {
-        let mut residual = self.assemble_system_residual_at(time, kernel, state);
-        let layout = self.field_layout();
-        let boundary = assemble_quad_state_boundary_terms(
+    ) -> Vec<f64> {
+        assemble_quad_state_boundary_residual(
             &self.mesh,
             &self.family,
             self.p,
@@ -951,17 +927,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             state,
             &self.cell_reduced_dofs,
             &self.cell_prescribed_values,
-            &layout.offsets,
+            &self.field_layout().offsets,
             terms,
-        );
-        for (volume, boundary) in residual.iter_mut().zip(boundary.residual) {
-            *volume += boundary;
-        }
-        residual
+        )
     }
 
-    pub fn assemble_system_residual_with_state_boundary<K: ResidualKernel + Sync>(
+    fn assemble_complete_residual<K: ResidualKernel + Sync>(
         &self,
+        time: f64,
         kernel: &K,
         state: MatRef<f64>,
         terms: &StateBoundaryTerms,
@@ -969,11 +942,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     where
         M: Sync,
     {
-        self.assemble_system_residual_with_state_boundary_at(0.0, kernel, state, terms)
+        let mut residual = self.assemble_residual(time, kernel, state);
+        let boundary = self.assemble_state_boundary_residual(time, state, terms);
+        for (volume, boundary) in residual.iter_mut().zip(boundary) {
+            *volume += boundary;
+        }
+        residual
     }
 
     /// Assemble `dR/du` for a state-aware kernel at `state`.
-    pub fn assemble_system_residual_jacobian_at<K: ResidualKernel + Sync>(
+    pub fn assemble_residual_jacobian<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1061,34 +1039,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
-    pub fn assemble_residual_jacobian<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-    ) -> SparseColMat<usize, f64>
-    where
-        M: Sync,
-    {
-        assert_eq!(
-            kernel.nfields(),
-            1,
-            "scalar Jacobian requires a one-field kernel"
-        );
-        self.assemble_system_residual_jacobian_at(0.0, kernel, state)
-    }
-
-    pub fn assemble_system_residual_jacobian<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-    ) -> SparseColMat<usize, f64>
-    where
-        M: Sync,
-    {
-        self.assemble_system_residual_jacobian_at(0.0, kernel, state)
-    }
-
-    pub fn assemble_system_residual_jacobian_with_state_boundary_at<K: ResidualKernel + Sync>(
+    fn assemble_complete_jacobian<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1098,39 +1049,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     where
         M: Sync,
     {
-        let volume = self.assemble_system_residual_jacobian_at(time, kernel, state);
-        let layout = self.field_layout();
-        let boundary = assemble_quad_state_boundary_terms(
-            &self.mesh,
-            &self.family,
-            self.p,
-            &self.metadata,
-            &self.fields,
-            time,
-            state,
-            &self.cell_reduced_dofs,
-            &self.cell_prescribed_values,
-            &layout.offsets,
-            terms,
-        );
-        volume.as_ref() + boundary.jacobian.as_ref()
-    }
-
-    pub fn assemble_system_residual_jacobian_with_state_boundary<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-        terms: &StateBoundaryTerms,
-    ) -> SparseColMat<usize, f64>
-    where
-        M: Sync,
-    {
-        self.assemble_system_residual_jacobian_with_state_boundary_at(0.0, kernel, state, terms)
+        let volume = self.assemble_residual_jacobian(time, kernel, state);
+        let boundary = self.assemble_state_boundary_jacobian(time, state, terms);
+        volume.as_ref() + boundary.as_ref()
     }
 
     /// Apply `dR/du(state)` to one or more direction columns without building
     /// a global sparse Jacobian. The local action is direct by default.
-    pub fn apply_system_jacobian_matfree_at<K: ResidualKernel + Sync>(
+    pub fn apply_jacobian<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1254,36 +1180,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         out
     }
 
-    pub fn apply_jacobian_matfree<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-        direction: MatRef<f64>,
-    ) -> Mat<f64>
-    where
-        M: Sync,
-    {
-        assert_eq!(
-            kernel.nfields(),
-            1,
-            "scalar Jacobian requires a one-field kernel"
-        );
-        self.apply_system_jacobian_matfree_at(0.0, kernel, state, direction)
-    }
-
-    pub fn apply_system_jacobian_matfree<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-        direction: MatRef<f64>,
-    ) -> Mat<f64>
-    where
-        M: Sync,
-    {
-        self.apply_system_jacobian_matfree_at(0.0, kernel, state, direction)
-    }
-
-    pub fn apply_system_jacobian_matfree_with_state_boundary_at<K: ResidualKernel + Sync>(
+    fn apply_complete_jacobian<K: ResidualKernel + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1294,9 +1191,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     where
         M: Sync,
     {
-        let mut action = self.apply_system_jacobian_matfree_at(time, kernel, state, direction);
+        let mut action = self.apply_jacobian(time, kernel, state, direction);
         let layout = self.field_layout();
-        let boundary = apply_quad_state_boundary_terms(
+        action += apply_quad_state_boundary_terms(
             &self.mesh,
             &self.family,
             self.p,
@@ -1310,68 +1207,13 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             &layout.offsets,
             terms,
         );
-        action += boundary;
         action
-    }
-
-    pub fn apply_system_jacobian_matfree_with_state_boundary<K: ResidualKernel + Sync>(
-        &self,
-        kernel: &K,
-        state: MatRef<f64>,
-        direction: MatRef<f64>,
-        terms: &StateBoundaryTerms,
-    ) -> Mat<f64>
-    where
-        M: Sync,
-    {
-        self.apply_system_jacobian_matfree_with_state_boundary_at(
-            0.0, kernel, state, direction, terms,
-        )
-    }
-
-    pub fn apply_state_boundary_jacobian_matfree_at(
-        &self,
-        time: f64,
-        state: MatRef<f64>,
-        direction: MatRef<f64>,
-        terms: &StateBoundaryTerms,
-    ) -> Mat<f64>
-    where
-        M: Sync,
-    {
-        let layout = self.field_layout();
-        apply_quad_state_boundary_terms(
-            &self.mesh,
-            &self.family,
-            self.p,
-            &self.metadata,
-            &self.fields,
-            time,
-            state,
-            direction,
-            &self.cell_reduced_dofs,
-            &self.cell_prescribed_values,
-            &layout.offsets,
-            terms,
-        )
-    }
-
-    pub fn apply_state_boundary_jacobian_matfree(
-        &self,
-        state: MatRef<f64>,
-        direction: MatRef<f64>,
-        terms: &StateBoundaryTerms,
-    ) -> Mat<f64>
-    where
-        M: Sync,
-    {
-        self.apply_state_boundary_jacobian_matfree_at(0.0, state, direction, terms)
     }
 
     /// Assemble a reduced sparse matrix using `kernel.assemble_local` per
     /// quadrilateral. Periodic DOFs are combined and eliminated DOFs omitted
     /// while scattering, so no full-size matrix is exposed.
-    pub fn assemble_system_bilinear_at<K: BilinearForm + Sync>(
+    pub fn assemble_bilinear<K: BilinearForm + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1436,30 +1278,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
-    pub fn assemble_bilinear<K: BilinearForm + Sync>(&self, kernel: &K) -> SparseColMat<usize, f64>
-    where
-        M: Sync,
-    {
-        assert_eq!(
-            kernel.nfields(),
-            1,
-            "scalar matrix requires a one-field form"
-        );
-        self.assemble_system_bilinear_at(0.0, kernel)
-    }
-
-    pub fn assemble_system_bilinear<K: BilinearForm + Sync>(
-        &self,
-        kernel: &K,
-    ) -> SparseColMat<usize, f64>
-    where
-        M: Sync,
-    {
-        self.assemble_system_bilinear_at(0.0, kernel)
-    }
-
     /// Assemble a reduced volume RHS from a user-defined `LinearForm`.
-    pub fn assemble_system_linear_at<K: LinearForm>(&self, time: f64, kernel: &K) -> Vec<f64> {
+    pub fn assemble_linear<K: LinearForm>(&self, time: f64, kernel: &K) -> Vec<f64> {
         let nfields = kernel.nfields();
         assert!(nfields > 0, "linear form must contain at least one field");
         self.validate_fields(nfields, kernel.field_names(), "linear form");
@@ -1488,17 +1308,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         rhs
     }
 
-    pub fn assemble_linear<K: LinearForm>(&self, kernel: &K) -> Vec<f64> {
-        assert_eq!(kernel.nfields(), 1, "scalar RHS requires a one-field form");
-        self.assemble_system_linear_at(0.0, kernel)
-    }
-
-    pub fn assemble_system_linear<K: LinearForm>(&self, kernel: &K) -> Vec<f64> {
-        self.assemble_system_linear_at(0.0, kernel)
-    }
-
     /// Assemble a linear RHS and apply the nonzero Dirichlet correction.
-    pub fn assemble_system_linear_with_dirichlet_at<B, L>(
+    pub fn assemble_linear_with_dirichlet<B, L>(
         &self,
         time: f64,
         bilinear: &B,
@@ -1513,31 +1324,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             linear.nfields(),
             "bilinear and linear field counts must match"
         );
-        let mut rhs = self.assemble_system_linear_at(time, linear);
-        self.apply_dirichlet_rhs_correction_at(time, bilinear, &mut rhs);
+        let mut rhs = self.assemble_linear(time, linear);
+        self.apply_dirichlet_rhs_correction(time, bilinear, &mut rhs);
         rhs
     }
-
-    pub fn assemble_linear_with_dirichlet<B, L>(&self, bilinear: &B, linear: &L) -> Vec<f64>
-    where
-        B: BilinearForm,
-        L: LinearForm,
-    {
-        assert_eq!(
-            bilinear.nfields(),
-            1,
-            "scalar matrix requires a one-field form"
-        );
-        assert_eq!(linear.nfields(), 1, "scalar RHS requires a one-field form");
-        self.assemble_system_linear_with_dirichlet_at(0.0, bilinear, linear)
-    }
-
     /// Apply the prescribed-DOF contribution `-A_fb u_b` to a reduced RHS.
     ///
     /// Call this after assembling a source RHS and before solving a linear
     /// problem with nonzero Dirichlet values. Homogeneous Dirichlet values and
     /// problems without Dirichlet reduction are no-ops.
-    pub fn apply_dirichlet_rhs_correction_at<K: BilinearForm>(
+    pub fn apply_dirichlet_rhs_correction<K: BilinearForm>(
         &self,
         time: f64,
         kernel: &K,
@@ -1591,12 +1387,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         }
     }
 
-    pub fn apply_dirichlet_rhs_correction<K: BilinearForm>(&self, kernel: &K, rhs: &mut [f64]) {
-        self.apply_dirichlet_rhs_correction_at(0.0, kernel, rhs);
-    }
-
     /// Assemble block-diagonal lumped GLL mass for all problem fields.
-    pub fn assemble_system_lumped_mass(&self) -> SparseColMat<usize, f64> {
+    pub fn assemble_lumped_mass(&self) -> SparseColMat<usize, f64> {
         let nfields = self.fields.len();
         let layout = self.field_layout();
         assemble_lumped_mass(
@@ -1608,35 +1400,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     }
 
     /// Assemble the diagonal GLL mass matrix for one scalar field.
-    pub fn assemble_lumped_mass(&self) -> SparseColMat<usize, f64> {
-        assert_eq!(
-            self.fields.len(),
-            1,
-            "scalar mass requires a one-field SEM problem"
-        );
-        self.assemble_system_lumped_mass()
-    }
-
     /// Assemble selected natural-boundary kernels. The selector receives the
     /// `ndmesh` facet index and midpoint; returning `None` leaves it adiabatic.
-    pub fn assemble_boundary<'a, F>(&self, select: F) -> BoundaryContributions
-    where
-        F: FnMut(BoundaryFacet) -> Option<&'a dyn BoundaryIntegrator>,
-    {
-        assemble_quad_boundaries(
-            &self.mesh,
-            &self.family,
-            self.p,
-            &self.metadata,
-            &self.fields,
-            0.0,
-            |field, full| self.target_field_dof(field, full),
-            |field| self.field_reduced_size(field),
-            select,
-        )
-    }
-
-    pub fn assemble_boundary_at<'a, F>(&self, time: f64, select: F) -> BoundaryContributions
+    pub fn assemble_boundary<'a, F>(&self, time: f64, select: F) -> BoundaryContributions
     where
         F: FnMut(BoundaryFacet) -> Option<&'a dyn BoundaryIntegrator>,
     {
@@ -1654,15 +1420,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     }
 
     /// Assemble selected nonlinear state-dependent boundary kernels at `state`.
-    pub fn assemble_state_boundary_at<'a, F>(
+    pub fn assemble_state_boundary(
         &self,
         time: f64,
         state: MatRef<'_, f64>,
-        select: F,
-    ) -> StateBoundaryContributions
-    where
-        F: FnMut(BoundaryFacet) -> Option<&'a dyn StateBoundaryIntegrator>,
-    {
+        terms: &StateBoundaryTerms,
+    ) -> StateBoundaryContributions {
         let layout = self.field_layout();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
@@ -1670,7 +1433,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             1,
             "boundary assembly requires one state column"
         );
-        assemble_quad_state_boundary(
+        assemble_quad_state_boundary_terms(
             &self.mesh,
             &self.family,
             self.p,
@@ -1681,18 +1444,53 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             &self.cell_reduced_dofs,
             &self.cell_prescribed_values,
             &layout.offsets,
-            select,
+            terms,
         )
     }
 
-    pub fn assemble_state_boundary<'a, F>(
+    pub fn apply_state_boundary_jacobian(
         &self,
+        time: f64,
         state: MatRef<'_, f64>,
-        select: F,
-    ) -> StateBoundaryContributions
-    where
-        F: FnMut(BoundaryFacet) -> Option<&'a dyn StateBoundaryIntegrator>,
-    {
-        self.assemble_state_boundary_at(0.0, state, select)
+        direction: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> Mat<f64> {
+        let layout = self.field_layout();
+        apply_quad_state_boundary_terms(
+            &self.mesh,
+            &self.family,
+            self.p,
+            &self.metadata,
+            &self.fields,
+            time,
+            state,
+            direction,
+            &self.cell_reduced_dofs,
+            &self.cell_prescribed_values,
+            &layout.offsets,
+            terms,
+        )
+    }
+
+    fn assemble_state_boundary_jacobian(
+        &self,
+        time: f64,
+        state: MatRef<'_, f64>,
+        terms: &StateBoundaryTerms,
+    ) -> SparseColMat<usize, f64> {
+        let layout = self.field_layout();
+        assemble_quad_state_boundary_jacobian(
+            &self.mesh,
+            &self.family,
+            self.p,
+            &self.metadata,
+            &self.fields,
+            time,
+            state,
+            &self.cell_reduced_dofs,
+            &self.cell_prescribed_values,
+            &layout.offsets,
+            terms,
+        )
     }
 }

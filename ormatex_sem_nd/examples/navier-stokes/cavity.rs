@@ -1,8 +1,6 @@
 //! Low-Reynolds-number lid-driven cavity validation for the EDAC solver.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 use faer::prelude::*;
 use ndelement::{
@@ -24,7 +22,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, FluidSystem};
+use edac::{advance, write_spatial_csv, FluidSystem};
 
 const EPS: f64 = 1e-12;
 type QuadElement = CiarletElement<f64, IdentityMap, f64>;
@@ -118,23 +116,25 @@ fn main() {
     let p = problem.field_values("p", state.as_ref()).unwrap();
     let mut min_u = f64::INFINITY;
     let mut max_abs_v: f64 = 0.0;
-    let mut output = BufWriter::new(
-        File::create("target/navier_stokes_lid_driven_cavity.csv")
-            .expect("failed to create cavity output csv"),
-    );
-    writeln!(output, "field,x,y,value").unwrap();
-    for (field, field_values) in [("u", u), ("v", v), ("p", p)] {
-        for (&(x, y), &value) in field_values.positions.iter().zip(&field_values.values) {
-            assert!(value.is_finite(), "non-finite cavity state");
-            writeln!(output, "{field},{x:.9},{y:.9},{value:.9e}").unwrap();
-            if field == "u" && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
-                min_u = min_u.min(value);
-            }
-            if field == "v" && x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
-                max_abs_v = max_abs_v.max(value.abs());
-            }
+    for (&(x, y), &value) in u.positions.iter().zip(&u.values) {
+        assert!(value.is_finite(), "non-finite cavity state");
+        if x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
+            min_u = min_u.min(value);
         }
     }
+    for (&(x, y), &value) in v.positions.iter().zip(&v.values) {
+        assert!(value.is_finite(), "non-finite cavity state");
+        if x > 0.1 && x < 0.9 && y > 0.1 && y < 0.9 {
+            max_abs_v = max_abs_v.max(value.abs());
+        }
+    }
+    for &value in &p.values {
+        assert!(value.is_finite(), "non-finite cavity state");
+    }
+    write_spatial_csv(
+        "target/navier_stokes_lid_driven_cavity.csv",
+        [("u", u), ("v", v), ("p", p)],
+    );
     assert!(
         min_u < -1e-3,
         "cavity has no recirculation: min interior u={min_u}"

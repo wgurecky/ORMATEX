@@ -31,7 +31,7 @@ impl<'a> IsothermalEulerSystem<'a> {
         problem: &'a SEM1DProblem<IntervalMesh>,
         kernel: KernelConservationLaw1D<IsothermalEuler1D>,
     ) -> Self {
-        let mass = problem.assemble_system_lumped_mass();
+        let mass = problem.assemble_lumped_mass();
         let m_inv = lumped_inverse_mass(mass.as_ref());
         Self {
             problem,
@@ -43,9 +43,7 @@ impl<'a> IsothermalEulerSystem<'a> {
 
 impl<'a> OdeSys<'a> for IsothermalEulerSystem<'a> {
     fn frhs(&self, _t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let residual = self
-            .problem
-            .assemble_system_residual_at(_t, &self.kernel, state);
+        let residual = self.problem.assemble_residual(_t, &self.kernel, state);
         Mat::from_fn(self.m_inv.len(), 1, |row, _| {
             -self.m_inv[row] * residual[row]
         })

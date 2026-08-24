@@ -124,7 +124,7 @@ fn field_specific_offsets_are_used_by_multifield_assembly() {
     let kernel = KernelLinearReaction::new(rates);
     let state = Mat::<f64>::zeros(problem.system_size(), 1);
     let matrix = problem
-        .assemble_system_residual_jacobian(&kernel, state.as_ref())
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
         .to_dense();
     assert_eq!(matrix.nrows(), problem.system_size());
     assert!(matrix[(0, 0)] != 0.0);
@@ -164,5 +164,5 @@ fn named_kernel_must_match_problem_field_order() {
     .unwrap();
     let kernel = KernelLinearReaction::with_field_names(rates, ["b", "a"]);
     let state = Mat::zeros(problem.system_size(), 1);
-    problem.assemble_system_residual(&kernel, state.as_ref());
+    problem.assemble_residual(0.0, &kernel, state.as_ref());
 }

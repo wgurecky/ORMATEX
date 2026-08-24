@@ -59,12 +59,12 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     let advection = KernelAdvection2D::new([0.4, -0.2]);
     let diffusion = KernelDiffusion2D::new(0.13);
 
-    let fused_residual_values = problem.assemble_residual(&fused, state.as_ref());
-    let composed_residual_values = problem.assemble_residual(&composed, state.as_ref());
+    let fused_residual_values = problem.assemble_residual(0.0, &fused, state.as_ref());
+    let composed_residual_values = problem.assemble_residual(0.0, &composed, state.as_ref());
     let fused_residual = Mat::from_fn(n, 1, |row, _| fused_residual_values[row]);
     let composed_residual = Mat::from_fn(n, 1, |row, _| composed_residual_values[row]);
-    let advection_residual = problem.assemble_residual(&advection, state.as_ref());
-    let diffusion_residual = problem.assemble_residual(&diffusion, state.as_ref());
+    let advection_residual = problem.assemble_residual(0.0, &advection, state.as_ref());
+    let diffusion_residual = problem.assemble_residual(0.0, &diffusion, state.as_ref());
     let separate_residual = Mat::from_fn(n, 1, |row, _| {
         advection_residual[row] + diffusion_residual[row]
     });
@@ -72,16 +72,16 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     assert_vector_close(&fused_residual, &separate_residual);
 
     let fused_jacobian = problem
-        .assemble_residual_jacobian(&fused, state.as_ref())
+        .assemble_residual_jacobian(0.0, &fused, state.as_ref())
         .to_dense();
     let composed_jacobian = problem
-        .assemble_residual_jacobian(&composed, state.as_ref())
+        .assemble_residual_jacobian(0.0, &composed, state.as_ref())
         .to_dense();
     let advection_jacobian = problem
-        .assemble_residual_jacobian(&advection, state.as_ref())
+        .assemble_residual_jacobian(0.0, &advection, state.as_ref())
         .to_dense();
     let diffusion_jacobian = problem
-        .assemble_residual_jacobian(&diffusion, state.as_ref())
+        .assemble_residual_jacobian(0.0, &diffusion, state.as_ref())
         .to_dense();
     let separate_jacobian = Mat::from_fn(n, n, |row, col| {
         advection_jacobian[(row, col)] + diffusion_jacobian[(row, col)]
@@ -89,13 +89,13 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     assert_matrix_close(&fused_jacobian, &composed_jacobian);
     assert_matrix_close(&fused_jacobian, &separate_jacobian);
 
-    let fused_action = problem.apply_jacobian_matfree(&fused, state.as_ref(), direction.as_ref());
+    let fused_action = problem.apply_jacobian(0.0, &fused, state.as_ref(), direction.as_ref());
     let composed_action =
-        problem.apply_jacobian_matfree(&composed, state.as_ref(), direction.as_ref());
+        problem.apply_jacobian(0.0, &composed, state.as_ref(), direction.as_ref());
     let advection_action =
-        problem.apply_jacobian_matfree(&advection, state.as_ref(), direction.as_ref());
+        problem.apply_jacobian(0.0, &advection, state.as_ref(), direction.as_ref());
     let diffusion_action =
-        problem.apply_jacobian_matfree(&diffusion, state.as_ref(), direction.as_ref());
+        problem.apply_jacobian(0.0, &diffusion, state.as_ref(), direction.as_ref());
     let separate_action = Mat::from_fn(n, 1, |row, _| {
         advection_action[(row, 0)] + diffusion_action[(row, 0)]
     });
@@ -150,44 +150,45 @@ fn residual_kernel_sum_benchmark() {
     let advection = KernelAdvection2D::new([0.4, -0.2]);
     let diffusion = KernelDiffusion2D::new(0.13);
 
-    let fused_residual = benchmark_duration(|| problem.assemble_residual(&fused, state.as_ref()));
+    let fused_residual =
+        benchmark_duration(|| problem.assemble_residual(0.0, &fused, state.as_ref()));
     let composed_residual =
-        benchmark_duration(|| problem.assemble_residual(&composed, state.as_ref()));
+        benchmark_duration(|| problem.assemble_residual(0.0, &composed, state.as_ref()));
     let separate_residual = benchmark_duration(|| {
-        let _ = problem.assemble_residual(&advection, state.as_ref());
-        let _ = problem.assemble_residual(&diffusion, state.as_ref());
+        let _ = problem.assemble_residual(0.0, &advection, state.as_ref());
+        let _ = problem.assemble_residual(0.0, &diffusion, state.as_ref());
     });
     let fused_jacobian = benchmark_duration(|| {
         std::hint::black_box(
             problem
-                .assemble_residual_jacobian(&fused, state.as_ref())
+                .assemble_residual_jacobian(0.0, &fused, state.as_ref())
                 .to_dense(),
         )
     });
     let composed_jacobian = benchmark_duration(|| {
         std::hint::black_box(
             problem
-                .assemble_residual_jacobian(&composed, state.as_ref())
+                .assemble_residual_jacobian(0.0, &composed, state.as_ref())
                 .to_dense(),
         )
     });
     let separate_jacobian = benchmark_duration(|| {
         let _ = problem
-            .assemble_residual_jacobian(&advection, state.as_ref())
+            .assemble_residual_jacobian(0.0, &advection, state.as_ref())
             .to_dense();
         let _ = problem
-            .assemble_residual_jacobian(&diffusion, state.as_ref())
+            .assemble_residual_jacobian(0.0, &diffusion, state.as_ref())
             .to_dense();
     });
     let fused_action = benchmark_duration(|| {
-        problem.apply_jacobian_matfree(&fused, state.as_ref(), direction.as_ref())
+        problem.apply_jacobian(0.0, &fused, state.as_ref(), direction.as_ref())
     });
     let composed_action = benchmark_duration(|| {
-        problem.apply_jacobian_matfree(&composed, state.as_ref(), direction.as_ref())
+        problem.apply_jacobian(0.0, &composed, state.as_ref(), direction.as_ref())
     });
     let separate_action = benchmark_duration(|| {
-        let _ = problem.apply_jacobian_matfree(&advection, state.as_ref(), direction.as_ref());
-        let _ = problem.apply_jacobian_matfree(&diffusion, state.as_ref(), direction.as_ref());
+        let _ = problem.apply_jacobian(0.0, &advection, state.as_ref(), direction.as_ref());
+        let _ = problem.apply_jacobian(0.0, &diffusion, state.as_ref(), direction.as_ref());
     });
     println!("residual: fused={fused_residual:?}, composed={composed_residual:?}, separate={separate_residual:?}");
     println!("jacobian: fused={fused_jacobian:?}, composed={composed_jacobian:?}, separate={separate_jacobian:?}");

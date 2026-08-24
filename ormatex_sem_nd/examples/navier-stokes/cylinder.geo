@@ -3,7 +3,7 @@ Mesh.MshFileVersion = 2.2;
 SetFactory("OpenCASCADE");
 
 L = 15;
-H = 4;
+H = 6;
 D = 1;
 
 Rectangle(1) = {-5, -H / 2, 0, L, H};

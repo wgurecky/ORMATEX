@@ -5,7 +5,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellT
 use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
-    DofReduction2D, FieldRegistry, KernelAdvDiff2D, NeumannFlux, RobinConvection, SEM2DProblem,
+    BoundaryIntegrator, DofReduction2D, FieldRegistry, KernelAdvDiff2D, NeumannFlux,
+    RobinConvection, SEM2DProblem,
 };
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
@@ -34,12 +35,12 @@ fn build_problem() -> (
     let mass = problem.assemble_lumped_mass();
     let neumann = NeumannFlux::new(1.0);
     let robin = RobinConvection::new(0.1, 0.0);
-    let boundary = problem.assemble_boundary(|facet| {
+    let boundary = problem.assemble_boundary(0.0, |facet| -> Option<&dyn BoundaryIntegrator> {
         const EPS: f64 = 1e-9;
         if facet.midpoint[0] < EPS {
-            Some(&neumann)
+            Some(&neumann as &dyn BoundaryIntegrator)
         } else if facet.midpoint[0] > 1.0 - EPS {
-            Some(&robin)
+            Some(&robin as &dyn BoundaryIntegrator)
         } else {
             None
         }
@@ -97,7 +98,7 @@ fn matrix_free_jacobian_matches_assembled_action() {
     let direction = Mat::from_fn(n, 1, |i, _| (i as f64 * 0.17).sin());
     let assembled = sparse_add(
         problem
-            .assemble_residual_jacobian(&kernel, state.as_ref())
+            .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
             .as_ref(),
         boundary.mat.as_ref(),
     );
@@ -159,12 +160,12 @@ fn large_2d_diffusion_matrix_free_jacobian_runtime() {
 
     let start = Instant::now();
     let serial = serial_pool
-        .install(|| problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref()));
+        .install(|| problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref()));
     let serial_time = start.elapsed();
 
     let start = Instant::now();
     let parallel = parallel_pool
-        .install(|| problem.apply_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref()));
+        .install(|| problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref()));
     let parallel_time = start.elapsed();
 
     assert_eq!(serial.nrows(), problem.reduced_size());

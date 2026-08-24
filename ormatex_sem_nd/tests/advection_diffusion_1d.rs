@@ -49,7 +49,7 @@ fn p2_epi3_krylov_advects_and_diffuses_periodic_gaussian() {
         DofReduction1D::Periodic { facets: [0, nx] },
     );
     let mass = problem.assemble_lumped_mass();
-    let operator = problem.assemble_bilinear(&KernelAdvDiff::new(diffusivity, velocity));
+    let operator = problem.assemble_bilinear(0.0, &KernelAdvDiff::new(diffusivity, velocity));
     let n = problem.reduced_size();
     let positions = problem.dof_positions();
     let y0 = Mat::from_fn(n, 1, |row, _| periodic_gaussian(positions[row], x0, sigma0));

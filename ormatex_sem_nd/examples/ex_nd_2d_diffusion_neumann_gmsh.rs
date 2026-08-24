@@ -1,6 +1,8 @@
 //! Neumann/Robin diffusion on a Gmsh MSH2 quadrilateral mesh.
 
-use ormatex_sem_nd::{gmsh_quad_data, NeumannFlux, QuadMesh, RobinConvection, SEM2DProblem};
+use ormatex_sem_nd::{
+    gmsh_quad_data, BoundaryIntegrator, NeumannFlux, QuadMesh, RobinConvection, SEM2DProblem,
+};
 
 #[path = "support/diffusion_neumann.rs"]
 mod diffusion_neumann;
@@ -30,10 +32,10 @@ fn main() {
         |problem: &SEM2DProblem<QuadMesh>| {
             let neumann = NeumannFlux::new(1.0);
             let robin = RobinConvection::new(0.1, 0.0);
-            problem.assemble_boundary(|facet| {
+            problem.assemble_boundary(0.0, |facet| -> Option<&dyn BoundaryIntegrator> {
                 match facet.physical_region.map(|region| region.tag) {
-                    Some(1) => Some(&neumann),
-                    Some(2) => Some(&robin),
+                    Some(1) => Some(&neumann as &dyn BoundaryIntegrator),
+                    Some(2) => Some(&robin as &dyn BoundaryIntegrator),
                     _ => None,
                 }
             })

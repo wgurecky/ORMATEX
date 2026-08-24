@@ -17,7 +17,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{epi3, FluidSystem};
+use edac::{epi3, write_spatial_csv, FluidSystem};
 
 fn boundary_facets(data: &MeshMetadata, tag: usize) -> Vec<usize> {
     data.facet_regions
@@ -185,18 +185,15 @@ fn main() {
         .unwrap();
     }
     let state = integrator.state();
+    let final_time = integrator.time();
 
-    let mut output = BufWriter::new(
-        File::create("target/navier_stokes_cylinder.csv").expect("failed to create output csv"),
+    write_spatial_csv(
+        "target/navier_stokes_cylinder.csv",
+        [
+            ("u", problem.field_values("u", state.as_ref()).unwrap()),
+            ("v", problem.field_values("v", state.as_ref()).unwrap()),
+            ("p", problem.field_values("p", state.as_ref()).unwrap()),
+        ],
     );
-    writeln!(output, "field,x,y,value").unwrap();
-    for (field, field_values) in [
-        ("u", problem.field_values("u", state.as_ref()).unwrap()),
-        ("v", problem.field_values("v", state.as_ref()).unwrap()),
-        ("p", problem.field_values("p", state.as_ref()).unwrap()),
-    ] {
-        for ((x, y), value) in field_values.positions.into_iter().zip(field_values.values) {
-            writeln!(output, "{field},{x:.8},{y:.8},{value:.9e}").unwrap();
-        }
-    }
+    println!("cylinder final state (t={final_time:.6}): target/navier_stokes_cylinder.csv");
 }

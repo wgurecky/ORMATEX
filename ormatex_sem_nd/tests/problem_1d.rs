@@ -1,6 +1,7 @@
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::matrix_free::LinOp;
 use faer::prelude::*;
+use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
@@ -202,14 +203,14 @@ fn nonzero_dirichlet_value_enters_state_and_rhs() {
         },
     );
     let kernel = KernelAdvDiff::new(1.0, 0.0);
-    let matrix = problem.assemble_bilinear(&kernel).to_dense();
+    let matrix = problem.assemble_bilinear(0.0, &kernel).to_dense();
     let mut rhs = vec![0.0; problem.reduced_size()];
-    problem.apply_dirichlet_rhs_correction(&kernel, &mut rhs);
+    problem.apply_dirichlet_rhs_correction(0.0, &kernel, &mut rhs);
     assert!((matrix[(0, 0)] - 1.0).abs() < 1e-12);
     assert!((rhs[0] - 2.0).abs() < 1e-12);
 
     let state = Mat::from_fn(problem.reduced_size(), 1, |_, _| 2.0);
-    let residual = problem.assemble_residual(&kernel, state.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
     assert!(residual.iter().all(|value| value.abs() < 1e-12));
 }
 
@@ -234,7 +235,7 @@ fn periodic_identifies_selected_endpoints() {
 #[test]
 fn volume_kernel_reads_physical_points() {
     let problem = SEM1DProblem::new(mesh(2), 2, FieldRegistry::new(["x"]), DofReduction1D::None);
-    assert!((problem.assemble_linear(&XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
+    assert!((problem.assemble_linear(0.0, &XSource).iter().sum::<f64>() - 0.5).abs() < 1e-12);
 }
 
 #[test]
@@ -245,7 +246,9 @@ fn lumped_mass_matches_generic_gll_mass() {
         FieldRegistry::new(["temperature"]),
         DofReduction1D::Periodic { facets: [0, 2] },
     );
-    let generic = problem.assemble_bilinear(&KernelMass::new()).to_dense();
+    let generic = problem
+        .assemble_bilinear(0.0, &KernelMass::new())
+        .to_dense();
     let lumped = problem.assemble_lumped_mass().to_dense();
     for i in 0..generic.nrows() {
         for j in 0..generic.ncols() {
@@ -263,7 +266,7 @@ fn boundary_kernel_reads_endpoint_coordinates_and_normal() {
         DofReduction1D::None,
     );
     let flux = EndpointFlux;
-    let boundary = problem.assemble_boundary(|_| Some(&flux));
+    let boundary = problem.assemble_boundary(0.0, |_| Some(&flux as &dyn BoundaryIntegrator));
     assert!((boundary.rhs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
 }
 
@@ -278,12 +281,51 @@ fn state_boundary_1d_paths_match() {
     let state = Mat::from_fn(problem.system_size(), 1, |row, _| 0.2 + row as f64 * 0.1);
     let direction = Mat::from_fn(problem.system_size(), 1, |row, _| 0.3 - row as f64 * 0.04);
     let terms = StateBoundaryTerms::new().with_default(EndpointQuadratic);
-    let assembled = problem.assemble_state_boundary(state.as_ref(), &terms);
+    let assembled = problem.assemble_state_boundary(0.0, state.as_ref(), &terms);
     let action =
-        problem.apply_state_boundary_jacobian_matfree(state.as_ref(), direction.as_ref(), &terms);
+        problem.apply_state_boundary_jacobian(0.0, state.as_ref(), direction.as_ref(), &terms);
     let expected = assembled.jacobian.as_ref() * direction.as_ref();
     for row in 0..problem.system_size() {
         assert!((action[(row, 0)] - expected[(row, 0)]).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn unified_matrix_free_jacobian_includes_1d_state_boundary() {
+    let problem = SEM1DProblem::new(
+        unit_interval(1),
+        2,
+        FieldRegistry::new(["u"]),
+        DofReduction1D::None,
+    );
+    let n = problem.system_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.1 * row as f64);
+    let direction = Mat::from_fn(n, 1, |row, _| 0.3 - 0.04 * row as f64);
+    let terms = StateBoundaryTerms::new().with_default(EndpointQuadratic);
+    let mass = problem.assemble_lumped_mass();
+    let m_inv: Vec<f64> = (0..n).map(|row| 1.0 / mass[(row, row)]).collect();
+    let residual_operator = problem
+        .residual_operator(&QuadraticReaction)
+        .at_time(0.0)
+        .with_state_boundary(&terms);
+    let operator = MatrixFreeMinvJacobian::new(residual_operator, state.clone(), &m_inv);
+    let mut action = Mat::zeros(n, 1);
+    let mut scratch = MemBuffer::new(StackReq::empty());
+    operator.apply(
+        action.as_mut(),
+        direction.as_ref(),
+        faer::get_global_parallelism(),
+        MemStack::new(&mut scratch),
+    );
+    let expected = problem
+        .residual_operator(&QuadraticReaction)
+        .at_time(0.0)
+        .with_state_boundary(&terms)
+        .assemble_jacobian(state.as_ref())
+        .as_ref()
+        * direction.as_ref();
+    for row in 0..n {
+        assert!((action[(row, 0)] + m_inv[row] * expected[(row, 0)]).abs() < 1e-11);
     }
 }
 
@@ -301,7 +343,8 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
     let mass = problem.assemble_lumped_mass();
     let m_inv: Vec<f64> = (0..n).map(|i| 1.0 / mass[(i, i)]).collect();
     let kernel = QuadraticReaction;
-    let operator = MatrixFreeMinvJacobian::new(&problem, &kernel, state.clone(), None, &m_inv);
+    let operator =
+        MatrixFreeMinvJacobian::new_at(0.0, &problem, &kernel, state.clone(), None, &m_inv);
     let mut action = Mat::zeros(n, 1);
     let mut scratch = MemBuffer::new(StackReq::empty());
     operator.apply(
@@ -311,11 +354,77 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
         MemStack::new(&mut scratch),
     );
     let expected = problem
-        .assemble_residual_jacobian(&kernel, state.as_ref())
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
         .as_ref()
         * direction.as_ref();
     for row in 0..n {
         assert!((action[(row, 0)] + m_inv[row] * expected[(row, 0)]).abs() < 1e-11);
+    }
+}
+
+#[test]
+fn matrix_free_owned_fixed_jacobian_matches_borrowed_action() {
+    let problem = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
+    let direction = Mat::from_fn(n, 1, |i, _| (0.4 * i as f64).sin());
+    let mass = problem.assemble_lumped_mass();
+    let m_inv: Vec<f64> = (0..n).map(|i| 1.0 / mass[(i, i)]).collect();
+    let kernel = QuadraticReaction;
+
+    let borrowed_fixed = SparseColMat::try_new_from_triplets(
+        n,
+        n,
+        &(0..n).map(|i| Triplet::new(i, i, 0.5)).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let borrowed = MatrixFreeMinvJacobian::new_at(
+        0.0,
+        &problem,
+        &kernel,
+        state.clone(),
+        Some(borrowed_fixed.as_ref()),
+        &m_inv,
+    );
+    let mut borrowed_action = Mat::zeros(n, 1);
+    let mut scratch = MemBuffer::new(StackReq::empty());
+    borrowed.apply(
+        borrowed_action.as_mut(),
+        direction.as_ref(),
+        faer::get_global_parallelism(),
+        MemStack::new(&mut scratch),
+    );
+
+    let owned_fixed = SparseColMat::try_new_from_triplets(
+        n,
+        n,
+        &(0..n).map(|i| Triplet::new(i, i, 0.5)).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let owned = MatrixFreeMinvJacobian::new_at_with_owned_fixed_jacobian(
+        0.0,
+        &problem,
+        &kernel,
+        state,
+        Some(owned_fixed),
+        &m_inv,
+    );
+    let mut owned_action = Mat::zeros(n, 1);
+    let mut scratch = MemBuffer::new(StackReq::empty());
+    owned.apply(
+        owned_action.as_mut(),
+        direction.as_ref(),
+        faer::get_global_parallelism(),
+        MemStack::new(&mut scratch),
+    );
+
+    for row in 0..n {
+        assert!((borrowed_action[(row, 0)] - owned_action[(row, 0)]).abs() < 1e-12);
     }
 }
 
@@ -332,11 +441,11 @@ fn coupled_system_assembles_cross_field_blocks_and_matrix_free_action() {
     let direction = Mat::from_fn(2 * n, 1, |i, _| (0.2 * i as f64).sin());
     let kernel = CoupledReaction;
     let assembled = problem
-        .assemble_system_residual_jacobian(&kernel, state.as_ref())
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
         .to_dense();
     assert!(assembled[(0, n)] != 0.0);
     assert!(assembled[(n, 0)] != 0.0);
-    let action = problem.apply_system_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let expected = assembled.as_ref() * direction.as_ref();
     for row in 0..2 * n {
         assert!((action[(row, 0)] - expected[(row, 0)]).abs() < 1e-11);
@@ -352,7 +461,7 @@ fn coupled_lumped_mass_repeats_scalar_blocks_without_cross_terms() {
         DofReduction1D::None,
     );
     let n = problem.reduced_size();
-    let block = problem.assemble_system_lumped_mass().to_dense();
+    let block = problem.assemble_lumped_mass().to_dense();
     let scalar = SEM1DProblem::new(
         mesh(2),
         2,
@@ -384,11 +493,11 @@ fn coupled_system_jacobian_matches_directional_difference() {
     let state = Mat::from_fn(2 * n, 1, |i, _| 0.2 + 0.03 * i as f64);
     let direction = Mat::from_fn(2 * n, 1, |i, _| (0.3 * i as f64).cos());
     let kernel = CoupledReaction;
-    let action = problem.apply_system_jacobian_matfree(&kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let eps = 1e-7;
     let perturbed = state.as_ref() + faer::Scale(eps) * direction.as_ref();
-    let residual = problem.assemble_system_residual(&kernel, state.as_ref());
-    let perturbed_residual = problem.assemble_system_residual(&kernel, perturbed.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
+    let perturbed_residual = problem.assemble_residual(0.0, &kernel, perturbed.as_ref());
     for i in 0..2 * n {
         assert!((action[(i, 0)] - (perturbed_residual[i] - residual[i]) / eps).abs() < 1e-7);
     }
@@ -464,8 +573,8 @@ fn coefficient_receives_explicit_time_and_space() {
         |ctx: &MaterialContext<'_>| 1.0 + ctx.time + ctx.point[0],
         ConstantCoefficient(0.0),
     );
-    let at_zero = problem.assemble_system_bilinear_at(0.0, &kernel).to_dense();
-    let at_one = problem.assemble_system_bilinear_at(1.0, &kernel).to_dense();
+    let at_zero = problem.assemble_bilinear(0.0, &kernel).to_dense();
+    let at_one = problem.assemble_bilinear(1.0, &kernel).to_dense();
     assert!((0..at_zero.nrows())
         .flat_map(|i| (0..at_zero.ncols()).map(move |j| (i, j)))
         .any(|(i, j)| (at_one[(i, j)] - at_zero[(i, j)]).abs() > 1e-12));
@@ -483,12 +592,11 @@ fn nonlinear_coefficient_derivative_is_included_in_jacobian() {
     let kernel = KernelAdvDiff::with_coefficients(TemperatureDiffusion, ConstantCoefficient(0.0));
     let state = Mat::from_fn(n, 1, |i, _| 1.0 + 0.2 * i as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (0.4 * i as f64).sin());
-    let action =
-        problem.apply_system_jacobian_matfree_at(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
     let eps = 1e-7;
     let perturbed = state.as_ref() + faer::Scale(eps) * direction.as_ref();
-    let residual = problem.assemble_system_residual_at(0.0, &kernel, state.as_ref());
-    let perturbed_residual = problem.assemble_system_residual_at(0.0, &kernel, perturbed.as_ref());
+    let residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
+    let perturbed_residual = problem.assemble_residual(0.0, &kernel, perturbed.as_ref());
     for i in 0..n {
         assert!((action[(i, 0)] - (perturbed_residual[i] - residual[i]) / eps).abs() < 1e-7);
     }
@@ -511,8 +619,11 @@ fn matrix_free_jacobian_uses_explicit_material_time() {
     let direction = Mat::from_fn(n, 1, |i, _| (0.4 * i as f64).sin());
     let mass = problem.assemble_lumped_mass();
     let m_inv: Vec<f64> = (0..n).map(|i| 1.0 / mass[(i, i)]).collect();
-    let operator =
-        MatrixFreeMinvJacobian::new_at(2.0, &problem, &kernel, state.clone(), None, &m_inv);
+    let operator = MatrixFreeMinvJacobian::new(
+        problem.residual_operator(&kernel).at_time(2.0),
+        state.clone(),
+        &m_inv,
+    );
     let mut action = Mat::zeros(n, 1);
     let mut scratch = MemBuffer::new(StackReq::empty());
     operator.apply(
@@ -522,7 +633,7 @@ fn matrix_free_jacobian_uses_explicit_material_time() {
         MemStack::new(&mut scratch),
     );
     let expected = problem
-        .assemble_system_residual_jacobian_at(2.0, &kernel, state.as_ref())
+        .assemble_residual_jacobian(2.0, &kernel, state.as_ref())
         .as_ref()
         * direction.as_ref();
     for row in 0..n {
