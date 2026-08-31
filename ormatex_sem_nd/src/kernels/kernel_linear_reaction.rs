@@ -1,6 +1,6 @@
 use faer::sparse::SparseColMat;
 
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::fields::FieldRegistry;
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
@@ -75,6 +75,26 @@ impl BilinearForm for KernelLinearReaction {
         self.field_names.clone()
     }
 
+    fn supports_tensor_bilinear(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_bilinear_1d(&self) -> bool {
+        true
+    }
+
+    fn tensor_bilinear(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        equation: usize,
+        unknown: usize,
+        _q: usize,
+        trial_value: f64,
+        _trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        [-self.coefficient(equation, unknown) * trial_value, 0.0, 0.0]
+    }
+
     fn integrand(
         &self,
         ctx: &LocalCtx,
@@ -96,6 +116,51 @@ impl ResidualKernel for KernelLinearReaction {
 
     fn field_names(&self) -> Option<Vec<String>> {
         self.field_names.clone()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_residual_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let source = self.interactions[equation]
+            .iter()
+            .map(|&(unknown, coefficient)| coefficient * state.value(unknown, q))
+            .sum::<f64>();
+        [-source, 0.0, 0.0]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let source = self.interactions[equation]
+            .iter()
+            .map(|&(unknown, coefficient)| coefficient * direction.value(unknown, q))
+            .sum::<f64>();
+        [-source, 0.0, 0.0]
     }
 
     fn residual_integrand(

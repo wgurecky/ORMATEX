@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 
 use super::kernel_common::{LinearForm, ResidualKernel};
 
@@ -21,6 +21,43 @@ impl LinearForm for KernelVolumeSource {
 }
 
 impl ResidualKernel for KernelVolumeSource {
+    fn supports_tensor_residual_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> [f64; 3] {
+        [-self.val, 0.0, 0.0]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        _direction: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> [f64; 3] {
+        [0.0, 0.0, 0.0]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

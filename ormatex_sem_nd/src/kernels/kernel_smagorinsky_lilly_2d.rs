@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 
 /// Smagorinsky-Lilly eddy viscosity for two scalar velocity fields.
 ///
@@ -33,12 +33,7 @@ impl SmagorinskyLilly2D {
 
     pub fn filter_width(&self, ctx: &LocalCtx) -> f64 {
         assert_eq!(ctx.gdim, 2, "SmagorinskyLilly2D requires a 2D context");
-        let area: f64 = ctx
-            .wts
-            .iter()
-            .zip(ctx.jdets)
-            .map(|(&weight, &jdet)| weight * jdet)
-            .sum();
+        let area: f64 = ctx.wts.iter().zip(ctx.jdets).map(|(&w, &j)| w * j).sum();
         assert!(area.is_finite() && area > 0.0, "cell area must be positive");
         self.filter_width_scale * area.sqrt()
     }
@@ -59,6 +54,40 @@ impl SmagorinskyLilly2D {
     pub fn eddy_viscosity(&self, ctx: &LocalCtx, state: &CellState, q: usize) -> f64 {
         let delta = self.filter_width(ctx);
         (self.cs * delta).powi(2) * self.strain_magnitude(state, q)
+    }
+
+    /// Evaluate the eddy viscosity using tensor-product cell metadata.
+    pub fn eddy_viscosity_tensor(&self, ctx: &TensorCtx, state: &CellState, q: usize) -> f64 {
+        (self.cs * self.filter_width_tensor(ctx)).powi(2) * self.strain_magnitude(state, q)
+    }
+
+    /// Return the derivative of eddy viscosity in a complete velocity direction.
+    pub fn eddy_viscosity_directional_derivative(
+        &self,
+        ctx: &TensorCtx,
+        state: &CellState,
+        direction: &CellState,
+        q: usize,
+    ) -> f64 {
+        let magnitude = self.strain_magnitude(state, q);
+        if magnitude <= f64::EPSILON {
+            return 0.0;
+        }
+        let (sxx, syy, sxy) = Self::strain_components(state, q);
+        let dsxx = direction.grad(0, q, 0);
+        let dsyy = direction.grad(1, q, 1);
+        let dsxy = 0.5 * (direction.grad(0, q, 1) + direction.grad(1, q, 0));
+        let d_magnitude =
+            (4.0 * sxx * dsxx + 4.0 * syy * dsyy + 8.0 * sxy * dsxy) / (2.0 * magnitude);
+        (self.cs * self.filter_width_tensor(ctx)).powi(2) * d_magnitude
+    }
+
+    pub(crate) fn filter_width_tensor(&self, ctx: &TensorCtx) -> f64 {
+        assert!(
+            ctx.cell_size.is_finite() && ctx.cell_size > 0.0,
+            "cell area must be positive"
+        );
+        self.filter_width_scale * ctx.cell_size
     }
 
     /// Derivative of the eddy viscosity with respect to one velocity gradient.

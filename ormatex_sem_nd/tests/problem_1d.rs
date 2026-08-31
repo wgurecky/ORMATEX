@@ -10,9 +10,9 @@ use ormatex_sem_nd::material::{
     RegionCoefficient,
 };
 use ormatex_sem_nd::{
-    BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry, FluxKernel1D,
-    KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian, ResidualKernel,
-    SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms,
+    BilinearForm, BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry,
+    FluxKernel1D, KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian,
+    ResidualKernel, SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms,
 };
 
 #[path = "../examples/support/euler_1d.rs"]
@@ -72,6 +72,49 @@ impl StateBoundaryIntegrator for EndpointQuadratic {
 }
 
 struct QuadraticReaction;
+
+struct GenericAdvDiff1D(KernelAdvDiff);
+
+impl BilinearForm for GenericAdvDiff1D {
+    fn integrand(
+        &self,
+        ctx: &LocalCtx,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0.integrand(ctx, equation, unknown, q, test_i, trial_i)
+    }
+}
+
+impl ResidualKernel for GenericAdvDiff1D {
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.0.residual_integrand(ctx, state, equation, q, test_i)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0
+            .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+    }
+}
 
 impl ResidualKernel for QuadraticReaction {
     fn residual_integrand(
@@ -359,6 +402,87 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
         * direction.as_ref();
     for row in 0..n {
         assert!((action[(row, 0)] + m_inv[row] * expected[(row, 0)]).abs() < 1e-11);
+    }
+}
+
+#[test]
+fn tensor_1d_in_place_jacobian_matches_allocating_action() {
+    let problem = SEM1DProblem::new(
+        unit_interval(2),
+        8,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
+    let n = problem.system_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.03 * row as f64);
+    let direction = Mat::from_fn(n, 2, |row, column| {
+        (0.17 * row as f64 + column as f64).sin()
+    });
+    let kernel = KernelAdvDiff::new(0.2, -0.4);
+    let expected = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let mut actual = Mat::zeros(n, 2);
+    problem.apply_jacobian_into(
+        0.0,
+        &kernel,
+        state.as_ref(),
+        direction.as_ref(),
+        actual.as_mut(),
+    );
+    for row in 0..n {
+        for column in 0..2 {
+            assert!((actual[(row, column)] - expected[(row, column)]).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn tensor_1d_path_matches_generic_residual_jacobian_and_bilinear() {
+    let problem = SEM1DProblem::new(
+        unit_interval(2),
+        8,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
+    let n = problem.system_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.03 * row as f64);
+    let direction = Mat::from_fn(n, 2, |row, column| {
+        (0.17 * row as f64 + column as f64).sin()
+    });
+    let tensor = KernelAdvDiff::new(0.13, 0.4);
+    let generic = GenericAdvDiff1D(KernelAdvDiff::new(0.13, 0.4));
+
+    let tensor_residual = problem.assemble_residual(0.0, &tensor, state.as_ref());
+    let generic_residual = problem.assemble_residual(0.0, &generic, state.as_ref());
+    for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
+        assert!((tensor - generic).abs() < 1e-10);
+    }
+
+    let tensor_jacobian = problem
+        .assemble_residual_jacobian(0.0, &tensor, state.as_ref())
+        .to_dense();
+    let generic_jacobian = problem
+        .assemble_residual_jacobian(0.0, &generic, state.as_ref())
+        .to_dense();
+    for row in 0..n {
+        for col in 0..n {
+            assert!((tensor_jacobian[(row, col)] - generic_jacobian[(row, col)]).abs() < 1e-10);
+        }
+    }
+
+    let tensor_action = problem.apply_jacobian(0.0, &tensor, state.as_ref(), direction.as_ref());
+    let generic_action = problem.apply_jacobian(0.0, &generic, state.as_ref(), direction.as_ref());
+    for row in 0..n {
+        for column in 0..direction.ncols() {
+            assert!((tensor_action[(row, column)] - generic_action[(row, column)]).abs() < 1e-10);
+        }
+    }
+
+    let tensor_matrix = problem.assemble_bilinear(0.0, &tensor).to_dense();
+    let generic_matrix = problem.assemble_bilinear(0.0, &generic).to_dense();
+    for row in 0..n {
+        for col in 0..n {
+            assert!((tensor_matrix[(row, col)] - generic_matrix[(row, col)]).abs() < 1e-10);
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 //! Shared kernel traits and default local assembly loops.
 
-use crate::common::{CellState, FacetCtx, LocalCtx};
+use crate::common::{CellState, FacetCtx, LocalCtx, TensorCtx, TensorFacetCtx};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,6 +26,37 @@ pub trait BilinearForm {
         test_i: usize,
         trial_i: usize,
     ) -> f64;
+
+    /// Whether this form implements tensor-product bilinear evaluation in its
+    /// supported geometric dimension.
+    fn supports_tensor_bilinear(&self) -> bool {
+        false
+    }
+
+    /// Whether this form implements tensor-product bilinear evaluation on an
+    /// interval. This is separate from the 2D capability because a kernel may
+    /// support only one geometric dimension.
+    fn supports_tensor_bilinear_1d(&self) -> bool {
+        false
+    }
+
+    /// Return the pointwise action of one trial basis function.
+    ///
+    /// The returned values are `(f0, f1_x, f1_y)` for
+    /// `f0 * test + f1 . grad(test)`. In 1D, only `f0` and `f1_x` are used.
+    /// `trial_value` and `trial_grad` are the value and physical gradient of
+    /// the trial basis at `q`.
+    fn tensor_bilinear(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _equation: usize,
+        _unknown: usize,
+        _q: usize,
+        _trial_value: f64,
+        _trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        unreachable!("bilinear form does not support tensor-product evaluation")
+    }
 
     /// Assemble a field-major local block matrix.
     fn assemble_local(&self, ctx: &LocalCtx, out: &mut [f64]) {
@@ -123,6 +154,62 @@ pub trait ResidualKernel {
         trial_i: usize,
     ) -> f64;
 
+    /// Whether this kernel implements tensor-product residual evaluation in its
+    /// supported geometric dimension.
+    fn supports_tensor_residual(&self) -> bool {
+        false
+    }
+
+    /// Whether this kernel implements tensor-product residual evaluation on an
+    /// interval.
+    fn supports_tensor_residual_1d(&self) -> bool {
+        false
+    }
+
+    /// Whether this kernel implements tensor-product Jacobian actions in its
+    /// supported geometric dimension.
+    fn supports_tensor_jacobian(&self) -> bool {
+        false
+    }
+
+    /// Whether this kernel implements tensor-product Jacobian actions on an
+    /// interval.
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        false
+    }
+
+    /// Return the weak-form pointwise contribution for a tensor-product cell.
+    ///
+    /// The returned values are `(f0, f1_x, f1_y)` for
+    /// `f0 * test + f1 . grad(test)`. In 1D, only `f0` and `f1_x` are used.
+    /// Kernels that do not set
+    /// [`Self::supports_tensor_residual`] do not call this method.
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> [f64; 3] {
+        unreachable!("kernel does not support tensor-product residuals")
+    }
+
+    /// Return the weak-form pointwise Jacobian action for a tensor-product cell.
+    ///
+    /// `direction` contains the pointwise value and gradient of the complete
+    /// perturbation. Kernels that do not set [`Self::supports_tensor_jacobian`]
+    /// do not call this method.
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        _direction: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> [f64; 3] {
+        unreachable!("kernel does not support tensor-product Jacobian actions")
+    }
+
     fn assemble_local_residual(&self, ctx: &LocalCtx, state: &CellState, out: &mut [f64]) {
         let nf = self.nfields();
         let n = ctx.ndofs;
@@ -197,6 +284,297 @@ pub trait ResidualKernel {
                     }
                 }
                 out[equation * n + ti] = acc;
+            }
+        }
+    }
+}
+
+/// Assemble one 1D tensor-product cell from pointwise weak-form fluxes.
+pub(crate) fn assemble_tensor_residual_1d<K: ResidualKernel>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    state: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d;
+    assert_eq!(
+        ctx.geometric_dimension(),
+        1,
+        "1D tensor context requires gdim == 1"
+    );
+    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(
+        state.npts, ctx.npts,
+        "tensor state/context point count mismatch"
+    );
+    assert_eq!(out.len(), nf * n, "local 1D tensor residual size mismatch");
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for q in 0..n {
+            let [f0, f1, _] = kernel.tensor_residual(ctx, state, equation, q);
+            let weight = ctx.wdet[q];
+            let local = ctx.q_to_local[q];
+            out[equation * n + local] += weight * f0;
+            let reference_flux = ctx.jinv[q] * f1;
+            for a in 0..n {
+                let test = ctx.q_to_local[a];
+                out[equation * n + test] +=
+                    weight * ctx.differentiation[q * n + a] * reference_flux;
+            }
+        }
+    }
+}
+
+/// Assemble one tensor-product cell from pointwise weak-form fluxes.
+pub(crate) fn assemble_tensor_residual<K: ResidualKernel>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    state: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d * ctx.n1d;
+    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(
+        state.npts, ctx.npts,
+        "tensor state/context point count mismatch"
+    );
+    assert_eq!(out.len(), nf * n, "local tensor residual size mismatch");
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for j in 0..ctx.n1d {
+            for i in 0..ctx.n1d {
+                let q = j * ctx.n1d + i;
+                let [f0, f1_x, f1_y] = kernel.tensor_residual(ctx, state, equation, q);
+                let weight = ctx.wdet[q];
+                let local = ctx.q_to_local[q];
+                out[equation * n + local] += weight * f0;
+
+                let jinv = &ctx.jinv[q * 4..q * 4 + 4];
+                let reference_x = jinv[0] * f1_x + jinv[1] * f1_y;
+                let reference_y = jinv[2] * f1_x + jinv[3] * f1_y;
+                for a in 0..ctx.n1d {
+                    let x_local = ctx.q_to_local[j * ctx.n1d + a];
+                    out[equation * n + x_local] +=
+                        weight * ctx.differentiation[i * ctx.n1d + a] * reference_x;
+                    let y_local = ctx.q_to_local[a * ctx.n1d + i];
+                    out[equation * n + y_local] +=
+                        weight * ctx.differentiation[j * ctx.n1d + a] * reference_y;
+                }
+            }
+        }
+    }
+}
+
+/// Apply one local trial column of a 1D tensor-product bilinear form.
+pub(crate) fn apply_tensor_bilinear_column_1d<K: BilinearForm>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    unknown: usize,
+    trial: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d;
+    assert_eq!(
+        ctx.geometric_dimension(),
+        1,
+        "1D tensor context requires gdim == 1"
+    );
+    assert_eq!(trial.nfields, nf, "kernel/trial field count mismatch");
+    assert_eq!(
+        trial.npts, ctx.npts,
+        "tensor trial/context point count mismatch"
+    );
+    assert_eq!(
+        out.len(),
+        nf * n,
+        "local 1D tensor bilinear action size mismatch"
+    );
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for q in 0..n {
+            let contribution = kernel.tensor_bilinear(
+                ctx,
+                equation,
+                unknown,
+                q,
+                trial.value(unknown, q),
+                [trial.grad(unknown, q, 0), 0.0],
+            );
+            let weight = ctx.wdet[q];
+            let local = ctx.q_to_local[q];
+            out[equation * n + local] += weight * contribution[0];
+            let reference_flux = ctx.jinv[q] * contribution[1];
+            for a in 0..n {
+                let test = ctx.q_to_local[a];
+                out[equation * n + test] +=
+                    weight * ctx.differentiation[q * n + a] * reference_flux;
+            }
+        }
+    }
+}
+
+/// Apply one local trial column of a tensor-product bilinear form.
+pub(crate) fn apply_tensor_bilinear_column<K: BilinearForm>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    unknown: usize,
+    trial: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d * ctx.n1d;
+    assert_eq!(trial.nfields, nf, "kernel/trial field count mismatch");
+    assert_eq!(
+        trial.npts, ctx.npts,
+        "tensor trial/context point count mismatch"
+    );
+    assert_eq!(
+        out.len(),
+        nf * n,
+        "local tensor bilinear action size mismatch"
+    );
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for j in 0..ctx.n1d {
+            for i in 0..ctx.n1d {
+                let q = j * ctx.n1d + i;
+                let contribution = kernel.tensor_bilinear(
+                    ctx,
+                    equation,
+                    unknown,
+                    q,
+                    trial.value(unknown, q),
+                    [trial.grad(unknown, q, 0), trial.grad(unknown, q, 1)],
+                );
+                let weight = ctx.wdet[q];
+                let local = ctx.q_to_local[q];
+                out[equation * n + local] += weight * contribution[0];
+
+                let jinv = &ctx.jinv[q * 4..q * 4 + 4];
+                let reference_x = jinv[0] * contribution[1] + jinv[1] * contribution[2];
+                let reference_y = jinv[2] * contribution[1] + jinv[3] * contribution[2];
+                for a in 0..ctx.n1d {
+                    let x_local = ctx.q_to_local[j * ctx.n1d + a];
+                    out[equation * n + x_local] +=
+                        weight * ctx.differentiation[i * ctx.n1d + a] * reference_x;
+                    let y_local = ctx.q_to_local[a * ctx.n1d + i];
+                    out[equation * n + y_local] +=
+                        weight * ctx.differentiation[j * ctx.n1d + a] * reference_y;
+                }
+            }
+        }
+    }
+}
+
+/// Apply a 1D tensor-product pointwise Jacobian action on one cell.
+pub(crate) fn apply_tensor_jacobian_1d<K: ResidualKernel>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    state: &CellState<'_>,
+    direction: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d;
+    assert_eq!(
+        ctx.geometric_dimension(),
+        1,
+        "1D tensor context requires gdim == 1"
+    );
+    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(
+        direction.nfields, nf,
+        "kernel/direction field count mismatch"
+    );
+    assert_eq!(
+        state.npts, ctx.npts,
+        "tensor state/context point count mismatch"
+    );
+    assert_eq!(
+        direction.npts, ctx.npts,
+        "tensor direction/context point count mismatch"
+    );
+    assert_eq!(
+        out.len(),
+        nf * n,
+        "local 1D tensor Jacobian action size mismatch"
+    );
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for q in 0..n {
+            let [f0, f1, _] = kernel.tensor_jacobian_action(ctx, state, direction, equation, q);
+            let weight = ctx.wdet[q];
+            let local = ctx.q_to_local[q];
+            out[equation * n + local] += weight * f0;
+            let reference_flux = ctx.jinv[q] * f1;
+            for a in 0..n {
+                let test = ctx.q_to_local[a];
+                out[equation * n + test] +=
+                    weight * ctx.differentiation[q * n + a] * reference_flux;
+            }
+        }
+    }
+}
+
+/// Apply a tensor-product pointwise Jacobian action on one cell.
+pub(crate) fn apply_tensor_jacobian<K: ResidualKernel>(
+    kernel: &K,
+    ctx: &TensorCtx<'_>,
+    state: &CellState<'_>,
+    direction: &CellState<'_>,
+    out: &mut [f64],
+) {
+    let nf = kernel.nfields();
+    let n = ctx.n1d * ctx.n1d;
+    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(
+        direction.nfields, nf,
+        "kernel/direction field count mismatch"
+    );
+    assert_eq!(
+        state.npts, ctx.npts,
+        "tensor state/context point count mismatch"
+    );
+    assert_eq!(
+        direction.npts, ctx.npts,
+        "tensor direction/context point count mismatch"
+    );
+    assert_eq!(
+        out.len(),
+        nf * n,
+        "local tensor Jacobian action size mismatch"
+    );
+    out.fill(0.0);
+
+    for equation in 0..nf {
+        for j in 0..ctx.n1d {
+            for i in 0..ctx.n1d {
+                let q = j * ctx.n1d + i;
+                let [f0, f1_x, f1_y] =
+                    kernel.tensor_jacobian_action(ctx, state, direction, equation, q);
+                let weight = ctx.wdet[q];
+                let local = ctx.q_to_local[q];
+                out[equation * n + local] += weight * f0;
+
+                let jinv = &ctx.jinv[q * 4..q * 4 + 4];
+                let reference_x = jinv[0] * f1_x + jinv[1] * f1_y;
+                let reference_y = jinv[2] * f1_x + jinv[3] * f1_y;
+                for a in 0..ctx.n1d {
+                    let x_local = ctx.q_to_local[j * ctx.n1d + a];
+                    out[equation * n + x_local] +=
+                        weight * ctx.differentiation[i * ctx.n1d + a] * reference_x;
+                    let y_local = ctx.q_to_local[a * ctx.n1d + i];
+                    out[equation * n + y_local] +=
+                        weight * ctx.differentiation[j * ctx.n1d + a] * reference_y;
+                }
             }
         }
     }
@@ -293,6 +671,30 @@ impl ResidualKernel for ResidualKernelSum<'_> {
         self.nfields
     }
 
+    fn supports_tensor_residual(&self) -> bool {
+        self.kernels
+            .iter()
+            .all(|kernel| kernel.supports_tensor_residual())
+    }
+
+    fn supports_tensor_residual_1d(&self) -> bool {
+        self.kernels
+            .iter()
+            .all(|kernel| kernel.supports_tensor_residual_1d())
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        self.kernels
+            .iter()
+            .all(|kernel| kernel.supports_tensor_jacobian())
+    }
+
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        self.kernels
+            .iter()
+            .all(|kernel| kernel.supports_tensor_jacobian_1d())
+    }
+
     fn field_names(&self) -> Option<Vec<String>> {
         self.field_names.clone()
     }
@@ -327,6 +729,41 @@ impl ResidualKernel for ResidualKernelSum<'_> {
                 kernel.jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
             })
             .sum()
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let mut sum = [0.0; 3];
+        for kernel in &self.kernels {
+            let contribution = kernel.tensor_residual(ctx, state, equation, q);
+            for (sum, contribution) in sum.iter_mut().zip(contribution) {
+                *sum += contribution;
+            }
+        }
+        sum
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let mut sum = [0.0; 3];
+        for kernel in &self.kernels {
+            let contribution = kernel.tensor_jacobian_action(ctx, state, direction, equation, q);
+            for (sum, contribution) in sum.iter_mut().zip(contribution) {
+                *sum += contribution;
+            }
+        }
+        sum
     }
 }
 
@@ -461,6 +898,49 @@ pub trait StateBoundaryIntegrator: Send + Sync {
         test_i: usize,
         trial_i: usize,
     ) -> f64;
+
+    /// Whether this boundary kernel supplies a sum-factorization-compatible
+    /// pointwise residual action.
+    fn supports_tensor_residual(&self) -> bool {
+        false
+    }
+
+    /// Whether this boundary kernel supplies a sum-factorization-compatible
+    /// pointwise Jacobian action.
+    fn supports_tensor_jacobian(&self) -> bool {
+        false
+    }
+
+    /// Whether the tensor boundary hooks need the state gradient field.
+    ///
+    /// Value-only conditions, such as advective and Dong outflow fluxes, can
+    /// leave this disabled and avoid gathering unused cell gradients.
+    fn tensor_requires_gradients(&self) -> bool {
+        false
+    }
+
+    /// Return the pointwise trace residual for one equation.
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorFacetCtx<'_>,
+        _state: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> f64 {
+        unreachable!("state boundary kernel does not support tensor evaluation")
+    }
+
+    /// Return the pointwise trace Jacobian action for one equation.
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorFacetCtx<'_>,
+        _state: &CellState<'_>,
+        _direction: &CellState<'_>,
+        _equation: usize,
+        _q: usize,
+    ) -> f64 {
+        unreachable!("state boundary kernel does not support tensor evaluation")
+    }
 
     fn apply_local_jacobian(
         &self,

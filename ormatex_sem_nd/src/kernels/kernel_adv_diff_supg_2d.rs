@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
@@ -38,6 +38,31 @@ impl KernelAdvDiffSUPG2D {
 }
 
 impl BilinearForm for KernelAdvDiffSUPG2D {
+    fn supports_tensor_bilinear(&self) -> bool {
+        true
+    }
+
+    fn tensor_bilinear(
+        &self,
+        ctx: &TensorCtx<'_>,
+        _equation: usize,
+        _unknown: usize,
+        q: usize,
+        trial_value: f64,
+        trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        let material = ctx.material_context(None, q);
+        let nu = self.nu.eval(&material);
+        let tau = self.tau.eval(&material);
+        let velocity = [self.vel[0].eval(&material), self.vel[1].eval(&material)];
+        let advect_trial = velocity[0] * trial_grad[0] + velocity[1] * trial_grad[1];
+        [
+            0.0,
+            nu * trial_grad[0] + tau * advect_trial * velocity[0] - velocity[0] * trial_value,
+            nu * trial_grad[1] + tau * advect_trial * velocity[1] - velocity[1] * trial_value,
+        ]
+    }
+
     fn integrand(
         &self,
         ctx: &LocalCtx,
@@ -66,6 +91,78 @@ impl BilinearForm for KernelAdvDiffSUPG2D {
 }
 
 impl ResidualKernel for KernelAdvDiffSUPG2D {
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        let tau = self.tau.eval(&material);
+        let velocity = [self.vel[0].eval(&material), self.vel[1].eval(&material)];
+        let value = state.value(0, q);
+        let advect_state = velocity[0] * state.grad(0, q, 0) + velocity[1] * state.grad(0, q, 1);
+        [
+            0.0,
+            nu * state.grad(0, q, 0) + tau * advect_state * velocity[0] - velocity[0] * value,
+            nu * state.grad(0, q, 1) + tau * advect_state * velocity[1] - velocity[1] * value,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        let tau = self.tau.eval(&material);
+        let dnu = self.nu.derivative(&material, 0).unwrap_or(0.0);
+        let dtau = self.tau.derivative(&material, 0).unwrap_or(0.0);
+        let velocity = [self.vel[0].eval(&material), self.vel[1].eval(&material)];
+        let dvelocity = [
+            self.vel[0].derivative(&material, 0).unwrap_or(0.0),
+            self.vel[1].derivative(&material, 0).unwrap_or(0.0),
+        ];
+        let value = state.value(0, q);
+        let direction_value = direction.value(0, q);
+        let gradient = [state.grad(0, q, 0), state.grad(0, q, 1)];
+        let direction_gradient = [direction.grad(0, q, 0), direction.grad(0, q, 1)];
+        let advect_state = velocity[0] * gradient[0] + velocity[1] * gradient[1];
+        let direction_advect_state = dvelocity[0] * direction_value * gradient[0]
+            + dvelocity[1] * direction_value * gradient[1]
+            + velocity[0] * direction_gradient[0]
+            + velocity[1] * direction_gradient[1];
+        [
+            0.0,
+            nu * direction_gradient[0]
+                + dnu * direction_value * gradient[0]
+                + dtau * direction_value * advect_state * velocity[0]
+                + tau * direction_advect_state * velocity[0]
+                + tau * advect_state * dvelocity[0] * direction_value
+                - (velocity[0] + dvelocity[0] * value) * direction_value,
+            nu * direction_gradient[1]
+                + dnu * direction_value * gradient[1]
+                + dtau * direction_value * advect_state * velocity[1]
+                + tau * direction_advect_state * velocity[1]
+                + tau * advect_state * dvelocity[1] * direction_value
+                - (velocity[1] + dvelocity[1] * value) * direction_value,
+        ]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

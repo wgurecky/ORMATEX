@@ -5,8 +5,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellT
 use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
-    BoundaryIntegrator, DofReduction2D, FieldRegistry, KernelAdvDiff2D, NeumannFlux,
-    RobinConvection, SEM2DProblem,
+    BilinearForm, BoundaryIntegrator, DofReduction2D, FieldRegistry, KernelAdvDiff2D, LocalCtx,
+    NeumannFlux, ResidualKernel, RobinConvection, SEM2DProblem,
 };
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
@@ -19,6 +19,49 @@ use linear_system::{implicit_euler_final_state, sparse_add, LinearOdeSys};
 use matrix_free::{JacobianBackend, ResidualDiffusionNeumannSys};
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+
+struct GenericAdvDiff(KernelAdvDiff2D);
+
+impl ResidualKernel for GenericAdvDiff {
+    fn residual_integrand(
+        &self,
+        ctx: &ormatex_sem_nd::LocalCtx<'_>,
+        state: &ormatex_sem_nd::CellState<'_>,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.0.residual_integrand(ctx, state, equation, q, test_i)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &ormatex_sem_nd::LocalCtx<'_>,
+        state: &ormatex_sem_nd::CellState<'_>,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0
+            .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+    }
+}
+
+impl BilinearForm for GenericAdvDiff {
+    fn integrand(
+        &self,
+        ctx: &LocalCtx<'_>,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0.integrand(ctx, equation, unknown, q, test_i, trial_i)
+    }
+}
 
 fn build_problem() -> (
     SEM2DProblem<QuadMesh>,
@@ -65,6 +108,172 @@ fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat
         state,
         direction,
     )
+}
+
+#[test]
+fn tensor_path_matches_generic_residual_jacobian_and_action() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        3,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.03 * i as f64);
+    let direction = Mat::from_fn(n, 2, |i, column| {
+        (0.17 * (i + 1) as f64 * (column as f64 + 1.0)).sin()
+    });
+    let tensor_kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let generic_kernel = GenericAdvDiff(KernelAdvDiff2D::new(0.13, [0.4, -0.2]));
+
+    let tensor_residual = problem.assemble_residual(0.0, &tensor_kernel, state.as_ref());
+    let generic_residual = problem.assemble_residual(0.0, &generic_kernel, state.as_ref());
+    for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
+        assert!((tensor - generic).abs() < 1e-10);
+    }
+
+    let tensor_jacobian = problem
+        .assemble_residual_jacobian(0.0, &tensor_kernel, state.as_ref())
+        .to_dense();
+    let generic_jacobian = problem
+        .assemble_residual_jacobian(0.0, &generic_kernel, state.as_ref())
+        .to_dense();
+    for row in 0..n {
+        for col in 0..n {
+            assert!((tensor_jacobian[(row, col)] - generic_jacobian[(row, col)]).abs() < 1e-10);
+        }
+    }
+
+    let tensor_action =
+        problem.apply_jacobian(0.0, &tensor_kernel, state.as_ref(), direction.as_ref());
+    let generic_action =
+        problem.apply_jacobian(0.0, &generic_kernel, state.as_ref(), direction.as_ref());
+    for row in 0..n {
+        for column in 0..direction.ncols() {
+            assert!((tensor_action[(row, column)] - generic_action[(row, column)]).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn in_place_jacobian_action_matches_owned_result() {
+    let problem = SEM2DProblem::new(
+        unit_square(2, 1, ReferenceCellType::Quadrilateral, 1),
+        3,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.01 * i as f64);
+    let direction = Mat::from_fn(n, 2, |i, column| {
+        (0.11 * (i + 1) as f64 * (column as f64 + 1.0)).cos()
+    });
+    let kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let expected = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let mut actual = Mat::zeros(n, direction.ncols());
+    problem.apply_jacobian_into(
+        0.0,
+        &kernel,
+        state.as_ref(),
+        direction.as_ref(),
+        actual.as_mut(),
+    );
+    for row in 0..n {
+        for column in 0..direction.ncols() {
+            assert_eq!(actual[(row, column)], expected[(row, column)]);
+        }
+    }
+}
+
+#[test]
+fn tensor_bilinear_assembly_matches_generic_path() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        3,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
+    let tensor = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let generic = GenericAdvDiff(KernelAdvDiff2D::new(0.13, [0.4, -0.2]));
+    let tensor_matrix = problem.assemble_bilinear(0.0, &tensor).to_dense();
+    let generic_matrix = problem.assemble_bilinear(0.0, &generic).to_dense();
+    for row in 0..tensor_matrix.nrows() {
+        for col in 0..tensor_matrix.ncols() {
+            assert!((tensor_matrix[(row, col)] - generic_matrix[(row, col)]).abs() < 1e-10);
+        }
+    }
+}
+
+fn benchmark_p_scaling() {
+    for p in [2, 4, 8, 12] {
+        let problem = SEM2DProblem::new(
+            unit_square(8, 8, ReferenceCellType::Quadrilateral, 1),
+            p,
+            FieldRegistry::new(["temperature"]),
+            DofReduction2D::None,
+        );
+        let n = problem.reduced_size();
+        let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.01 * i as f64);
+        let direction = Mat::from_fn(n, 1, |i, _| (0.17 * i as f64).sin());
+        let kernel = KernelAdvDiff2D::new(0.1, [0.4, -0.2]);
+        let start = Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(problem.assemble_residual(0.0, &kernel, state.as_ref()));
+            std::hint::black_box(problem.apply_jacobian(
+                0.0,
+                &kernel,
+                state.as_ref(),
+                direction.as_ref(),
+            ));
+        }
+        println!(
+            "tensor p={p}, dofs/cell={}, elapsed={:?}",
+            (p + 1) * (p + 1),
+            start.elapsed()
+        );
+    }
+}
+
+#[test]
+#[ignore = "release performance benchmark; run with --release -- --ignored --nocapture"]
+fn tensor_path_compares_with_generic_path() {
+    let p = 8;
+    let problem = SEM2DProblem::new(
+        unit_square(8, 8, ReferenceCellType::Quadrilateral, 1),
+        p,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.01 * i as f64);
+    let direction = Mat::from_fn(n, 1, |i, _| (0.17 * i as f64).sin());
+    let tensor = KernelAdvDiff2D::new(0.1, [0.4, -0.2]);
+    let generic = GenericAdvDiff(KernelAdvDiff2D::new(0.1, [0.4, -0.2]));
+
+    let start = Instant::now();
+    for _ in 0..10 {
+        std::hint::black_box(problem.assemble_residual(0.0, &tensor, state.as_ref()));
+        std::hint::black_box(problem.apply_jacobian(
+            0.0,
+            &tensor,
+            state.as_ref(),
+            direction.as_ref(),
+        ));
+    }
+    let tensor_time = start.elapsed();
+
+    let start = Instant::now();
+    for _ in 0..10 {
+        std::hint::black_box(problem.assemble_residual(0.0, &generic, state.as_ref()));
+        std::hint::black_box(problem.apply_jacobian(
+            0.0,
+            &generic,
+            state.as_ref(),
+            direction.as_ref(),
+        ));
+    }
+    let generic_time = start.elapsed();
+    println!("p={p}, tensor={tensor_time:?}, generic={generic_time:?}");
 }
 
 fn benchmark_threads() -> (usize, usize) {
@@ -177,4 +386,10 @@ fn large_2d_diffusion_matrix_free_jacobian_runtime() {
         "large 2D matrix-free Jacobian: {serial_threads} thread(s) = {:?}, {parallel_threads} thread(s) = {:?}",
         serial_time, parallel_time
     );
+}
+
+#[test]
+#[ignore = "release performance benchmark; run with --release -- --ignored --nocapture"]
+fn tensor_p_scaling_runtime() {
+    benchmark_p_scaling();
 }

@@ -11,8 +11,9 @@ use ormatex_sem_nd::{
     KernelAdvDiffSUPG2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
 };
 use ormatex_sem_nd::{
-    ConstantCoefficient, KernelEdacSplitBoundaryFlux2D, MeshMetadata, PhysicalRegion,
-    RegionCoefficient, StateBoundaryTerms,
+    ConstantCoefficient, KernelEdacDongOutflow2D, KernelEdacNavierStokes2D,
+    KernelEdacSplitBoundaryFlux2D, MeshMetadata, PhysicalRegion, RegionCoefficient,
+    RobinConvection, StateBoundaryIntegrator, StateBoundaryTerms,
 };
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
@@ -119,6 +120,42 @@ impl BoundaryIntegrator for YFlux {
     }
 }
 
+struct GradientFlux;
+
+impl BoundaryIntegrator for GradientFlux {
+    fn integrand_rhs(&self, ctx: &FacetCtx, _equation: usize, q: usize, test_i: usize) -> f64 {
+        ctx.test(test_i, 0).grad(q, 0)
+    }
+}
+
+struct StateGradient;
+
+impl StateBoundaryIntegrator for StateGradient {
+    fn residual_integrand(
+        &self,
+        ctx: &FacetCtx,
+        state: &CellState,
+        _equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        state.grad(0, q, 0) * ctx.test(test_i, 0).v(q)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        _ctx: &FacetCtx,
+        _state: &CellState,
+        _equation: usize,
+        _unknown: usize,
+        _q: usize,
+        _test_i: usize,
+        _trial_i: usize,
+    ) -> f64 {
+        0.0
+    }
+}
+
 struct QuadraticReaction;
 
 impl ResidualKernel for QuadraticReaction {
@@ -148,6 +185,43 @@ impl ResidualKernel for QuadraticReaction {
 }
 
 struct CoupledReaction;
+
+struct GenericEdac(KernelEdacNavierStokes2D);
+
+impl ResidualKernel for GenericEdac {
+    fn nfields(&self) -> usize {
+        self.0.nfields()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.0.field_names()
+    }
+
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.0.residual_integrand(ctx, state, equation, q, test_i)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0
+            .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+    }
+}
 
 impl ResidualKernel for CoupledReaction {
     fn nfields(&self) -> usize {
@@ -357,6 +431,34 @@ fn state_boundary_matrix_free_action_matches_assembled_jacobian() {
 }
 
 #[test]
+fn high_order_tensor_state_boundary_action_matches_assembled_jacobian() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        4,
+        FieldRegistry::new(["u", "v", "p"]),
+        DofReduction2D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| 0.2 + 0.01 * row as f64);
+    let direction = Mat::from_fn(problem.system_size(), 2, |row, column| {
+        0.03 * (row + 1) as f64 * (column + 1) as f64
+    });
+    for terms in [
+        StateBoundaryTerms::new().with_default(KernelEdacSplitBoundaryFlux2D),
+        StateBoundaryTerms::new().with_default(KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0)),
+    ] {
+        let assembled = problem.assemble_state_boundary(0.0, state.as_ref(), &terms);
+        let action =
+            problem.apply_state_boundary_jacobian(0.0, state.as_ref(), direction.as_ref(), &terms);
+        let expected = assembled.jacobian.as_ref() * direction.as_ref();
+        for row in 0..problem.system_size() {
+            for column in 0..direction.ncols() {
+                assert!((action[(row, column)] - expected[(row, column)]).abs() < 1e-11);
+            }
+        }
+    }
+}
+
+#[test]
 fn volume_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
@@ -424,6 +526,78 @@ fn periodic_pairs_identify_translated_reversed_high_order_facets() {
 }
 
 #[test]
+fn high_order_tensor_action_matches_assembled_on_skew_cells() {
+    let problem = SEM2DProblem::new(
+        translated_periodic_mesh(),
+        4,
+        FieldRegistry::new(["temperature"]),
+        DofReduction2D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.03 * row as f64);
+    let direction = Mat::from_fn(n, 2, |row, column| {
+        (0.17 * (row + 1) as f64 * (column as f64 + 1.0)).sin()
+    });
+    let kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let assembled = problem
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
+        .to_dense();
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let expected = assembled.as_ref() * direction.as_ref();
+    for row in 0..n {
+        for column in 0..direction.ncols() {
+            assert!(
+                (action[(row, column)] - expected[(row, column)]).abs() < 1e-10,
+                "tensor action mismatch at ({row}, {column}): {} != {}",
+                action[(row, column)],
+                expected[(row, column)]
+            );
+        }
+    }
+}
+
+#[test]
+fn high_order_edac_tensor_action_matches_assembled() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        3,
+        FieldRegistry::new(["u", "v", "p"]),
+        DofReduction2D::None,
+    );
+    let n = problem.system_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.01 * row as f64);
+    let direction = Mat::from_fn(n, 1, |row, _| (0.13 * row as f64).sin());
+    let kernel = KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1);
+    let generic = GenericEdac(KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1));
+    let tensor_residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
+    let generic_residual = problem.assemble_residual(0.0, &generic, state.as_ref());
+    for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
+        assert!((tensor - generic).abs() < 1e-10);
+    }
+    let assembled = problem
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
+        .to_dense();
+    let generic_assembled = problem
+        .assemble_residual_jacobian(0.0, &generic, state.as_ref())
+        .to_dense();
+    for row in 0..n {
+        for col in 0..n {
+            assert!((assembled[(row, col)] - generic_assembled[(row, col)]).abs() < 1e-10);
+        }
+    }
+    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let expected = assembled.as_ref() * direction.as_ref();
+    for row in 0..n {
+        assert!(
+            (action[(row, 0)] - expected[(row, 0)]).abs() < 1e-10,
+            "EDAC tensor action mismatch at row {row}: {} != {}",
+            action[(row, 0)],
+            expected[(row, 0)]
+        );
+    }
+}
+
+#[test]
 #[should_panic(expected = "not related by a translation")]
 fn periodic_pairs_reject_nontranslated_facets() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
@@ -475,6 +649,108 @@ fn boundary_kernel_reads_physical_quadrature_points() {
         (facet.midpoint[0].abs() < 1e-12).then_some(&flux as &dyn BoundaryIntegrator)
     });
     assert!((boundary.rhs.iter().sum::<f64>() - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn boundary_kernel_receives_physical_basis_gradients() {
+    let mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+    let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
+    let flux = GradientFlux;
+    let boundary = problem.assemble_boundary(0.0, |facet| {
+        (facet.midpoint[0] > 1.0 - 1e-12).then_some(&flux as &dyn BoundaryIntegrator)
+    });
+    assert!(boundary.rhs.iter().any(|value| value.abs() > 1e-12));
+}
+
+#[test]
+fn state_boundary_gradient_uses_the_complete_physical_cell_state() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        2,
+        FieldRegistry::new(["u"]),
+        DofReduction2D::None,
+    );
+    let positions = problem.dof_positions();
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| positions[row].0);
+    let right = problem
+        .mesh()
+        .entity_iter(ReferenceCellType::Interval)
+        .find(|facet| {
+            let mut midpoint = [0.0; 2];
+            let mut count = 0.0;
+            for point in facet.geometry().points() {
+                let mut xy = [0.0; 2];
+                point.coords(&mut xy);
+                midpoint[0] += xy[0];
+                midpoint[1] += xy[1];
+                count += 1.0;
+            }
+            midpoint[0] / count > 1.0 - 1e-12
+        })
+        .unwrap()
+        .local_index();
+    let terms = StateBoundaryTerms::new().with_entities([right], StateGradient);
+    let boundary = problem.assemble_state_boundary(0.0, state.as_ref(), &terms);
+    assert!((boundary.residual.iter().sum::<f64>() - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn natural_boundary_includes_nonzero_dirichlet_column_correction() {
+    let left_and_bottom = |mesh: &QuadMesh, x: f64, y: f64| {
+        mesh.entity_iter(ReferenceCellType::Interval)
+            .find(|facet| {
+                let mut midpoint = [0.0; 2];
+                let mut count = 0.0;
+                for point in facet.geometry().points() {
+                    let mut xy = [0.0; 2];
+                    point.coords(&mut xy);
+                    midpoint[0] += xy[0];
+                    midpoint[1] += xy[1];
+                    count += 1.0;
+                }
+                (midpoint[0] / count - x).abs() < 1e-12 && (midpoint[1] / count - y).abs() < 1e-12
+            })
+            .unwrap()
+            .local_index()
+    };
+    let reduced_mesh: QuadMesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+    let left = left_and_bottom(&reduced_mesh, 0.0, 0.5);
+    let reduced = SEM2DProblem::new(
+        reduced_mesh,
+        1,
+        FieldRegistry::new(["u"]),
+        DofReduction2D::Dirichlet {
+            facets: vec![(left, 3.0)],
+        },
+    );
+    let full = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        1,
+        FieldRegistry::new(["u"]),
+        DofReduction2D::None,
+    );
+    let robin = RobinConvection::new(2.0, 0.0);
+    let reduced_boundary = reduced.assemble_boundary(0.0, |facet| {
+        (facet.midpoint[1].abs() < 1e-12).then_some(&robin as &dyn BoundaryIntegrator)
+    });
+    let full_boundary = full.assemble_boundary(0.0, |facet| {
+        (facet.midpoint[1].abs() < 1e-12).then_some(&robin as &dyn BoundaryIntegrator)
+    });
+    let full_matrix = full_boundary.mat.to_dense();
+    let space = FunctionSpaceImpl::new(full.mesh(), full.family());
+    let left_dofs = space
+        .entity_closure_dofs(ReferenceCellType::Interval, left)
+        .unwrap();
+    for full_row in 0..full.reduced_size() {
+        let Some(reduced_row) = reduced.target_dof(full_row) else {
+            continue;
+        };
+        let expected = left_dofs
+            .iter()
+            .map(|&full_col| -3.0 * full_matrix[(full_row, full_col)])
+            .sum::<f64>();
+        assert!((reduced_boundary.rhs[reduced_row] - expected).abs() < 1e-12);
+    }
 }
 
 #[test]

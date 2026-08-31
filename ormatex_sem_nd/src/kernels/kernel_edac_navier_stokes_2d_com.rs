@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx, ShapeFn};
+use crate::common::{CellState, LocalCtx, ShapeFn, TensorCtx};
 
 use super::kernel_common::ResidualKernel;
 use super::kernel_smagorinsky_lilly_2d::SmagorinskyLilly2D;
@@ -59,12 +59,28 @@ impl EdacNavierStokes2DConfig {
         self.pressure_diffusion_factor * self.c0 * self.smagorinsky.filter_width(ctx)
     }
 
+    fn pressure_diffusivity_tensor(&self, ctx: &TensorCtx<'_>) -> f64 {
+        self.pressure_diffusion_factor * self.c0 * self.smagorinsky.filter_width_tensor(ctx)
+    }
+
     fn strain_component(state: &CellState, q: usize, i: usize, j: usize) -> f64 {
         0.5 * (state.grad(i, q, j) + state.grad(j, q, i))
     }
 
     fn stress(&self, ctx: &LocalCtx, state: &CellState, q: usize, i: usize, j: usize) -> f64 {
         let viscosity = self.nu + self.smagorinsky.eddy_viscosity(ctx, state, q);
+        2.0 * viscosity * Self::strain_component(state, q, i, j)
+    }
+
+    fn stress_tensor(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        q: usize,
+        i: usize,
+        j: usize,
+    ) -> f64 {
+        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
         2.0 * viscosity * Self::strain_component(state, q, i, j)
     }
 
@@ -95,6 +111,23 @@ impl EdacNavierStokes2DConfig {
                 + (j == unknown) as usize as f64 * trial.grad(q, i));
         2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
     }
+
+    fn stress_tensor_directional_derivative(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        q: usize,
+        i: usize,
+        j: usize,
+    ) -> f64 {
+        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
+        let dviscosity = self
+            .smagorinsky
+            .eddy_viscosity_directional_derivative(ctx, state, direction, q);
+        let dstrain = 0.5 * (direction.grad(i, q, j) + direction.grad(j, q, i));
+        2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
+    }
 }
 
 fn field_names() -> Option<Vec<String>> {
@@ -119,6 +152,54 @@ impl ResidualKernel for KernelEdacMomentumConvection2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        let velocity = EdacNavierStokes2DConfig::velocity(state, q);
+        [
+            velocity[0] * state.grad(equation, q, 0) + velocity[1] * state.grad(equation, q, 1),
+            0.0,
+            0.0,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        let velocity = EdacNavierStokes2DConfig::velocity(state, q);
+        [
+            direction.value(0, q) * state.grad(equation, q, 0)
+                + direction.value(1, q) * state.grad(equation, q, 1)
+                + velocity[0] * direction.grad(equation, q, 0)
+                + velocity[1] * direction.grad(equation, q, 1),
+            0.0,
+            0.0,
+        ]
     }
 
     fn residual_integrand(
@@ -200,6 +281,41 @@ impl ResidualKernel for KernelEdacPressureGradient2D {
         field_names()
     }
 
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        [state.grad(2, q, equation) / self.config.rho, 0.0, 0.0]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        [direction.grad(2, q, equation) / self.config.rho, 0.0, 0.0]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -253,6 +369,51 @@ impl ResidualKernel for KernelEdacViscousStress2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        [
+            0.0,
+            self.config.stress_tensor(ctx, state, q, equation, 0),
+            self.config.stress_tensor(ctx, state, q, equation, 1),
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        [
+            0.0,
+            self.config
+                .stress_tensor_directional_derivative(ctx, state, direction, q, equation, 0),
+            self.config
+                .stress_tensor_directional_derivative(ctx, state, direction, q, equation, 1),
+        ]
     }
 
     fn residual_integrand(
@@ -321,6 +482,55 @@ impl ResidualKernel for KernelEdacPressureDivergence2D {
         field_names()
     }
 
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        [
+            self.config.rho
+                * self.config.c0
+                * self.config.c0
+                * (state.grad(0, q, 0) + state.grad(1, q, 1)),
+            0.0,
+            0.0,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        [
+            self.config.rho
+                * self.config.c0
+                * self.config.c0
+                * (direction.grad(0, q, 0) + direction.grad(1, q, 1)),
+            0.0,
+            0.0,
+        ]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -378,6 +588,54 @@ impl ResidualKernel for KernelEdacPressureAdvection2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let velocity = EdacNavierStokes2DConfig::velocity(state, q);
+        [
+            velocity[0] * state.grad(2, q, 0) + velocity[1] * state.grad(2, q, 1),
+            0.0,
+            0.0,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let velocity = EdacNavierStokes2DConfig::velocity(state, q);
+        [
+            direction.value(0, q) * state.grad(2, q, 0)
+                + direction.value(1, q) * state.grad(2, q, 1)
+                + velocity[0] * direction.grad(2, q, 0)
+                + velocity[1] * direction.grad(2, q, 1),
+            0.0,
+            0.0,
+        ]
     }
 
     fn residual_integrand(
@@ -449,6 +707,51 @@ impl ResidualKernel for KernelEdacPressureDiffusion2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let coefficient = self.config.pressure_diffusivity_tensor(ctx);
+        [
+            0.0,
+            coefficient * state.grad(2, q, 0),
+            coefficient * state.grad(2, q, 1),
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let coefficient = self.config.pressure_diffusivity_tensor(ctx);
+        [
+            0.0,
+            coefficient * direction.grad(2, q, 0),
+            coefficient * direction.grad(2, q, 1),
+        ]
     }
 
     fn residual_integrand(

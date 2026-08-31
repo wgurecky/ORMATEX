@@ -132,6 +132,11 @@ impl ReducedDofMap {
         self.dof_lut[full_dof]
     }
 
+    /// Return the prescribed value for an eliminated full DOF, if any.
+    pub(crate) fn prescribed(&self, full_dof: usize) -> Option<f64> {
+        self.prescribed_values[full_dof]
+    }
+
     /// Return the number of full-space DOFs represented by this map.
     pub(crate) fn full_size(&self) -> usize {
         self.dof_lut.len()

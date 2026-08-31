@@ -136,7 +136,7 @@ fn residual_kernel_sum_rejects_mismatched_field_names() {
 #[ignore = "release performance benchmark; run with --release -- --ignored --nocapture"]
 fn residual_kernel_sum_benchmark() {
     let problem = SEM2DProblem::new(
-        unit_square(16, 16, ReferenceCellType::Quadrilateral, 2),
+        unit_square(16, 16, ReferenceCellType::Quadrilateral, 1),
         2,
         FieldRegistry::new(["u"]),
         DofReduction2D::None,

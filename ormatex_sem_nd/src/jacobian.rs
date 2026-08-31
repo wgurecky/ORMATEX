@@ -9,6 +9,7 @@ use faer::sparse::{SparseColMat, SparseColMatRef};
 use faer::Par;
 
 use crate::kernels::kernel_common::ResidualKernel;
+use crate::simd;
 use crate::{SEM1DProblem, SEM2DProblem};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
@@ -22,6 +23,16 @@ pub trait CompleteResidualOperator: Sync {
     fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64>;
 
     fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64>;
+
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        let action = self.apply_jacobian(state, direction);
+        out.copy_from(action.as_ref());
+    }
 }
 
 /// Source of a residual Jacobian action for a matrix-free linear operator.
@@ -34,6 +45,17 @@ pub trait MatrixFreeJacobianSource: Sync {
 
     /// Apply the residual Jacobian at `state` to one or more directions.
     fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64>;
+
+    /// Apply a residual Jacobian into caller-provided storage.
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        let action = self.apply_jacobian(state, direction);
+        out.copy_from(action.as_ref());
+    }
 }
 
 impl<O: CompleteResidualOperator> MatrixFreeJacobianSource for O {
@@ -43,6 +65,15 @@ impl<O: CompleteResidualOperator> MatrixFreeJacobianSource for O {
 
     fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         CompleteResidualOperator::apply_jacobian(self, state, direction)
+    }
+
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        CompleteResidualOperator::apply_jacobian_into(self, state, direction, out)
     }
 }
 
@@ -62,6 +93,19 @@ pub trait MatrixFreeJacobianProblem: Sync {
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64>;
+
+    /// Apply a residual Jacobian into caller-provided storage.
+    fn apply_jacobian_into<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        let action = self.apply_jacobian(time, kernel, state, direction);
+        out.copy_from(action.as_ref());
+    }
 }
 
 impl<M> MatrixFreeJacobianProblem for SEM1DProblem<M>
@@ -99,6 +143,17 @@ where
     ) -> Mat<f64> {
         SEM1DProblem::apply_jacobian(self, time, kernel, state, direction)
     }
+
+    fn apply_jacobian_into<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        SEM1DProblem::apply_jacobian_into(self, time, kernel, state, direction, out)
+    }
 }
 
 impl<M> MatrixFreeJacobianProblem for SEM2DProblem<M>
@@ -135,6 +190,17 @@ where
         direction: MatRef<f64>,
     ) -> Mat<f64> {
         SEM2DProblem::apply_jacobian(self, time, kernel, state, direction)
+    }
+
+    fn apply_jacobian_into<K: ResidualKernel + Sync>(
+        &self,
+        time: f64,
+        kernel: &K,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        SEM2DProblem::apply_jacobian_into(self, time, kernel, state, direction, out)
     }
 }
 
@@ -263,6 +329,21 @@ where
         }
         action
     }
+
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        self.problem
+            .apply_jacobian_into(self.time, self.kernel, state, direction, out.rb_mut());
+        match self.fixed_jacobian.as_ref() {
+            Some(FixedJacobian::Borrowed(fixed)) => out += *fixed * direction,
+            Some(FixedJacobian::Owned(fixed)) => out += fixed.as_ref() * direction,
+            None => {}
+        }
+    }
 }
 
 /// Applies `-M^-1 J` for any matrix-free residual Jacobian source.
@@ -377,10 +458,19 @@ impl LinOp<f64> for MatrixFreeMinvJacobian<'_> {
         _par: Par,
         _stack: &mut MemStack,
     ) {
-        let action = self.source.apply_jacobian(self.state.as_ref(), rhs);
-        for column in 0..out.ncols() {
-            for row in 0..out.nrows() {
-                out[(row, column)] = -self.m_inv[row] * action[(row, column)];
+        self.source
+            .apply_jacobian_into(self.state.as_ref(), rhs, out.rb_mut());
+        let ncols = out.ncols();
+        if let Some(mut contiguous) = out.rb_mut().try_as_col_major_mut() {
+            for column in 0..ncols {
+                let input = contiguous.rb_mut().col_mut(column).as_slice_mut();
+                simd::scale_negate_in_place(input, self.m_inv);
+            }
+        } else {
+            for column in 0..ncols {
+                for row in 0..self.m_inv.len() {
+                    out[(row, column)] *= -self.m_inv[row];
+                }
             }
         }
     }

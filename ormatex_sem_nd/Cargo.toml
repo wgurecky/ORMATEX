@@ -11,6 +11,7 @@ ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" }
 rlst = "0.6"
 quadraturerules = "0.12.0"
 rayon = "1"
+pulp = "0.21.5"
 
 [dev-dependencies]
 ormatex = { path = "..", default-features = false }
@@ -30,3 +31,11 @@ path = "examples/navier-stokes/cavity.rs"
 [[example]]
 name = "navier-stokes-cavity-comp"
 path = "examples/navier-stokes/cavity_comp.rs"
+
+[[example]]
+name = "navier-stokes-cavity-comp-tensor"
+path = "examples/navier-stokes/cavity_comp_tensor.rs"
+
+[[example]]
+name = "navier-stokes-cylinder-tensor"
+path = "examples/navier-stokes/cylinder_tensor.rs"

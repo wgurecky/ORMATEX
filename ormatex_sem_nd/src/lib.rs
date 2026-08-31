@@ -8,10 +8,11 @@ pub mod kernels;
 pub mod material;
 pub mod sem_1d;
 pub mod sem_2d;
+mod simd;
 
 pub use common::{
     BoundaryContributions, BoundaryFacet, CellState, FacetCtx, LocalCtx, ShapeFn,
-    StateBoundaryContributions,
+    StateBoundaryContributions, TensorCtx, TensorFacetCtx,
 };
 pub use fields::{FieldRegistry, FieldValues};
 pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};

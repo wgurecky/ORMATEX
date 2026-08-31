@@ -33,6 +33,94 @@ pub struct LocalCtx<'a> {
     pub grads: &'a [f64],
 }
 
+/// Pointwise context for a tensor-product operator.
+///
+/// Unlike [`LocalCtx`], this context deliberately contains no basis-pair
+/// accessors. It is used between tensor-product evaluation and integration,
+/// where kernels operate on complete quadrature-point fields. It supports the
+/// 1D interval and 2D quadrilateral evaluators; the geometric dimension is
+/// inferred from the cached point and Jacobian slice lengths.
+pub struct TensorCtx<'a> {
+    /// Evaluation time for the current assembly operation.
+    pub time: f64,
+    /// Mesh metadata for the current cell.
+    pub cell: CellMeta,
+    /// Number of one-dimensional GLL nodes.
+    pub n1d: usize,
+    /// Number of quadrature points (`n1d` in 1D, `n1d * n1d` in 2D).
+    pub npts: usize,
+    /// Reference-cell quadrature weights, indexed by quadrature point.
+    pub wts: &'a [f64],
+    /// Cell Jacobian determinants, indexed by quadrature point.
+    pub jdets: &'a [f64],
+    /// Weighted physical cell measure, indexed by quadrature point.
+    pub wdet: &'a [f64],
+    /// Physical quadrature coordinates in `[quadrature_point, direction]` order.
+    pub points: &'a [f64],
+    /// One-dimensional GLL differentiation matrix in row-major order.
+    pub differentiation: &'a [f64],
+    /// Quadrature-node to finite-element local-basis permutation.
+    pub q_to_local: &'a [usize],
+    /// Physical inverse Jacobians in `[q, reference_direction, physical_direction]` order.
+    pub jinv: &'a [f64],
+    /// Square root of the physical cell measure.
+    pub cell_size: f64,
+}
+
+impl<'a> TensorCtx<'a> {
+    /// Return the geometric dimension represented by this context.
+    #[inline(always)]
+    pub fn geometric_dimension(&self) -> usize {
+        self.points.len() / self.npts
+    }
+
+    /// Return the physical coordinates of `quadrature_index`.
+    #[inline(always)]
+    pub fn point(&self, quadrature_index: usize) -> &'a [f64] {
+        let gdim = self.geometric_dimension();
+        &self.points[quadrature_index * gdim..quadrature_index * gdim + gdim]
+    }
+
+    /// Build the material-evaluation context at `quadrature_index`.
+    #[inline(always)]
+    pub fn material_context<'b>(
+        &'b self,
+        state: Option<&'b CellState<'b>>,
+        quadrature_index: usize,
+    ) -> MaterialContext<'b> {
+        MaterialContext {
+            time: self.time,
+            point: self.point(quadrature_index),
+            cell: self.cell,
+            state,
+            q: quadrature_index,
+        }
+    }
+
+    /// Build the pointwise-only local context needed by 1D flux callbacks.
+    ///
+    /// Conservation-law fluxes do not use basis-pair data. Empty basis
+    /// slices keep the adapter allocation-free while preserving time, cell,
+    /// and physical-point access.
+    #[inline(always)]
+    pub(crate) fn local_flux_context(&self) -> LocalCtx<'a> {
+        LocalCtx {
+            time: self.time,
+            cell: self.cell,
+            tdim: 1,
+            gdim: 1,
+            ncomp: 1,
+            npts: self.npts,
+            ndofs: self.n1d,
+            wts: self.wts,
+            jdets: self.jdets,
+            points: self.points,
+            values: &[],
+            grads: &[],
+        }
+    }
+}
+
 impl<'a> LocalCtx<'a> {
     /// Return the physical coordinates of `quadrature_index`.
     ///
@@ -117,6 +205,28 @@ pub struct FacetCtx<'a> {
     /// Physical facet basis gradients in
     /// `[(basis, component, geometric_direction), quadrature_point]` order.
     pub grads: &'a [f64],
+}
+
+/// Pointwise context for a tensor-product boundary evaluator.
+///
+/// It intentionally omits basis-pair data. Tensor-capable state boundary
+/// kernels return one pointwise flux/action, which the SEM layer contracts
+/// against the one-dimensional trace basis.
+pub struct TensorFacetCtx<'a> {
+    pub time: f64,
+    pub facet: FacetMeta,
+    pub npts: usize,
+    pub wts: &'a [f64],
+    pub jfacet_det: &'a [f64],
+    pub points: &'a [f64],
+    pub normal: &'a [f64],
+}
+
+impl<'a> TensorFacetCtx<'a> {
+    #[inline(always)]
+    pub fn point(&self, quadrature_index: usize) -> &'a [f64] {
+        &self.points[quadrature_index * 2..(quadrature_index + 1) * 2]
+    }
 }
 
 impl<'a> FacetCtx<'a> {
@@ -218,12 +328,14 @@ pub struct CellState<'a> {
 
 impl<'a> CellState<'a> {
     /// Return `field_index`'s interpolated value at `quadrature_index`.
+    #[inline(always)]
     pub fn value(&self, field_index: usize, quadrature_index: usize) -> f64 {
         self.values[field_index * self.npts + quadrature_index]
     }
 
     /// Return `field_index`'s physical gradient in `geometric_direction` at
     /// `quadrature_index`.
+    #[inline(always)]
     pub fn grad(
         &self,
         field_index: usize,

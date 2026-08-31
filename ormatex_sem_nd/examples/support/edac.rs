@@ -10,11 +10,51 @@ use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex_sem_nd::{
-    FieldValues, KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, MatrixFreeMinvJacobian,
-    OwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem, StateBoundaryTerms,
+    CellState, FieldValues, KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
+    MatrixFreeMinvJacobian, OwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem,
+    StateBoundaryTerms,
 };
 
 use super::linear_system::lumped_inverse_mass;
+
+/// Disables tensor hooks while retaining the same pointwise kernel behavior.
+/// Example binaries use this as a correctness and performance oracle.
+pub struct GenericResidual<K>(pub K);
+
+impl<K: ResidualKernel> ResidualKernel for GenericResidual<K> {
+    fn nfields(&self) -> usize {
+        self.0.nfields()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.0.field_names()
+    }
+
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.0.residual_integrand(ctx, state, equation, q, test_i)
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.0
+            .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum JacobianBackend {

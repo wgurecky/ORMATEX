@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
 
@@ -12,6 +12,26 @@ impl KernelMass {
 }
 
 impl BilinearForm for KernelMass {
+    fn supports_tensor_bilinear_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_bilinear(&self) -> bool {
+        true
+    }
+
+    fn tensor_bilinear(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _equation: usize,
+        _unknown: usize,
+        _q: usize,
+        trial_value: f64,
+        _trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        [trial_value, 0.0, 0.0]
+    }
+
     fn integrand(
         &self,
         ctx: &LocalCtx,
@@ -27,6 +47,43 @@ impl BilinearForm for KernelMass {
 }
 
 impl ResidualKernel for KernelMass {
+    fn supports_tensor_residual_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [state.value(0, q), 0.0, 0.0]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [direction.value(0, q), 0.0, 0.0]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

@@ -1,4 +1,4 @@
-use crate::common::{CellState, FacetCtx};
+use crate::common::{CellState, FacetCtx, TensorFacetCtx};
 
 use super::kernel_common::StateBoundaryIntegrator;
 
@@ -14,6 +14,57 @@ impl StateBoundaryIntegrator for KernelEdacSplitBoundaryFlux2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         Some(["u", "v", "p"].into_iter().map(str::to_owned).collect())
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64 {
+        let velocity = [state.value(0, q), state.value(1, q)];
+        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
+        let transported = if equation < 2 {
+            velocity[equation]
+        } else {
+            state.value(2, q)
+        };
+        0.5 * normal_velocity * transported
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64 {
+        let velocity = [state.value(0, q), state.value(1, q)];
+        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
+        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
+        let direction_normal_velocity =
+            ctx.normal[0] * direction_velocity[0] + ctx.normal[1] * direction_velocity[1];
+        let transported = if equation < 2 {
+            velocity[equation]
+        } else {
+            state.value(2, q)
+        };
+        let direction_transported = if equation < 2 {
+            direction_velocity[equation]
+        } else {
+            direction.value(2, q)
+        };
+        0.5 * (direction_normal_velocity * transported + normal_velocity * direction_transported)
     }
 
     fn residual_integrand(
@@ -166,6 +217,86 @@ impl StateBoundaryIntegrator for KernelEdacDongOutflow2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         Some(["u", "v", "p"].into_iter().map(str::to_owned).collect())
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64 {
+        let velocity = Self::velocity(state, q);
+        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
+        match equation {
+            0 | 1 => {
+                let dong_flux = self.dong_flux(ctx.normal, velocity);
+                (if self.split_flux {
+                    0.5 * normal_velocity * velocity[equation]
+                } else {
+                    0.0
+                }) - state.value(2, q) * ctx.normal[equation] / self.rho
+                    - dong_flux[equation]
+            }
+            2 => {
+                if self.split_flux {
+                    0.5 * normal_velocity * state.value(2, q)
+                } else {
+                    0.0
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64 {
+        let velocity = Self::velocity(state, q);
+        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
+        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
+        let direction_normal_velocity =
+            ctx.normal[0] * direction_velocity[0] + ctx.normal[1] * direction_velocity[1];
+        match equation {
+            0 | 1 => {
+                let split = if self.split_flux {
+                    0.5 * (direction_normal_velocity * velocity[equation]
+                        + normal_velocity * direction_velocity[equation])
+                } else {
+                    0.0
+                };
+                split
+                    - direction.value(2, q) * ctx.normal[equation] / self.rho
+                    - (0..2)
+                        .map(|unknown| {
+                            direction_velocity[unknown]
+                                * self.dong_flux_derivative(ctx.normal, velocity, equation, unknown)
+                        })
+                        .sum::<f64>()
+            }
+            2 => {
+                if self.split_flux {
+                    0.5 * (direction_normal_velocity * state.value(2, q)
+                        + normal_velocity * direction.value(2, q))
+                } else {
+                    0.0
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn residual_integrand(

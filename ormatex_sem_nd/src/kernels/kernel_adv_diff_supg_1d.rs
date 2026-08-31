@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
@@ -34,6 +34,26 @@ impl KernelAdvDiffSUPG {
 }
 
 impl BilinearForm for KernelAdvDiffSUPG {
+    fn supports_tensor_bilinear_1d(&self) -> bool {
+        true
+    }
+
+    fn tensor_bilinear(
+        &self,
+        ctx: &TensorCtx<'_>,
+        _equation: usize,
+        _unknown: usize,
+        q: usize,
+        trial_value: f64,
+        trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        let material = ctx.material_context(None, q);
+        let nu = self.nu.eval(&material);
+        let vel = self.vel.eval(&material);
+        let supg = self.tau.eval(&material) * vel * vel;
+        [0.0, (nu + supg) * trial_grad[0] - vel * trial_value, 0.0]
+    }
+
     fn integrand(
         &self,
         ctx: &LocalCtx,
@@ -58,6 +78,60 @@ impl BilinearForm for KernelAdvDiffSUPG {
 }
 
 impl ResidualKernel for KernelAdvDiffSUPG {
+    fn supports_tensor_residual_1d(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian_1d(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        let vel = self.vel.eval(&material);
+        let tau = self.tau.eval(&material);
+        [
+            0.0,
+            (nu + tau * vel * vel) * state.grad(0, q, 0) - vel * state.value(0, q),
+            0.0,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        let vel = self.vel.eval(&material);
+        let tau = self.tau.eval(&material);
+        let value = state.value(0, q);
+        let direction_value = direction.value(0, q);
+        let gradient = state.grad(0, q, 0);
+        let direction_gradient = direction.grad(0, q, 0);
+        let dnu = self.nu.derivative(&material, 0).unwrap_or(0.0);
+        let dvel = self.vel.derivative(&material, 0).unwrap_or(0.0);
+        let dtau = self.tau.derivative(&material, 0).unwrap_or(0.0);
+        [
+            0.0,
+            (nu + tau * vel * vel) * direction_gradient
+                + (dnu + dtau * vel * vel + 2.0 * tau * vel * dvel) * direction_value * gradient
+                - (vel + dvel * value) * direction_value,
+            0.0,
+        ]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

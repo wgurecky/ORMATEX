@@ -7,6 +7,13 @@ use ormatex_sem_nd::{
     StateBoundaryIntegrator,
 };
 
+#[test]
+fn dong_exposes_tensor_boundary_actions() {
+    let kernel = KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0);
+    assert!(kernel.supports_tensor_residual());
+    assert!(kernel.supports_tensor_jacobian());
+}
+
 fn context() -> LocalCtx<'static> {
     let weights = Box::leak(vec![1.0].into_boxed_slice());
     let jdets = Box::leak(vec![2.0].into_boxed_slice());

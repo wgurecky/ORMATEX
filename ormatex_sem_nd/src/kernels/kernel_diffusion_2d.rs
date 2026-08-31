@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
 use super::kernel_common::{BilinearForm, ResidualKernel};
@@ -22,6 +22,24 @@ impl KernelDiffusion2D {
 }
 
 impl BilinearForm for KernelDiffusion2D {
+    fn supports_tensor_bilinear(&self) -> bool {
+        true
+    }
+
+    fn tensor_bilinear(
+        &self,
+        ctx: &TensorCtx<'_>,
+        _equation: usize,
+        _unknown: usize,
+        q: usize,
+        _trial_value: f64,
+        trial_grad: [f64; 2],
+    ) -> [f64; 3] {
+        let material = ctx.material_context(None, q);
+        let nu = self.nu.eval(&material);
+        [0.0, nu * trial_grad[0], nu * trial_grad[1]]
+    }
+
     fn integrand(
         &self,
         ctx: &LocalCtx,
@@ -43,6 +61,45 @@ impl BilinearForm for KernelDiffusion2D {
 }
 
 impl ResidualKernel for KernelDiffusion2D {
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        [0.0, nu * state.grad(0, q, 0), nu * state.grad(0, q, 1)]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.nu.eval(&material);
+        let dnu = self.nu.derivative(&material, 0).unwrap_or(0.0);
+        let du = direction.value(0, q);
+        [
+            0.0,
+            nu * direction.grad(0, q, 0) + dnu * du * state.grad(0, q, 0),
+            nu * direction.grad(0, q, 1) + dnu * du * state.grad(0, q, 1),
+        ]
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

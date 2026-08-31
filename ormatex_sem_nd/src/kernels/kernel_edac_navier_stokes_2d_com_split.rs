@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 
 use super::kernel_common::ResidualKernel;
 use super::kernel_edac_navier_stokes_2d_com::EdacNavierStokes2DConfig;
@@ -38,6 +38,60 @@ impl ResidualKernel for KernelEdacMomentumConvectionSplit2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        let velocity = velocity(state, q);
+        let advective =
+            velocity[0] * state.grad(equation, q, 0) + velocity[1] * state.grad(equation, q, 1);
+        [
+            0.5 * advective,
+            -0.5 * velocity[0] * state.value(equation, q),
+            -0.5 * velocity[1] * state.value(equation, q),
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation >= 2 {
+            return [0.0; 3];
+        }
+        let velocity = velocity(state, q);
+        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
+        let advective = direction_velocity[0] * state.grad(equation, q, 0)
+            + direction_velocity[1] * state.grad(equation, q, 1)
+            + velocity[0] * direction.grad(equation, q, 0)
+            + velocity[1] * direction.grad(equation, q, 1);
+        [
+            0.5 * advective,
+            -0.5 * (direction_velocity[0] * state.value(equation, q)
+                + velocity[0] * direction.value(equation, q)),
+            -0.5 * (direction_velocity[1] * state.value(equation, q)
+                + velocity[1] * direction.value(equation, q)),
+        ]
     }
 
     fn residual_integrand(
@@ -146,6 +200,58 @@ impl ResidualKernel for KernelEdacPressureAdvectionSplit2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let velocity = velocity(state, q);
+        let pressure = state.value(2, q);
+        [
+            0.5 * (velocity[0] * state.grad(2, q, 0) + velocity[1] * state.grad(2, q, 1)),
+            -0.5 * velocity[0] * pressure,
+            -0.5 * velocity[1] * pressure,
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        if equation != 2 {
+            return [0.0; 3];
+        }
+        let velocity = velocity(state, q);
+        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
+        let pressure = state.value(2, q);
+        let direction_pressure = direction.value(2, q);
+        [
+            0.5 * (direction_velocity[0] * state.grad(2, q, 0)
+                + direction_velocity[1] * state.grad(2, q, 1)
+                + velocity[0] * direction.grad(2, q, 0)
+                + velocity[1] * direction.grad(2, q, 1)),
+            -0.5 * (direction_velocity[0] * pressure + velocity[0] * direction_pressure),
+            -0.5 * (direction_velocity[1] * pressure + velocity[1] * direction_pressure),
+        ]
     }
 
     fn residual_integrand(

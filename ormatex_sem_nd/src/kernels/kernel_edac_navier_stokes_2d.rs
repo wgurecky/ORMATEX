@@ -1,4 +1,4 @@
-use crate::common::{CellState, LocalCtx};
+use crate::common::{CellState, LocalCtx, TensorCtx};
 
 use super::kernel_common::ResidualKernel;
 use super::kernel_smagorinsky_lilly_2d::SmagorinskyLilly2D;
@@ -64,12 +64,28 @@ impl KernelEdacNavierStokes2D {
         self.pressure_diffusion_factor * self.c0 * self.smagorinsky.filter_width(ctx)
     }
 
+    fn pressure_diffusivity_tensor(&self, ctx: &TensorCtx<'_>) -> f64 {
+        self.pressure_diffusion_factor * self.c0 * self.smagorinsky.filter_width_tensor(ctx)
+    }
+
     fn strain_component(state: &CellState, q: usize, i: usize, j: usize) -> f64 {
         0.5 * (state.grad(i, q, j) + state.grad(j, q, i))
     }
 
     fn stress(&self, ctx: &LocalCtx, state: &CellState, q: usize, i: usize, j: usize) -> f64 {
         let viscosity = self.nu + self.smagorinsky.eddy_viscosity(ctx, state, q);
+        2.0 * viscosity * Self::strain_component(state, q, i, j)
+    }
+
+    fn stress_tensor(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        q: usize,
+        i: usize,
+        j: usize,
+    ) -> f64 {
+        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
         2.0 * viscosity * Self::strain_component(state, q, i, j)
     }
 
@@ -100,6 +116,23 @@ impl KernelEdacNavierStokes2D {
                 + (j == unknown) as usize as f64 * trial.grad(q, i));
         2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
     }
+
+    fn stress_tensor_directional_derivative(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        q: usize,
+        i: usize,
+        j: usize,
+    ) -> f64 {
+        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
+        let dviscosity = self
+            .smagorinsky
+            .eddy_viscosity_directional_derivative(ctx, state, direction, q);
+        let dstrain = 0.5 * (direction.grad(i, q, j) + direction.grad(j, q, i));
+        2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
+    }
 }
 
 impl ResidualKernel for KernelEdacNavierStokes2D {
@@ -109,6 +142,89 @@ impl ResidualKernel for KernelEdacNavierStokes2D {
 
     fn field_names(&self) -> Option<Vec<String>> {
         Some(["u", "v", "p"].into_iter().map(str::to_owned).collect())
+    }
+
+    fn supports_tensor_residual(&self) -> bool {
+        true
+    }
+
+    fn supports_tensor_jacobian(&self) -> bool {
+        true
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let velocity = Self::velocity(state, q);
+        match equation {
+            0 | 1 => {
+                let convection = velocity[0] * state.grad(equation, q, 0)
+                    + velocity[1] * state.grad(equation, q, 1);
+                [
+                    convection + state.grad(2, q, equation) / self.rho,
+                    self.stress_tensor(ctx, state, q, equation, 0),
+                    self.stress_tensor(ctx, state, q, equation, 1),
+                ]
+            }
+            2 => {
+                let divergence = state.grad(0, q, 0) + state.grad(1, q, 1);
+                let pressure_advection =
+                    velocity[0] * state.grad(2, q, 0) + velocity[1] * state.grad(2, q, 1);
+                let pressure_diffusivity = self.pressure_diffusivity_tensor(ctx);
+                [
+                    self.rho * self.c0 * self.c0 * divergence + pressure_advection,
+                    pressure_diffusivity * state.grad(2, q, 0),
+                    pressure_diffusivity * state.grad(2, q, 1),
+                ]
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let velocity = Self::velocity(state, q);
+        match equation {
+            0 | 1 => {
+                let convection = direction.value(0, q) * state.grad(equation, q, 0)
+                    + direction.value(1, q) * state.grad(equation, q, 1)
+                    + velocity[0] * direction.grad(equation, q, 0)
+                    + velocity[1] * direction.grad(equation, q, 1);
+                [
+                    convection + direction.grad(2, q, equation) / self.rho,
+                    self.stress_tensor_directional_derivative(
+                        ctx, state, direction, q, equation, 0,
+                    ),
+                    self.stress_tensor_directional_derivative(
+                        ctx, state, direction, q, equation, 1,
+                    ),
+                ]
+            }
+            2 => {
+                let divergence = direction.grad(0, q, 0) + direction.grad(1, q, 1);
+                let pressure_advection = direction.value(0, q) * state.grad(2, q, 0)
+                    + direction.value(1, q) * state.grad(2, q, 1)
+                    + velocity[0] * direction.grad(2, q, 0)
+                    + velocity[1] * direction.grad(2, q, 1);
+                let pressure_diffusivity = self.pressure_diffusivity_tensor(ctx);
+                [
+                    self.rho * self.c0 * self.c0 * divergence + pressure_advection,
+                    pressure_diffusivity * direction.grad(2, q, 0),
+                    pressure_diffusivity * direction.grad(2, q, 1),
+                ]
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn residual_integrand(
