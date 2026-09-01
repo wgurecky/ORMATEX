@@ -8,9 +8,12 @@ use ndmesh::{
 };
 use ormatex_sem_nd::{
     BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, FieldRegistry, KernelAdvDiff2D,
-    KernelAdvDiffSUPG2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
-    StateTensorBoundaryTerms, TensorKernelAdvDiff2D, TensorKernelEdacDongOutflow2D,
-    TensorKernelEdacNavierStokes2D, TensorKernelEdacSplitBoundaryFlux2D,
+    KernelAdvDiffSUPG2D, KernelEdacDirectionalDoNothing2D, KernelEdacNoSlipWall2D,
+    KernelEdacSlipWall2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
+    StateTensorBoundaryTerms,
+    TensorKernelAdvDiff2D, TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
+    TensorKernelEdacNavierStokes2D, TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D,
+    TensorKernelEdacSplitBoundaryFlux2D,
 };
 use ormatex_sem_nd::{
     ConstantCoefficient, KernelEdacDongOutflow2D, KernelEdacNavierStokes2D,
@@ -513,6 +516,57 @@ fn tensor_state_boundary_operator_matches_weak_boundary_path() {
     let tensor_dong_action = tensor_dong.apply_jacobian(state.as_ref(), direction.as_ref());
     for row in 0..problem.system_size() {
         assert!((weak_dong_action[(row, 0)] - tensor_dong_action[(row, 0)]).abs() < 1e-10);
+    }
+
+    let weak_directional_terms = StateBoundaryTerms::new()
+        .with_default(KernelEdacDirectionalDoNothing2D::new(1.0).with_split_flux());
+    let tensor_directional_terms = StateTensorBoundaryTerms::new()
+        .with_default(TensorKernelEdacDirectionalDoNothing2D::new(1.0).with_split_flux());
+    let weak_directional = problem
+        .residual_operator(&weak_kernel)
+        .with_state_boundary(&weak_directional_terms);
+    let tensor_directional = problem
+        .tensor_residual_operator(&tensor_kernel)
+        .with_state_boundary(&tensor_directional_terms);
+    let weak_directional_residual = weak_directional.residual(state.as_ref());
+    let tensor_directional_residual = tensor_directional.residual(state.as_ref());
+    for (weak, tensor) in weak_directional_residual
+        .iter()
+        .zip(tensor_directional_residual)
+    {
+        assert!((weak - tensor).abs() < 1e-10);
+    }
+    let weak_directional_action =
+        weak_directional.apply_jacobian(state.as_ref(), direction.as_ref());
+    let tensor_directional_action =
+        tensor_directional.apply_jacobian(state.as_ref(), direction.as_ref());
+    for row in 0..problem.system_size() {
+        assert!(
+            (weak_directional_action[(row, 0)] - tensor_directional_action[(row, 0)]).abs() < 1e-10
+        );
+    }
+
+    let weak_wall_terms = StateBoundaryTerms::new()
+        .with_default(KernelEdacSlipWall2D::new())
+        .with_entities([0], KernelEdacNoSlipWall2D::new());
+    let tensor_wall_terms = StateTensorBoundaryTerms::new()
+        .with_default(TensorKernelEdacSlipWall2D::new())
+        .with_entities([0], TensorKernelEdacNoSlipWall2D::new());
+    let weak_wall = problem
+        .residual_operator(&weak_kernel)
+        .with_state_boundary(&weak_wall_terms);
+    let tensor_wall = problem
+        .tensor_residual_operator(&tensor_kernel)
+        .with_state_boundary(&tensor_wall_terms);
+    let weak_wall_residual = weak_wall.residual(state.as_ref());
+    let tensor_wall_residual = tensor_wall.residual(state.as_ref());
+    for (weak, tensor) in weak_wall_residual.iter().zip(tensor_wall_residual) {
+        assert!((weak - tensor).abs() < 1e-10);
+    }
+    let weak_wall_action = weak_wall.apply_jacobian(state.as_ref(), direction.as_ref());
+    let tensor_wall_action = tensor_wall.apply_jacobian(state.as_ref(), direction.as_ref());
+    for row in 0..problem.system_size() {
+        assert!((weak_wall_action[(row, 0)] - tensor_wall_action[(row, 0)]).abs() < 1e-10);
     }
 }
 

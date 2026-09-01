@@ -10,9 +10,11 @@ use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex_sem_nd::{
-    CellState, FieldValues, KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
+    CellState, FieldValues, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
+    KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
     MatrixFreeMinvJacobian, OwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem,
-    StateBoundaryTerms, StateTensorBoundaryTerms, TensorKernelEdacDongOutflow2D,
+    StateBoundaryTerms, StateTensorBoundaryTerms, TensorKernelEdacDirectionalDoNothing2D,
+    TensorKernelEdacDongOutflow2D, TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D,
     TensorKernelEdacSplitBoundaryFlux2D, TensorResidualKernel,
 };
 
@@ -179,6 +181,14 @@ impl<'a, K> FluidSystem<'a, K> {
         )
     }
 
+    pub fn with_wall_boundaries(self, no_slip_facets: Vec<usize>, slip_facets: Vec<usize>) -> Self {
+        let terms = StateBoundaryTerms::new()
+            .with_default(KernelEdacSplitBoundaryFlux2D)
+            .with_entities(no_slip_facets, KernelEdacNoSlipWall2D)
+            .with_entities(slip_facets, KernelEdacSlipWall2D);
+        self.with_state_boundary(terms)
+    }
+
     pub fn with_dong_outflow(
         self,
         kernel: KernelEdacDongOutflow2D,
@@ -188,6 +198,27 @@ impl<'a, K> FluidSystem<'a, K> {
         assert!(
             !facets.is_empty(),
             "Dong outflow requires at least one facet"
+        );
+        let terms = if split_form {
+            self.terms
+                .clone()
+                .with_default(KernelEdacSplitBoundaryFlux2D)
+                .with_entities(facets, kernel.with_split_flux())
+        } else {
+            self.terms.clone().with_entities(facets, kernel)
+        };
+        self.with_state_boundary(terms)
+    }
+
+    pub fn with_directional_do_nothing_outflow(
+        self,
+        kernel: KernelEdacDirectionalDoNothing2D,
+        facets: Vec<usize>,
+        split_form: bool,
+    ) -> Self {
+        assert!(
+            !facets.is_empty(),
+            "directional do-nothing outflow requires at least one facet"
         );
         let terms = if split_form {
             StateBoundaryTerms::new()
@@ -227,6 +258,14 @@ impl<'a, K> TensorFluidSystem<'a, K> {
         )
     }
 
+    pub fn with_wall_boundaries(self, no_slip_facets: Vec<usize>, slip_facets: Vec<usize>) -> Self {
+        let terms = StateTensorBoundaryTerms::new()
+            .with_default(TensorKernelEdacSplitBoundaryFlux2D)
+            .with_entities(no_slip_facets, TensorKernelEdacNoSlipWall2D)
+            .with_entities(slip_facets, TensorKernelEdacSlipWall2D);
+        self.with_state_boundary(terms)
+    }
+
     pub fn with_dong_outflow(
         self,
         kernel: TensorKernelEdacDongOutflow2D,
@@ -236,6 +275,27 @@ impl<'a, K> TensorFluidSystem<'a, K> {
         assert!(
             !facets.is_empty(),
             "Dong outflow requires at least one facet"
+        );
+        let terms = if split_form {
+            self.terms
+                .clone()
+                .with_default(TensorKernelEdacSplitBoundaryFlux2D)
+                .with_entities(facets, kernel.with_split_flux())
+        } else {
+            self.terms.clone().with_entities(facets, kernel)
+        };
+        self.with_state_boundary(terms)
+    }
+
+    pub fn with_directional_do_nothing_outflow(
+        self,
+        kernel: TensorKernelEdacDirectionalDoNothing2D,
+        facets: Vec<usize>,
+        split_form: bool,
+    ) -> Self {
+        assert!(
+            !facets.is_empty(),
+            "directional do-nothing outflow requires at least one facet"
         );
         let terms = if split_form {
             StateTensorBoundaryTerms::new()

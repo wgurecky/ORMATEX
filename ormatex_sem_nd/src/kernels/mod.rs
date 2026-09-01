@@ -13,6 +13,7 @@ pub mod kernel_edac_dong_outflow_2d;
 pub mod kernel_edac_navier_stokes_2d;
 pub mod kernel_edac_navier_stokes_2d_com;
 pub mod kernel_edac_navier_stokes_2d_com_split;
+pub mod kernel_edac_wall_2d;
 pub mod kernel_linear_reaction;
 pub mod kernel_mass;
 pub mod kernel_neumann_flux;
@@ -34,7 +35,8 @@ pub use kernel_conservation_law_1d::{KernelConservationLaw1D, TensorKernelConser
 pub use kernel_diffusion_1d::{KernelDiffusion, TensorKernelDiffusion};
 pub use kernel_diffusion_2d::{KernelDiffusion2D, TensorKernelDiffusion2D};
 pub use kernel_edac_dong_outflow_2d::{
-    KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, TensorKernelEdacDongOutflow2D,
+    KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D,
+    TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
     TensorKernelEdacSplitBoundaryFlux2D,
 };
 pub use kernel_edac_navier_stokes_2d::{KernelEdacNavierStokes2D, TensorKernelEdacNavierStokes2D};
@@ -49,6 +51,10 @@ pub use kernel_edac_navier_stokes_2d_com::{
 pub use kernel_edac_navier_stokes_2d_com_split::{
     KernelEdacMomentumConvectionSplit2D, KernelEdacPressureAdvectionSplit2D,
     TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacPressureAdvectionSplit2D,
+};
+pub use kernel_edac_wall_2d::{
+    KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, TensorKernelEdacNoSlipWall2D,
+    TensorKernelEdacSlipWall2D,
 };
 pub use kernel_linear_reaction::{KernelLinearReaction, TensorKernelLinearReaction};
 pub use kernel_mass::{KernelMass, TensorKernelMass};

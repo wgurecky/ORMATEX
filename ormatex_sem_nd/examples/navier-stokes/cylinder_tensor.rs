@@ -8,10 +8,10 @@ use faer::prelude::*;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex_sem_nd::{
     gmsh_quad_data, DofReduction2D, EdacNavierStokes2DConfig, FieldRegistry,
-    KernelEdacDongOutflow2D, KernelEdacMomentumConvectionSplit2D,
+    KernelEdacDirectionalDoNothing2D, KernelEdacMomentumConvectionSplit2D,
     KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
     KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacViscousStress2D,
-    MeshMetadata, ResidualKernelSum, SEM2DProblem, TensorKernelEdacDongOutflow2D,
+    MeshMetadata, ResidualKernelSum, SEM2DProblem, TensorKernelEdacDirectionalDoNothing2D,
     TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacPressureAdvectionSplit2D,
     TensorKernelEdacPressureDiffusion2D, TensorKernelEdacPressureDivergence2D,
     TensorKernelEdacPressureGradient2D, TensorKernelEdacViscousStress2D, TensorResidualKernel,
@@ -75,7 +75,14 @@ fn split_kernel() -> ResidualKernelSum<'static> {
         .with(KernelEdacPressureDiffusion2D::new(config))
 }
 
-fn problem_and_outlet(dong: bool) -> (SEM2DProblem<ormatex_sem_nd::QuadMesh>, Vec<usize>) {
+fn problem_and_outlet(
+    directional: bool,
+) -> (
+    SEM2DProblem<ormatex_sem_nd::QuadMesh>,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<usize>,
+) {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/navier-stokes/cylinder.msh"
@@ -91,7 +98,7 @@ fn problem_and_outlet(dong: bool) -> (SEM2DProblem<ormatex_sem_nd::QuadMesh>, Ve
     let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, 1.0)).collect();
     let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
     let wall_u: Vec<_> = cylinder.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let symmetry: Vec<_> = metadata
+    let slip_wall: Vec<_> = metadata
         .facet_regions
         .iter()
         .enumerate()
@@ -104,7 +111,7 @@ fn problem_and_outlet(dong: bool) -> (SEM2DProblem<ormatex_sem_nd::QuadMesh>, Ve
     let wall_v: Vec<_> = cylinder
         .iter()
         .copied()
-        .chain(symmetry)
+        .chain(slip_wall.iter().copied())
         .map(|facet| (facet, 0.0))
         .collect();
     let outlet_p: Vec<_> = outlet.iter().copied().map(|facet| (facet, 0.0)).collect();
@@ -128,7 +135,7 @@ fn problem_and_outlet(dong: bool) -> (SEM2DProblem<ormatex_sem_nd::QuadMesh>, Ve
                         .copied()
                         .collect::<Vec<_>>(),
                 ),
-                if dong {
+                if directional {
                     DofReduction2D::None
                 } else {
                     dirichlet(&outlet_p)
@@ -137,7 +144,7 @@ fn problem_and_outlet(dong: bool) -> (SEM2DProblem<ormatex_sem_nd::QuadMesh>, Ve
         },
         metadata,
     );
-    (problem, outlet)
+    (problem, outlet, cylinder, slip_wall)
 }
 
 fn advance_measured<'a, S>(
@@ -168,18 +175,19 @@ fn max_state_difference(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> f64 {
 }
 
 fn main() {
-    let dong = std::env::args().any(|arg| arg == "--dong");
-    let (problem, outlet) = problem_and_outlet(dong);
+    let directional = std::env::args().any(|arg| arg == "--directional");
+    let (problem, outlet, cylinder, slip_wall) = problem_and_outlet(directional);
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
 
-    let tensor_system = if dong {
+    let tensor_system = if directional {
         TensorFluidSystem::new_with_backend(
             &problem,
             tensor_split_kernel(),
             JacobianBackend::MatrixFree,
         )
-        .with_dong_outflow(
-            TensorKernelEdacDongOutflow2D::new(1.0, 0.05, 1.0),
+        .with_wall_boundaries(cylinder.clone(), slip_wall.clone())
+        .with_directional_do_nothing_outflow(
+            TensorKernelEdacDirectionalDoNothing2D::new(1.0),
             outlet.clone(),
             true,
         )
@@ -189,25 +197,30 @@ fn main() {
             tensor_split_kernel(),
             JacobianBackend::MatrixFree,
         )
-        .with_split_boundary()
+        .with_wall_boundaries(cylinder.clone(), slip_wall.clone())
     };
     let (tensor_state, tensor_runtime) =
         advance_measured(&tensor_system, state0.as_ref(), 0.05, 100);
 
-    let generic_system = if dong {
+    let generic_system = if directional {
         FluidSystem::new_with_backend(
             &problem,
             GenericResidual(split_kernel()),
             JacobianBackend::MatrixFree,
         )
-        .with_dong_outflow(KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0), outlet, true)
+        .with_wall_boundaries(cylinder, slip_wall)
+        .with_directional_do_nothing_outflow(
+            KernelEdacDirectionalDoNothing2D::new(1.0),
+            outlet,
+            true,
+        )
     } else {
         FluidSystem::new_with_backend(
             &problem,
             GenericResidual(split_kernel()),
             JacobianBackend::MatrixFree,
         )
-        .with_split_boundary()
+        .with_wall_boundaries(cylinder, slip_wall)
     };
     let (generic_state, generic_runtime) =
         advance_measured(&generic_system, state0.as_ref(), 0.05, 100);
@@ -290,7 +303,7 @@ fn main() {
 
     let speedup = generic_runtime.as_secs_f64() / tensor_runtime.as_secs_f64();
     println!(
-        "cylinder tensor comparison (dong={dong}): max |tensor-generic|={max_difference:.3e}, tensor={tensor_runtime:?}, generic={generic_runtime:?}, speedup={speedup:.2}x"
+        "cylinder tensor comparison (directional={directional}): max |tensor-generic|={max_difference:.3e}, tensor={tensor_runtime:?}, generic={generic_runtime:?}, speedup={speedup:.2}x"
     );
     println!(
         "tensor result: target/navier_stokes_cylinder_tensor.csv (compare with cylinder.rs output)"

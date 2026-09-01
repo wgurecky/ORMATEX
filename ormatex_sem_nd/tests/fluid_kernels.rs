@@ -1,16 +1,115 @@
 use ormatex_sem_nd::{
-    CellState, EdacNavierStokes2DConfig, FacetCtx, KernelEdacDongOutflow2D,
-    KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit2D, KernelEdacNavierStokes2D,
-    KernelEdacPressureAdvection2D, KernelEdacPressureAdvectionSplit2D,
-    KernelEdacPressureDiffusion2D, KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D,
+    CellState, EdacNavierStokes2DConfig, FacetCtx, KernelEdacDirectionalDoNothing2D,
+    KernelEdacDongOutflow2D, KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit2D,
+    KernelEdacNavierStokes2D, KernelEdacNoSlipWall2D, KernelEdacPressureAdvection2D,
+    KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
+    KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacSlipWall2D,
     KernelEdacViscousStress2D, LocalCtx, ResidualKernel, ResidualKernelSum, SmagorinskyLilly2D,
-    StateBoundaryIntegrator, StateTensorBoundaryIntegrator, TensorKernelEdacDongOutflow2D,
+    StateBoundaryIntegrator, StateTensorBoundaryIntegrator, TensorKernelEdacDirectionalDoNothing2D,
+    TensorKernelEdacDongOutflow2D, TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D,
 };
 
 #[test]
 fn dong_exposes_tensor_boundary_actions() {
     fn tensor_boundary(_: &dyn StateTensorBoundaryIntegrator<2>) {}
     tensor_boundary(&TensorKernelEdacDongOutflow2D::new(1.0, 0.05, 1.0));
+    tensor_boundary(&TensorKernelEdacDirectionalDoNothing2D::new(1.0));
+    tensor_boundary(&TensorKernelEdacNoSlipWall2D::new());
+    tensor_boundary(&TensorKernelEdacSlipWall2D::new());
+}
+
+#[test]
+fn wall_kernels_are_zero_natural_closures() {
+    let ctx = facet_context([0.6, 0.8]);
+    let state = state([0.4, -0.2, 0.3], [0.0; 6]);
+    let no_slip = KernelEdacNoSlipWall2D::new();
+    let slip = KernelEdacSlipWall2D::new();
+    let kernels: [&dyn StateBoundaryIntegrator; 2] = [&no_slip, &slip];
+
+    for kernel in kernels {
+        assert_eq!(kernel.nfields(), 3);
+        for equation in 0..3 {
+            assert!(
+                kernel
+                    .residual_integrand(&ctx, &state, equation, 0, 0)
+                    .abs()
+                    < 1e-12
+            );
+            for unknown in 0..3 {
+                assert!(
+                    kernel
+                        .jacobian_integrand(&ctx, &state, equation, unknown, 0, 0, 0)
+                        .abs()
+                        < 1e-12
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn directional_do_nothing_jacobian_matches_directional_difference() {
+    let direction = [0.2, -0.3, 0.5];
+    let eps = 1e-7;
+
+    for (normal, values, split_flux) in [
+        ([1.0, 0.0], [-0.4, 0.2, 0.3], false),
+        ([1.0, 0.0], [-0.4, 0.2, 0.3], true),
+        ([1.0, 0.0], [0.4, 0.2, 0.3], false),
+        ([1.0, 0.0], [0.4, 0.2, 0.3], true),
+        ([0.6, 0.8], [-0.4, 0.1, 0.3], true),
+        ([0.6, 0.8], [0.4, 0.2, 0.3], true),
+    ] {
+        let ctx = facet_context(normal);
+        let kernel = if split_flux {
+            KernelEdacDirectionalDoNothing2D::new(1.0).with_split_flux()
+        } else {
+            KernelEdacDirectionalDoNothing2D::new(1.0)
+        };
+        let base = state(values, [0.0; 6]);
+        let perturbed = state(
+            [
+                values[0] + eps * direction[0],
+                values[1] + eps * direction[1],
+                values[2] + eps * direction[2],
+            ],
+            [0.0; 6],
+        );
+        for equation in 0..3 {
+            let finite_difference = (kernel.residual_integrand(&ctx, &perturbed, equation, 0, 0)
+                - kernel.residual_integrand(&ctx, &base, equation, 0, 0))
+                / eps;
+            let analytic = (0..3)
+                .map(|unknown| {
+                    direction[unknown]
+                        * kernel.jacobian_integrand(&ctx, &base, equation, unknown, 0, 0, 0)
+                })
+                .sum::<f64>();
+            assert!(
+                (finite_difference - analytic).abs() < 1e-6,
+                "directional do-nothing Jacobian mismatch for split={split_flux}, equation {equation}: {finite_difference} != {analytic}"
+            );
+        }
+    }
+}
+
+#[test]
+fn directional_do_nothing_has_expected_traction_signs() {
+    let ctx = facet_context([1.0, 0.0]);
+    let outflow = state([0.4, 0.2, 0.6], [0.0; 6]);
+    let backflow = state([-0.4, 0.2, 0.6], [0.0; 6]);
+    let unsplit = KernelEdacDirectionalDoNothing2D::new(2.0);
+    let split = KernelEdacDirectionalDoNothing2D::new(2.0).with_split_flux();
+
+    assert!((unsplit.residual_integrand(&ctx, &outflow, 0, 0, 0) + 0.3).abs() < 1e-12);
+    assert!(unsplit.residual_integrand(&ctx, &outflow, 1, 0, 0).abs() < 1e-12);
+    assert!(unsplit.residual_integrand(&ctx, &outflow, 2, 0, 0).abs() < 1e-12);
+    assert!((unsplit.residual_integrand(&ctx, &backflow, 0, 0, 0) + 0.38).abs() < 1e-12);
+    assert!((unsplit.residual_integrand(&ctx, &backflow, 1, 0, 0) - 0.04).abs() < 1e-12);
+
+    assert!((split.residual_integrand(&ctx, &backflow, 0, 0, 0) + 0.3).abs() < 1e-12);
+    assert!(split.residual_integrand(&ctx, &backflow, 1, 0, 0).abs() < 1e-12);
+    assert!((split.residual_integrand(&ctx, &backflow, 2, 0, 0) + 0.12).abs() < 1e-12);
 }
 
 fn context() -> LocalCtx<'static> {
@@ -45,12 +144,12 @@ fn state(values: [f64; 3], grads: [f64; 6]) -> CellState<'static> {
     }
 }
 
-fn facet_context() -> FacetCtx<'static> {
+fn facet_context(normal: [f64; 2]) -> FacetCtx<'static> {
     let weights = Box::leak(vec![1.0].into_boxed_slice());
     let jdet = Box::leak(vec![1.0].into_boxed_slice());
     let points = Box::leak(vec![0.0, 0.0].into_boxed_slice());
     let values = Box::leak(vec![1.0].into_boxed_slice());
-    let normal = Box::leak(vec![1.0, 0.0].into_boxed_slice());
+    let normal = Box::leak(Box::new(normal));
     FacetCtx {
         time: 0.0,
         facet: Default::default(),
@@ -177,7 +276,7 @@ fn split_edac_jacobians_match_directional_difference() {
 
 #[test]
 fn dong_outflow_jacobian_matches_directional_difference() {
-    let ctx = facet_context();
+    let ctx = facet_context([1.0, 0.0]);
     let kernel = KernelEdacDongOutflow2D::new(1.0, 0.1, 1.0);
     let base = state([0.4, 0.2, 0.3], [0.0; 6]);
     let direction = [0.2, -0.3, 0.5];

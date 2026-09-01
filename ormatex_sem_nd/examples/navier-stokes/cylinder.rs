@@ -7,7 +7,7 @@ use faer::prelude::*;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
     gmsh_quad_data, DofReduction2D, EdacNavierStokes2DConfig, FieldRegistry,
-    KernelEdacDongOutflow2D, KernelEdacMomentumConvectionSplit2D,
+    KernelEdacDirectionalDoNothing2D, KernelEdacMomentumConvectionSplit2D,
     KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
     KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacViscousStress2D,
     MeshMetadata, ResidualKernelSum, SEM2DProblem,
@@ -59,7 +59,7 @@ fn split_kernel() -> ResidualKernelSum<'static> {
 }
 
 fn main() {
-    let dong = std::env::args().any(|arg| arg == "--dong");
+    let directional = std::env::args().any(|arg| arg == "--directional");
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/navier-stokes/cylinder.msh"
@@ -73,12 +73,12 @@ fn main() {
     assert!(!inlet.is_empty() && !outlet.is_empty() && !cylinder.is_empty());
 
     // Prescribe the free-stream velocity at the inlet. The default outlet uses
-    // a pressure reference; --dong replaces it with a split EDAC OBC-C outlet.
+    // a pressure reference; --directional replaces it with a split DDN outlet.
     let u_in = 1.0;
     let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, u_in)).collect();
     let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
     let wall_u: Vec<_> = cylinder.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let symmetry: Vec<_> = metadata
+    let slip_wall: Vec<_> = metadata
         .facet_regions
         .iter()
         .enumerate()
@@ -91,7 +91,7 @@ fn main() {
     let wall_v: Vec<_> = cylinder
         .iter()
         .copied()
-        .chain(symmetry)
+        .chain(slip_wall.iter().copied())
         .map(|facet| (facet, 0.0))
         .collect();
     let outlet_p: Vec<_> = outlet.iter().copied().map(|facet| (facet, 0.0)).collect();
@@ -115,7 +115,7 @@ fn main() {
                         .copied()
                         .collect::<Vec<_>>(),
                 ),
-                if dong {
+                if directional {
                     DofReduction2D::None
                 } else {
                     dirichlet(&outlet_p)
@@ -125,14 +125,16 @@ fn main() {
         metadata,
     );
 
-    let system = if dong {
-        FluidSystem::new(&problem, split_kernel()).with_dong_outflow(
-            KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0),
-            outlet,
-            true,
-        )
+    let system = if directional {
+        FluidSystem::new(&problem, split_kernel())
+            .with_wall_boundaries(cylinder.clone(), slip_wall.clone())
+            .with_directional_do_nothing_outflow(
+                KernelEdacDirectionalDoNothing2D::new(1.0),
+                outlet,
+                true,
+            )
     } else {
-        FluidSystem::new(&problem, split_kernel()).with_split_boundary()
+        FluidSystem::new(&problem, split_kernel()).with_wall_boundaries(cylinder, slip_wall)
     };
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let dt = 0.005;
