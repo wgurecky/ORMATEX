@@ -1,6 +1,6 @@
 use crate::common::{CellState, LocalCtx, TensorCtx};
 
-use super::kernel_common::{BilinearForm, ResidualKernel};
+use super::kernel_common::{BilinearForm, ResidualKernel, TensorResidualKernel};
 
 /// Scalar mass kernel: integral of `u * v`.
 pub struct KernelMass {}
@@ -47,43 +47,6 @@ impl BilinearForm for KernelMass {
 }
 
 impl ResidualKernel for KernelMass {
-    fn supports_tensor_residual_1d(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian_1d(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_residual(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian(&self) -> bool {
-        true
-    }
-
-    fn tensor_residual(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        [state.value(0, q), 0.0, 0.0]
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        _state: &CellState<'_>,
-        direction: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        [direction.value(0, q), 0.0, 0.0]
-    }
-
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -106,5 +69,36 @@ impl ResidualKernel for KernelMass {
         trial_i: usize,
     ) -> f64 {
         ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
+    }
+}
+
+/// Tensor-product mass kernel.
+pub struct TensorKernelMass(pub KernelMass);
+
+impl TensorKernelMass {
+    pub fn new() -> Self {
+        Self(KernelMass::new())
+    }
+}
+
+impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorKernelMass {
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [state.value(0, q), 0.0, 0.0]
+    }
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [direction.value(0, q), 0.0, 0.0]
     }
 }

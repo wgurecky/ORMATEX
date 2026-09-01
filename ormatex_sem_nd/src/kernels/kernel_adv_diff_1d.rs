@@ -1,7 +1,7 @@
 use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
-use super::kernel_common::{BilinearForm, ResidualKernel};
+use super::kernel_common::{BilinearForm, ResidualKernel, TensorResidualKernel};
 
 /// 1D advection-diffusion kernel.
 pub struct KernelAdvDiff {
@@ -69,55 +69,6 @@ impl BilinearForm for KernelAdvDiff {
 }
 
 impl ResidualKernel for KernelAdvDiff {
-    fn supports_tensor_residual_1d(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian_1d(&self) -> bool {
-        true
-    }
-
-    fn tensor_residual(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        [
-            0.0,
-            self.nu.eval(&material) * state.grad(0, q, 0)
-                - self.vel.eval(&material) * state.value(0, q),
-            0.0,
-        ]
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        let value = state.value(0, q);
-        let direction_value = direction.value(0, q);
-        let nu = self.nu.eval(&material);
-        let vel = self.vel.eval(&material);
-        [
-            0.0,
-            nu * direction.grad(0, q, 0)
-                + self.nu.derivative(&material, 0).unwrap_or(0.0)
-                    * direction_value
-                    * state.grad(0, q, 0)
-                - (vel + self.vel.derivative(&material, 0).unwrap_or(0.0) * value)
-                    * direction_value,
-            0.0,
-        ]
-    }
-
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -154,5 +105,63 @@ impl ResidualKernel for KernelAdvDiff {
             + dnu * ctx.trial(trial_i, 0).v(q) * state.grad(0, q, 0))
             * test_grad
             - (vel + dvel * state.value(0, q)) * ctx.trial(trial_i, 0).v(q) * test_grad
+    }
+}
+
+/// Tensor-product 1D advection-diffusion kernel.
+pub struct TensorKernelAdvDiff(pub KernelAdvDiff);
+
+impl TensorKernelAdvDiff {
+    pub fn new(nu: f64, vel: f64) -> Self {
+        Self(KernelAdvDiff::new(nu, vel))
+    }
+    pub fn with_coefficients<N, V>(nu: N, vel: V) -> Self
+    where
+        N: MaterialProperty<f64> + 'static,
+        V: MaterialProperty<f64> + 'static,
+    {
+        Self(KernelAdvDiff::with_coefficients(nu, vel))
+    }
+}
+
+impl TensorResidualKernel<1> for TensorKernelAdvDiff {
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        [
+            0.0,
+            self.0.nu.eval(&material) * state.grad(0, q, 0)
+                - self.0.vel.eval(&material) * state.value(0, q),
+            0.0,
+        ]
+    }
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let value = state.value(0, q);
+        let direction_value = direction.value(0, q);
+        let nu = self.0.nu.eval(&material);
+        let vel = self.0.vel.eval(&material);
+        [
+            0.0,
+            nu * direction.grad(0, q, 0)
+                + self.0.nu.derivative(&material, 0).unwrap_or(0.0)
+                    * direction_value
+                    * state.grad(0, q, 0)
+                - (vel + self.0.vel.derivative(&material, 0).unwrap_or(0.0) * value)
+                    * direction_value,
+            0.0,
+        ]
     }
 }

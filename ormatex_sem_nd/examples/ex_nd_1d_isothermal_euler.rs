@@ -8,7 +8,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
-    DofReduction1D, FieldRegistry, KernelConservationLaw1D, MatrixFreeMinvJacobian, SEM1DProblem,
+    DofReduction1D, FieldRegistry, MatrixFreeMinvJacobian, SEM1DProblem,
+    TensorKernelConservationLaw1D,
 };
 
 #[path = "support/isothermal_euler.rs"]
@@ -22,14 +23,14 @@ type IntervalMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>
 
 struct IsothermalEulerSystem<'a> {
     problem: &'a SEM1DProblem<IntervalMesh>,
-    kernel: KernelConservationLaw1D<IsothermalEuler1D>,
+    kernel: TensorKernelConservationLaw1D<IsothermalEuler1D>,
     m_inv: Vec<f64>,
 }
 
 impl<'a> IsothermalEulerSystem<'a> {
     fn new(
         problem: &'a SEM1DProblem<IntervalMesh>,
-        kernel: KernelConservationLaw1D<IsothermalEuler1D>,
+        kernel: TensorKernelConservationLaw1D<IsothermalEuler1D>,
     ) -> Self {
         let mass = problem.assemble_lumped_mass();
         let m_inv = lumped_inverse_mass(mass.as_ref());
@@ -43,7 +44,11 @@ impl<'a> IsothermalEulerSystem<'a> {
 
 impl<'a> OdeSys<'a> for IsothermalEulerSystem<'a> {
     fn frhs(&self, _t: f64, state: MatRef<f64>) -> Mat<f64> {
-        let residual = self.problem.assemble_residual(_t, &self.kernel, state);
+        let residual = self
+            .problem
+            .tensor_residual_operator(&self.kernel)
+            .at_time(_t)
+            .residual(state);
         Mat::from_fn(self.m_inv.len(), 1, |row, _| {
             -self.m_inv[row] * residual[row]
         })
@@ -54,12 +59,11 @@ impl<'a> OdeSys<'a> for IsothermalEulerSystem<'a> {
         t: f64,
         state: MatRef<'b, f64>,
     ) -> Box<dyn faer::matrix_free::LinOp<f64> + 'a> {
-        Box::new(MatrixFreeMinvJacobian::new_at(
-            t,
-            self.problem,
-            &self.kernel,
+        Box::new(MatrixFreeMinvJacobian::new(
+            self.problem
+                .tensor_residual_operator(&self.kernel)
+                .at_time(t),
             state.to_owned(),
-            None,
             &self.m_inv,
         ))
     }
@@ -81,7 +85,7 @@ fn main() {
         FieldRegistry::new(["u", "rho"]),
         DofReduction1D::Periodic { facets: [0, nx] },
     );
-    let kernel = KernelConservationLaw1D::new(IsothermalEuler1D::new(sound_speed));
+    let kernel = TensorKernelConservationLaw1D::new(IsothermalEuler1D::new(sound_speed));
     let system = IsothermalEulerSystem::new(&problem, kernel);
     let n = problem.reduced_size();
     let x = problem.dof_positions();

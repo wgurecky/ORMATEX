@@ -12,12 +12,13 @@ use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex_sem_nd::{
     CellState, FieldValues, KernelEdacDongOutflow2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
     MatrixFreeMinvJacobian, OwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem,
-    StateBoundaryTerms,
+    StateBoundaryTerms, StateTensorBoundaryTerms, TensorKernelEdacDongOutflow2D,
+    TensorKernelEdacSplitBoundaryFlux2D, TensorResidualKernel,
 };
 
 use super::linear_system::lumped_inverse_mass;
 
-/// Disables tensor hooks while retaining the same pointwise kernel behavior.
+/// Retains only the traditional weak-form kernel interface for comparison.
 /// Example binaries use this as a correctness and performance oracle.
 pub struct GenericResidual<K>(pub K);
 
@@ -139,6 +140,14 @@ pub struct FluidSystem<'a, K> {
     backend: JacobianBackend,
 }
 
+pub struct TensorFluidSystem<'a, K> {
+    pub problem: &'a SEM2DProblem<QuadMesh>,
+    pub kernel: K,
+    m_inv: Vec<f64>,
+    terms: StateTensorBoundaryTerms<2>,
+    backend: JacobianBackend,
+}
+
 impl<'a, K> FluidSystem<'a, K> {
     pub fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: K) -> Self {
         Self::new_with_backend(problem, kernel, JacobianBackend::from_args())
@@ -191,6 +200,54 @@ impl<'a, K> FluidSystem<'a, K> {
     }
 }
 
+impl<'a, K> TensorFluidSystem<'a, K> {
+    pub fn new_with_backend(
+        problem: &'a SEM2DProblem<QuadMesh>,
+        kernel: K,
+        backend: JacobianBackend,
+    ) -> Self {
+        let mass = problem.assemble_lumped_mass();
+        Self {
+            problem,
+            kernel,
+            m_inv: lumped_inverse_mass(mass.as_ref()),
+            terms: StateTensorBoundaryTerms::new(),
+            backend,
+        }
+    }
+
+    pub fn with_state_boundary(mut self, terms: StateTensorBoundaryTerms<2>) -> Self {
+        self.terms = terms;
+        self
+    }
+
+    pub fn with_split_boundary(self) -> Self {
+        self.with_state_boundary(
+            StateTensorBoundaryTerms::new().with_default(TensorKernelEdacSplitBoundaryFlux2D),
+        )
+    }
+
+    pub fn with_dong_outflow(
+        self,
+        kernel: TensorKernelEdacDongOutflow2D,
+        facets: Vec<usize>,
+        split_form: bool,
+    ) -> Self {
+        assert!(
+            !facets.is_empty(),
+            "Dong outflow requires at least one facet"
+        );
+        let terms = if split_form {
+            StateTensorBoundaryTerms::new()
+                .with_default(TensorKernelEdacSplitBoundaryFlux2D)
+                .with_entities(facets, kernel.with_split_flux())
+        } else {
+            StateTensorBoundaryTerms::new().with_entities(facets, kernel)
+        };
+        self.with_state_boundary(terms)
+    }
+}
+
 impl<'a, K> OdeSys<'a> for FluidSystem<'a, K>
 where
     K: ResidualKernel + Sync + Send,
@@ -228,6 +285,42 @@ where
     }
 }
 
+impl<'a, K> OdeSys<'a> for TensorFluidSystem<'a, K>
+where
+    K: TensorResidualKernel<2> + Sync + Send,
+{
+    fn frhs(&self, t: f64, state: MatRef<f64>) -> Mat<f64> {
+        let residual = self
+            .problem
+            .tensor_residual_operator(&self.kernel)
+            .at_time(t)
+            .with_state_boundary(&self.terms)
+            .residual(state);
+        Mat::from_fn(self.m_inv.len(), 1, |row, _| {
+            -self.m_inv[row] * residual[row]
+        })
+    }
+
+    fn fjac<'b>(&'a self, t: f64, state: MatRef<'b, f64>) -> Box<dyn LinOp<f64> + 'a> {
+        let operator = self
+            .problem
+            .tensor_residual_operator(&self.kernel)
+            .at_time(t)
+            .with_state_boundary(&self.terms);
+        match self.backend {
+            JacobianBackend::Assembled => Box::new(OwnedMinvJacobian::new(
+                operator.assemble_jacobian(state),
+                &self.m_inv,
+            )),
+            JacobianBackend::MatrixFree => Box::new(MatrixFreeMinvJacobian::new(
+                operator,
+                state.to_owned(),
+                &self.m_inv,
+            )),
+        }
+    }
+}
+
 pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
     let expmv = Box::new(PadeExpm::new(12));
     let krylov = KrylovExpm::new(expmv, 30, 100, 1e-12, Some(2));
@@ -236,6 +329,22 @@ pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
 
 pub fn advance(
     system: &FluidSystem<'_, impl ResidualKernel + Sync + Send>,
+    state0: MatRef<'_, f64>,
+    dt: f64,
+    nsteps: usize,
+) -> Mat<f64> {
+    let mut integrator = epi3(state0);
+    for step in 0..nsteps {
+        let result = integrator
+            .step(system, dt)
+            .unwrap_or_else(|error| panic!("EDAC step {step} failed: {}", error.msg));
+        integrator.accept_step(result);
+    }
+    integrator.state()
+}
+
+pub fn advance_tensor(
+    system: &TensorFluidSystem<'_, impl TensorResidualKernel<2> + Sync + Send>,
     state0: MatRef<'_, f64>,
     dt: f64,
     nsteps: usize,

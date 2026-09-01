@@ -4,14 +4,13 @@ use ormatex_sem_nd::{
     KernelEdacPressureAdvection2D, KernelEdacPressureAdvectionSplit2D,
     KernelEdacPressureDiffusion2D, KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D,
     KernelEdacViscousStress2D, LocalCtx, ResidualKernel, ResidualKernelSum, SmagorinskyLilly2D,
-    StateBoundaryIntegrator,
+    StateBoundaryIntegrator, StateTensorBoundaryIntegrator, TensorKernelEdacDongOutflow2D,
 };
 
 #[test]
 fn dong_exposes_tensor_boundary_actions() {
-    let kernel = KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0);
-    assert!(kernel.supports_tensor_residual());
-    assert!(kernel.supports_tensor_jacobian());
+    fn tensor_boundary(_: &dyn StateTensorBoundaryIntegrator<2>) {}
+    tensor_boundary(&TensorKernelEdacDongOutflow2D::new(1.0, 0.05, 1.0));
 }
 
 fn context() -> LocalCtx<'static> {

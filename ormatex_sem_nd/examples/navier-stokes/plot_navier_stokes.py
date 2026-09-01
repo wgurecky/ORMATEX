@@ -17,8 +17,12 @@ import numpy as np
 DEFAULT_FILES = (
     "navier_stokes_lid_driven_cavity.csv",
     "navier_stokes_lid_driven_cavity_comp.csv",
+    "navier_stokes_lid_driven_cavity_comp_tensor.csv",
+    "navier_stokes_lid_driven_cavity_comp_generic.csv",
     "navier_stokes_pipe.csv",
     "navier_stokes_cylinder.csv",
+    "navier_stokes_cylinder_tensor.csv",
+    "navier_stokes_cylinder_generic.csv",
 )
 
 

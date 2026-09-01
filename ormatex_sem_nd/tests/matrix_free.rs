@@ -6,7 +6,7 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
     BilinearForm, BoundaryIntegrator, DofReduction2D, FieldRegistry, KernelAdvDiff2D, LocalCtx,
-    NeumannFlux, ResidualKernel, RobinConvection, SEM2DProblem,
+    NeumannFlux, ResidualKernel, RobinConvection, SEM2DProblem, TensorKernelAdvDiff2D,
 };
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
@@ -123,18 +123,17 @@ fn tensor_path_matches_generic_residual_jacobian_and_action() {
     let direction = Mat::from_fn(n, 2, |i, column| {
         (0.17 * (i + 1) as f64 * (column as f64 + 1.0)).sin()
     });
-    let tensor_kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let tensor_kernel = TensorKernelAdvDiff2D(KernelAdvDiff2D::new(0.13, [0.4, -0.2]));
     let generic_kernel = GenericAdvDiff(KernelAdvDiff2D::new(0.13, [0.4, -0.2]));
 
-    let tensor_residual = problem.assemble_residual(0.0, &tensor_kernel, state.as_ref());
+    let tensor_operator = problem.tensor_residual_operator(&tensor_kernel);
+    let tensor_residual = tensor_operator.residual(state.as_ref());
     let generic_residual = problem.assemble_residual(0.0, &generic_kernel, state.as_ref());
     for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
         assert!((tensor - generic).abs() < 1e-10);
     }
 
-    let tensor_jacobian = problem
-        .assemble_residual_jacobian(0.0, &tensor_kernel, state.as_ref())
-        .to_dense();
+    let tensor_jacobian = tensor_operator.assemble_jacobian(state.as_ref()).to_dense();
     let generic_jacobian = problem
         .assemble_residual_jacobian(0.0, &generic_kernel, state.as_ref())
         .to_dense();
@@ -144,8 +143,7 @@ fn tensor_path_matches_generic_residual_jacobian_and_action() {
         }
     }
 
-    let tensor_action =
-        problem.apply_jacobian(0.0, &tensor_kernel, state.as_ref(), direction.as_ref());
+    let tensor_action = tensor_operator.apply_jacobian(state.as_ref(), direction.as_ref());
     let generic_action =
         problem.apply_jacobian(0.0, &generic_kernel, state.as_ref(), direction.as_ref());
     for row in 0..n {
@@ -168,16 +166,11 @@ fn in_place_jacobian_action_matches_owned_result() {
     let direction = Mat::from_fn(n, 2, |i, column| {
         (0.11 * (i + 1) as f64 * (column as f64 + 1.0)).cos()
     });
-    let kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
-    let expected = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let kernel = TensorKernelAdvDiff2D(KernelAdvDiff2D::new(0.13, [0.4, -0.2]));
     let mut actual = Mat::zeros(n, direction.ncols());
-    problem.apply_jacobian_into(
-        0.0,
-        &kernel,
-        state.as_ref(),
-        direction.as_ref(),
-        actual.as_mut(),
-    );
+    let operator = problem.tensor_residual_operator(&kernel);
+    let expected = operator.apply_jacobian(state.as_ref(), direction.as_ref());
+    operator.apply_jacobian_into(state.as_ref(), direction.as_ref(), actual.as_mut());
     for row in 0..n {
         for column in 0..direction.ncols() {
             assert_eq!(actual[(row, column)], expected[(row, column)]);
@@ -215,16 +208,12 @@ fn benchmark_p_scaling() {
         let n = problem.reduced_size();
         let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.01 * i as f64);
         let direction = Mat::from_fn(n, 1, |i, _| (0.17 * i as f64).sin());
-        let kernel = KernelAdvDiff2D::new(0.1, [0.4, -0.2]);
+        let kernel = TensorKernelAdvDiff2D(KernelAdvDiff2D::new(0.1, [0.4, -0.2]));
         let start = Instant::now();
         for _ in 0..10 {
-            std::hint::black_box(problem.assemble_residual(0.0, &kernel, state.as_ref()));
-            std::hint::black_box(problem.apply_jacobian(
-                0.0,
-                &kernel,
-                state.as_ref(),
-                direction.as_ref(),
-            ));
+            let operator = problem.tensor_residual_operator(&kernel);
+            std::hint::black_box(operator.residual(state.as_ref()));
+            std::hint::black_box(operator.apply_jacobian(state.as_ref(), direction.as_ref()));
         }
         println!(
             "tensor p={p}, dofs/cell={}, elapsed={:?}",
@@ -247,18 +236,14 @@ fn tensor_path_compares_with_generic_path() {
     let n = problem.reduced_size();
     let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.01 * i as f64);
     let direction = Mat::from_fn(n, 1, |i, _| (0.17 * i as f64).sin());
-    let tensor = KernelAdvDiff2D::new(0.1, [0.4, -0.2]);
+    let tensor = TensorKernelAdvDiff2D(KernelAdvDiff2D::new(0.1, [0.4, -0.2]));
     let generic = GenericAdvDiff(KernelAdvDiff2D::new(0.1, [0.4, -0.2]));
 
     let start = Instant::now();
     for _ in 0..10 {
-        std::hint::black_box(problem.assemble_residual(0.0, &tensor, state.as_ref()));
-        std::hint::black_box(problem.apply_jacobian(
-            0.0,
-            &tensor,
-            state.as_ref(),
-            direction.as_ref(),
-        ));
+        let operator = problem.tensor_residual_operator(&tensor);
+        std::hint::black_box(operator.residual(state.as_ref()));
+        std::hint::black_box(operator.apply_jacobian(state.as_ref(), direction.as_ref()));
     }
     let tensor_time = start.elapsed();
 
@@ -357,6 +342,7 @@ fn linear_ode_system_applies_source_with_positive_sign() {
 #[ignore = "large runtime benchmark; run with --release -- --ignored --nocapture"]
 fn large_2d_diffusion_matrix_free_jacobian_runtime() {
     let (problem, kernel, state, direction) = build_large_diffusion_case();
+    let kernel = TensorKernelAdvDiff2D(kernel);
     let (serial_threads, parallel_threads) = benchmark_threads();
     let serial_pool = ThreadPoolBuilder::new()
         .num_threads(serial_threads)
@@ -368,13 +354,19 @@ fn large_2d_diffusion_matrix_free_jacobian_runtime() {
         .unwrap();
 
     let start = Instant::now();
-    let serial = serial_pool
-        .install(|| problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref()));
+    let serial = serial_pool.install(|| {
+        problem
+            .tensor_residual_operator(&kernel)
+            .apply_jacobian(state.as_ref(), direction.as_ref())
+    });
     let serial_time = start.elapsed();
 
     let start = Instant::now();
-    let parallel = parallel_pool
-        .install(|| problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref()));
+    let parallel = parallel_pool.install(|| {
+        problem
+            .tensor_residual_operator(&kernel)
+            .apply_jacobian(state.as_ref(), direction.as_ref())
+    });
     let parallel_time = start.elapsed();
 
     assert_eq!(serial.nrows(), problem.reduced_size());

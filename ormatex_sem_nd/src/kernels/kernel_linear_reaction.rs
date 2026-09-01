@@ -3,7 +3,7 @@ use faer::sparse::SparseColMat;
 use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::fields::FieldRegistry;
 
-use super::kernel_common::{BilinearForm, ResidualKernel};
+use super::kernel_common::{BilinearForm, ResidualKernel, TensorResidualKernel};
 
 /// Sparse linear reaction kernel for `du/dt = rates * u`.
 ///
@@ -118,51 +118,6 @@ impl ResidualKernel for KernelLinearReaction {
         self.field_names.clone()
     }
 
-    fn supports_tensor_residual(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_residual_1d(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian_1d(&self) -> bool {
-        true
-    }
-
-    fn tensor_residual(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let source = self.interactions[equation]
-            .iter()
-            .map(|&(unknown, coefficient)| coefficient * state.value(unknown, q))
-            .sum::<f64>();
-        [-source, 0.0, 0.0]
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        _state: &CellState<'_>,
-        direction: &CellState<'_>,
-        equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let source = self.interactions[equation]
-            .iter()
-            .map(|&(unknown, coefficient)| coefficient * direction.value(unknown, q))
-            .sum::<f64>();
-        [-source, 0.0, 0.0]
-    }
-
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -191,5 +146,63 @@ impl ResidualKernel for KernelLinearReaction {
     ) -> f64 {
         assert_eq!(ctx.ncomp, 1, "KernelLinearReaction: scalar fields only");
         -self.coefficient(equation, unknown) * ctx.test(test_i, 0).v(q) * ctx.trial(trial_i, 0).v(q)
+    }
+}
+
+/// Tensor-product linear reaction kernel.
+pub struct TensorKernelLinearReaction(pub KernelLinearReaction);
+
+impl TensorKernelLinearReaction {
+    pub fn new(rates: SparseColMat<usize, f64>) -> Self {
+        Self(KernelLinearReaction::new(rates))
+    }
+    pub fn with_field_names<I, S>(rates: SparseColMat<usize, f64>, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(KernelLinearReaction::with_field_names(rates, names))
+    }
+}
+
+impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorKernelLinearReaction {
+    fn nfields(&self) -> usize {
+        self.0.interactions.len()
+    }
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.0.field_names.clone()
+    }
+    fn tensor_residual(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [
+            -self.0.interactions[equation]
+                .iter()
+                .map(|&(unknown, coefficient)| coefficient * state.value(unknown, q))
+                .sum::<f64>(),
+            0.0,
+            0.0,
+        ]
+    }
+    fn tensor_jacobian_action(
+        &self,
+        _ctx: &TensorCtx<'_>,
+        _state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        [
+            -self.0.interactions[equation]
+                .iter()
+                .map(|&(unknown, coefficient)| coefficient * direction.value(unknown, q))
+                .sum::<f64>(),
+            0.0,
+            0.0,
+        ]
     }
 }

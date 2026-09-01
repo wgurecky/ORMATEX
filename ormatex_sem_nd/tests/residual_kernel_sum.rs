@@ -4,7 +4,8 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellT
 use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex_sem_nd::{
     DofReduction2D, FieldRegistry, KernelAdvDiff2D, KernelAdvection2D, KernelDiffusion2D,
-    KernelLinearReaction, ResidualKernelSum, SEM2DProblem,
+    KernelLinearReaction, ResidualKernelSum, SEM2DProblem, SEM2DResidualExecution,
+    TensorKernelAdvection2D, TensorKernelDiffusion2D, TensorResidualKernelSum,
 };
 use std::time::Instant;
 
@@ -58,6 +59,9 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
         .with(KernelDiffusion2D::new(0.13));
     let advection = KernelAdvection2D::new([0.4, -0.2]);
     let diffusion = KernelDiffusion2D::new(0.13);
+    let tensor_composed =
+        TensorResidualKernelSum::from_kernel(TensorKernelAdvection2D::new([0.4, -0.2]))
+            .with(TensorKernelDiffusion2D::new(0.13));
 
     let fused_residual_values = problem.assemble_residual(0.0, &fused, state.as_ref());
     let composed_residual_values = problem.assemble_residual(0.0, &composed, state.as_ref());
@@ -68,8 +72,13 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     let separate_residual = Mat::from_fn(n, 1, |row, _| {
         advection_residual[row] + diffusion_residual[row]
     });
+    let tensor_composed_residual = problem
+        .tensor_residual_operator(&tensor_composed)
+        .residual(state.as_ref());
+    let tensor_composed_residual = Mat::from_fn(n, 1, |row, _| tensor_composed_residual[row]);
     assert_vector_close(&fused_residual, &composed_residual);
     assert_vector_close(&fused_residual, &separate_residual);
+    assert_vector_close(&fused_residual, &tensor_composed_residual);
 
     let fused_jacobian = problem
         .assemble_residual_jacobian(0.0, &fused, state.as_ref())
@@ -86,8 +95,13 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     let separate_jacobian = Mat::from_fn(n, n, |row, col| {
         advection_jacobian[(row, col)] + diffusion_jacobian[(row, col)]
     });
+    let tensor_composed_jacobian = problem
+        .tensor_residual_operator(&tensor_composed)
+        .assemble_jacobian(state.as_ref())
+        .to_dense();
     assert_matrix_close(&fused_jacobian, &composed_jacobian);
     assert_matrix_close(&fused_jacobian, &separate_jacobian);
+    assert_matrix_close(&fused_jacobian, &tensor_composed_jacobian);
 
     let fused_action = problem.apply_jacobian(0.0, &fused, state.as_ref(), direction.as_ref());
     let composed_action =
@@ -99,8 +113,105 @@ fn advection_diffusion_sum_matches_fused_and_separate_assembly() {
     let separate_action = Mat::from_fn(n, 1, |row, _| {
         advection_action[(row, 0)] + diffusion_action[(row, 0)]
     });
+    let tensor_composed_action = problem
+        .tensor_residual_operator(&tensor_composed)
+        .apply_jacobian(state.as_ref(), direction.as_ref());
     assert_vector_close(&fused_action, &composed_action);
     assert_vector_close(&fused_action, &separate_action);
+    assert_vector_close(&fused_action, &tensor_composed_action);
+}
+
+#[test]
+fn mixed_tensor_and_weak_terms_match_separate_assembly() {
+    let problem = problem();
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.07 * row as f64);
+    let direction = Mat::from_fn(n, 1, |row, _| (0.31 * row as f64).sin());
+    let tensor = TensorKernelAdvection2D::new([0.4, -0.2]);
+    let weak = KernelDiffusion2D::new(0.13);
+    let mixed = problem.mixed_residual_operator(&tensor, &weak);
+
+    let tensor_residual = problem
+        .tensor_residual_operator(&tensor)
+        .residual(state.as_ref());
+    let weak_residual = problem.assemble_residual(0.0, &weak, state.as_ref());
+    let mixed_residual = mixed.residual(state.as_ref());
+    for row in 0..n {
+        assert!((mixed_residual[row] - tensor_residual[row] - weak_residual[row]).abs() < 1e-12);
+    }
+
+    let tensor_jacobian = problem
+        .tensor_residual_operator(&tensor)
+        .assemble_jacobian(state.as_ref())
+        .to_dense();
+    let weak_jacobian = problem
+        .assemble_residual_jacobian(0.0, &weak, state.as_ref())
+        .to_dense();
+    let mixed_jacobian = mixed.assemble_jacobian(state.as_ref()).to_dense();
+    for row in 0..n {
+        for col in 0..n {
+            assert!(
+                (mixed_jacobian[(row, col)]
+                    - tensor_jacobian[(row, col)]
+                    - weak_jacobian[(row, col)])
+                    .abs()
+                    < 1e-12
+            );
+        }
+    }
+
+    let tensor_action = problem
+        .tensor_residual_operator(&tensor)
+        .apply_jacobian(state.as_ref(), direction.as_ref());
+    let weak_action = problem.apply_jacobian(0.0, &weak, state.as_ref(), direction.as_ref());
+    let mixed_action = mixed.apply_jacobian(state.as_ref(), direction.as_ref());
+    for row in 0..n {
+        assert!(
+            (mixed_action[(row, 0)] - tensor_action[(row, 0)] - weak_action[(row, 0)]).abs()
+                < 1e-12
+        );
+    }
+}
+
+#[test]
+fn residual_execution_enum_selects_static_tensor_branch() {
+    let problem = problem();
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.07 * row as f64);
+    let tensor = TensorKernelAdvection2D::new([0.4, -0.2]);
+    let weak = KernelDiffusion2D::new(0.13);
+    let execution: SEM2DResidualExecution<
+        '_,
+        '_,
+        '_,
+        'static,
+        'static,
+        QuadMesh,
+        TensorKernelAdvection2D,
+        KernelDiffusion2D,
+    > = SEM2DResidualExecution::Tensor(problem.tensor_residual_operator(&tensor));
+    let expected = problem
+        .tensor_residual_operator(&tensor)
+        .residual(state.as_ref());
+    let actual = execution.residual(state.as_ref());
+    assert_eq!(actual, expected);
+
+    let mixed = problem.mixed_residual_operator(&tensor, &weak);
+    let mixed_execution: SEM2DResidualExecution<
+        '_,
+        '_,
+        '_,
+        'static,
+        'static,
+        QuadMesh,
+        TensorKernelAdvection2D,
+        KernelDiffusion2D,
+    > = SEM2DResidualExecution::Mixed(mixed);
+    let mixed_actual = mixed_execution.residual(state.as_ref());
+    let mixed_expected = problem
+        .mixed_residual_operator(&tensor, &weak)
+        .residual(state.as_ref());
+    assert_eq!(mixed_actual, mixed_expected);
 }
 
 #[test]

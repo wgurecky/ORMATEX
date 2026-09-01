@@ -154,62 +154,6 @@ pub trait ResidualKernel {
         trial_i: usize,
     ) -> f64;
 
-    /// Whether this kernel implements tensor-product residual evaluation in its
-    /// supported geometric dimension.
-    fn supports_tensor_residual(&self) -> bool {
-        false
-    }
-
-    /// Whether this kernel implements tensor-product residual evaluation on an
-    /// interval.
-    fn supports_tensor_residual_1d(&self) -> bool {
-        false
-    }
-
-    /// Whether this kernel implements tensor-product Jacobian actions in its
-    /// supported geometric dimension.
-    fn supports_tensor_jacobian(&self) -> bool {
-        false
-    }
-
-    /// Whether this kernel implements tensor-product Jacobian actions on an
-    /// interval.
-    fn supports_tensor_jacobian_1d(&self) -> bool {
-        false
-    }
-
-    /// Return the weak-form pointwise contribution for a tensor-product cell.
-    ///
-    /// The returned values are `(f0, f1_x, f1_y)` for
-    /// `f0 * test + f1 . grad(test)`. In 1D, only `f0` and `f1_x` are used.
-    /// Kernels that do not set
-    /// [`Self::supports_tensor_residual`] do not call this method.
-    fn tensor_residual(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        _state: &CellState<'_>,
-        _equation: usize,
-        _q: usize,
-    ) -> [f64; 3] {
-        unreachable!("kernel does not support tensor-product residuals")
-    }
-
-    /// Return the weak-form pointwise Jacobian action for a tensor-product cell.
-    ///
-    /// `direction` contains the pointwise value and gradient of the complete
-    /// perturbation. Kernels that do not set [`Self::supports_tensor_jacobian`]
-    /// do not call this method.
-    fn tensor_jacobian_action(
-        &self,
-        _ctx: &TensorCtx<'_>,
-        _state: &CellState<'_>,
-        _direction: &CellState<'_>,
-        _equation: usize,
-        _q: usize,
-    ) -> [f64; 3] {
-        unreachable!("kernel does not support tensor-product Jacobian actions")
-    }
-
     fn assemble_local_residual(&self, ctx: &LocalCtx, state: &CellState, out: &mut [f64]) {
         let nf = self.nfields();
         let n = ctx.ndofs;
@@ -289,8 +233,167 @@ pub trait ResidualKernel {
     }
 }
 
+/// Statically dispatched tensor-product residual kernel.
+///
+/// `GDIM` is part of the type, so tensor assembly never needs a capability
+/// query to select its volume path.
+pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
+    fn nfields(&self) -> usize {
+        1
+    }
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3];
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3];
+}
+
+/// Statically dispatched additive composition of tensor residual kernels.
+///
+/// Calling [`Self::with`] nests another concrete kernel in the type, so the
+/// pointwise sum remains statically dispatched and inlinable.
+pub struct TensorResidualKernelSum<A, B = ()> {
+    first: A,
+    second: B,
+}
+
+impl<A> TensorResidualKernelSum<A, ()> {
+    pub fn from_kernel(kernel: A) -> Self {
+        Self {
+            first: kernel,
+            second: (),
+        }
+    }
+}
+
+impl<A, B> TensorResidualKernelSum<A, B> {
+    pub fn with<C>(self, kernel: C) -> TensorResidualKernelSum<Self, C> {
+        TensorResidualKernelSum {
+            first: self,
+            second: kernel,
+        }
+    }
+}
+
+impl<const GDIM: usize, A> TensorResidualKernel<GDIM> for TensorResidualKernelSum<A, ()>
+where
+    A: TensorResidualKernel<GDIM>,
+{
+    fn nfields(&self) -> usize {
+        self.first.nfields()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.first.field_names()
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        self.first.tensor_residual(ctx, state, equation, q)
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        self.first
+            .tensor_jacobian_action(ctx, state, direction, equation, q)
+    }
+}
+
+impl<const GDIM: usize, A, B> TensorResidualKernel<GDIM> for TensorResidualKernelSum<A, B>
+where
+    A: TensorResidualKernel<GDIM>,
+    B: TensorResidualKernel<GDIM>,
+{
+    fn nfields(&self) -> usize {
+        assert_eq!(
+            self.first.nfields(),
+            self.second.nfields(),
+            "tensor residual kernel sum field count mismatch"
+        );
+        self.first.nfields()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        let first = self.first.field_names();
+        let second = self.second.field_names();
+        match (first, second) {
+            (Some(first), Some(second)) => {
+                assert_eq!(
+                    first, second,
+                    "tensor residual kernel sum field names/order mismatch"
+                );
+                Some(first)
+            }
+            (Some(first), None) => Some(first),
+            (None, Some(second)) => Some(second),
+            (None, None) => None,
+        }
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let first = self.first.tensor_residual(ctx, state, equation, q);
+        let second = self.second.tensor_residual(ctx, state, equation, q);
+        [
+            first[0] + second[0],
+            first[1] + second[1],
+            first[2] + second[2],
+        ]
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let first = self
+            .first
+            .tensor_jacobian_action(ctx, state, direction, equation, q);
+        let second = self
+            .second
+            .tensor_jacobian_action(ctx, state, direction, equation, q);
+        [
+            first[0] + second[0],
+            first[1] + second[1],
+            first[2] + second[2],
+        ]
+    }
+}
+
 /// Assemble one 1D tensor-product cell from pointwise weak-form fluxes.
-pub(crate) fn assemble_tensor_residual_1d<K: ResidualKernel>(
+pub(crate) fn assemble_tensor_residual_1d<K: TensorResidualKernel<1>>(
     kernel: &K,
     ctx: &TensorCtx<'_>,
     state: &CellState<'_>,
@@ -328,7 +431,7 @@ pub(crate) fn assemble_tensor_residual_1d<K: ResidualKernel>(
 }
 
 /// Assemble one tensor-product cell from pointwise weak-form fluxes.
-pub(crate) fn assemble_tensor_residual<K: ResidualKernel>(
+pub(crate) fn assemble_tensor_residual<K: TensorResidualKernel<2>>(
     kernel: &K,
     ctx: &TensorCtx<'_>,
     state: &CellState<'_>,
@@ -474,7 +577,7 @@ pub(crate) fn apply_tensor_bilinear_column<K: BilinearForm>(
 }
 
 /// Apply a 1D tensor-product pointwise Jacobian action on one cell.
-pub(crate) fn apply_tensor_jacobian_1d<K: ResidualKernel>(
+pub(crate) fn apply_tensor_jacobian_1d<K: TensorResidualKernel<1>>(
     kernel: &K,
     ctx: &TensorCtx<'_>,
     state: &CellState<'_>,
@@ -525,7 +628,7 @@ pub(crate) fn apply_tensor_jacobian_1d<K: ResidualKernel>(
 }
 
 /// Apply a tensor-product pointwise Jacobian action on one cell.
-pub(crate) fn apply_tensor_jacobian<K: ResidualKernel>(
+pub(crate) fn apply_tensor_jacobian<K: TensorResidualKernel<2>>(
     kernel: &K,
     ctx: &TensorCtx<'_>,
     state: &CellState<'_>,
@@ -671,30 +774,6 @@ impl ResidualKernel for ResidualKernelSum<'_> {
         self.nfields
     }
 
-    fn supports_tensor_residual(&self) -> bool {
-        self.kernels
-            .iter()
-            .all(|kernel| kernel.supports_tensor_residual())
-    }
-
-    fn supports_tensor_residual_1d(&self) -> bool {
-        self.kernels
-            .iter()
-            .all(|kernel| kernel.supports_tensor_residual_1d())
-    }
-
-    fn supports_tensor_jacobian(&self) -> bool {
-        self.kernels
-            .iter()
-            .all(|kernel| kernel.supports_tensor_jacobian())
-    }
-
-    fn supports_tensor_jacobian_1d(&self) -> bool {
-        self.kernels
-            .iter()
-            .all(|kernel| kernel.supports_tensor_jacobian_1d())
-    }
-
     fn field_names(&self) -> Option<Vec<String>> {
         self.field_names.clone()
     }
@@ -729,41 +808,6 @@ impl ResidualKernel for ResidualKernelSum<'_> {
                 kernel.jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
             })
             .sum()
-    }
-
-    fn tensor_residual(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let mut sum = [0.0; 3];
-        for kernel in &self.kernels {
-            let contribution = kernel.tensor_residual(ctx, state, equation, q);
-            for (sum, contribution) in sum.iter_mut().zip(contribution) {
-                *sum += contribution;
-            }
-        }
-        sum
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let mut sum = [0.0; 3];
-        for kernel in &self.kernels {
-            let contribution = kernel.tensor_jacobian_action(ctx, state, direction, equation, q);
-            for (sum, contribution) in sum.iter_mut().zip(contribution) {
-                *sum += contribution;
-            }
-        }
-        sum
     }
 }
 
@@ -899,49 +943,6 @@ pub trait StateBoundaryIntegrator: Send + Sync {
         trial_i: usize,
     ) -> f64;
 
-    /// Whether this boundary kernel supplies a sum-factorization-compatible
-    /// pointwise residual action.
-    fn supports_tensor_residual(&self) -> bool {
-        false
-    }
-
-    /// Whether this boundary kernel supplies a sum-factorization-compatible
-    /// pointwise Jacobian action.
-    fn supports_tensor_jacobian(&self) -> bool {
-        false
-    }
-
-    /// Whether the tensor boundary hooks need the state gradient field.
-    ///
-    /// Value-only conditions, such as advective and Dong outflow fluxes, can
-    /// leave this disabled and avoid gathering unused cell gradients.
-    fn tensor_requires_gradients(&self) -> bool {
-        false
-    }
-
-    /// Return the pointwise trace residual for one equation.
-    fn tensor_residual(
-        &self,
-        _ctx: &TensorFacetCtx<'_>,
-        _state: &CellState<'_>,
-        _equation: usize,
-        _q: usize,
-    ) -> f64 {
-        unreachable!("state boundary kernel does not support tensor evaluation")
-    }
-
-    /// Return the pointwise trace Jacobian action for one equation.
-    fn tensor_jacobian_action(
-        &self,
-        _ctx: &TensorFacetCtx<'_>,
-        _state: &CellState<'_>,
-        _direction: &CellState<'_>,
-        _equation: usize,
-        _q: usize,
-    ) -> f64 {
-        unreachable!("state boundary kernel does not support tensor evaluation")
-    }
-
     fn apply_local_jacobian(
         &self,
         ctx: &FacetCtx,
@@ -1028,6 +1029,46 @@ pub trait StateBoundaryIntegrator: Send + Sync {
     }
 }
 
+/// Statically dispatched tensor-product state boundary kernel.
+///
+/// `GDIM` is part of the type so tensor boundary assembly can select this
+/// interface without probing the weak [`StateBoundaryIntegrator`] API.
+pub trait StateTensorBoundaryIntegrator<const GDIM: usize>: Send + Sync {
+    /// Number of scalar equation/unknown fields in this boundary form.
+    fn nfields(&self) -> usize {
+        1
+    }
+
+    /// Optional ordered names for fields whose meaning is part of the form.
+    fn field_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Whether evaluating this boundary condition needs state gradients.
+    fn tensor_requires_gradients(&self) -> bool {
+        false
+    }
+
+    /// Return the pointwise trace residual for one equation.
+    fn tensor_residual(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64;
+
+    /// Return the pointwise trace Jacobian action for one equation.
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorFacetCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> f64;
+}
+
 /// Immutable state-dependent boundary terms selected by mesh entity index.
 #[derive(Clone, Default)]
 pub struct StateBoundaryTerms {
@@ -1064,6 +1105,55 @@ impl StateBoundaryTerms {
     }
 
     pub(crate) fn kernel_for(&self, entity: usize) -> Option<&dyn StateBoundaryIntegrator> {
+        self.overrides
+            .get(&entity)
+            .or(self.default.as_ref())
+            .map(AsRef::as_ref)
+    }
+}
+
+/// Immutable tensor boundary terms selected by mesh entity index.
+///
+/// This is deliberately separate from [`StateBoundaryTerms`]: weak boundary
+/// kernels remain usable without also implementing a tensor boundary kernel.
+#[derive(Clone, Default)]
+pub struct StateTensorBoundaryTerms<const GDIM: usize> {
+    default: Option<Arc<dyn StateTensorBoundaryIntegrator<GDIM>>>,
+    overrides: HashMap<usize, Arc<dyn StateTensorBoundaryIntegrator<GDIM>>>,
+}
+
+impl<const GDIM: usize> StateTensorBoundaryTerms<GDIM> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_default<K>(mut self, kernel: K) -> Self
+    where
+        K: StateTensorBoundaryIntegrator<GDIM> + 'static,
+    {
+        self.default = Some(Arc::new(kernel));
+        self
+    }
+
+    pub fn with_entities<K, I>(mut self, entities: I, kernel: K) -> Self
+    where
+        K: StateTensorBoundaryIntegrator<GDIM> + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        let kernel: Arc<dyn StateTensorBoundaryIntegrator<GDIM>> = Arc::new(kernel);
+        for entity in entities {
+            assert!(
+                self.overrides.insert(entity, Arc::clone(&kernel)).is_none(),
+                "tensor state boundary entity configured more than once"
+            );
+        }
+        self
+    }
+
+    pub(crate) fn kernel_for(
+        &self,
+        entity: usize,
+    ) -> Option<&dyn StateTensorBoundaryIntegrator<GDIM>> {
         self.overrides
             .get(&entity)
             .or(self.default.as_ref())

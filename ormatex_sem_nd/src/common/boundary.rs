@@ -12,7 +12,7 @@ use rlst::{rlst_dynamic_array, DynArray};
 
 use crate::fields::FieldRegistry;
 use crate::kernels::kernel_common::{
-    BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms,
+    BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryTerms,
 };
 use crate::material::{MeshMetadata, PhysicalRegion};
 
@@ -1037,28 +1037,6 @@ fn tensor_boundary_direction(
     (values, grads)
 }
 
-fn tensor_boundary_trace_direction(
-    facet: &QuadStateBoundaryFacet,
-    nfields: usize,
-    maps: &[&[Option<usize>]],
-    direction: MatRef<'_, f64>,
-    field_offsets: &[usize],
-    column: usize,
-    npts: usize,
-) -> Vec<f64> {
-    tensor_boundary_direction(
-        facet,
-        nfields,
-        maps,
-        direction,
-        field_offsets,
-        column,
-        npts,
-        false,
-    )
-    .0
-}
-
 pub(crate) fn assemble_quad_state_boundary_residual_cached(
     cache: &QuadStateBoundaryCache,
     fields: &FieldRegistry,
@@ -1104,47 +1082,6 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
         };
         let npts = cache.wts.len();
         let nfacet = facet.facet_dofs.len();
-        if kernel.supports_tensor_residual() {
-            let (state_values, state_grads) = tensor_boundary_state(
-                facet,
-                nfields,
-                &maps,
-                &prescribed,
-                state,
-                field_offsets,
-                npts,
-                kernel.tensor_requires_gradients(),
-            );
-            let tensor_state = CellState {
-                nfields,
-                npts,
-                gdim: 2,
-                values: &state_values,
-                grads: &state_grads,
-            };
-            let tensor_ctx = TensorFacetCtx {
-                time,
-                facet: facet.facet,
-                npts,
-                wts: &cache.wts,
-                jfacet_det: &facet.jfacet_det,
-                points: &facet.points,
-                normal: &facet.normal,
-            };
-            for equation in 0..nfields {
-                for q in 0..npts {
-                    let flux = kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
-                    let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
-                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                        if let Some(reduced) = maps[equation][cell_i] {
-                            out[field_offsets[equation] + reduced] +=
-                                weight * facet.values[facet_i * npts + q];
-                        }
-                    }
-                }
-            }
-            continue;
-        }
         let mut state_values = vec![0.0; nfields * npts];
         let mut state_grads = vec![0.0; nfields * 2 * npts];
         for field in 0..nfields {
@@ -1207,6 +1144,92 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
     out
 }
 
+pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
+    cache: &QuadStateBoundaryCache,
+    fields: &FieldRegistry,
+    time: f64,
+    state: MatRef<'_, f64>,
+    field_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &[Vec<Vec<Option<f64>>>],
+    field_offsets: &[usize],
+    terms: &StateTensorBoundaryTerms<2>,
+) -> Vec<f64> {
+    let nfields = fields.len();
+    let system_size = *field_offsets.last().unwrap();
+    assert_eq!(field_offsets.len(), nfields + 1);
+    assert_eq!(state.nrows(), system_size, "state size mismatch");
+    assert_eq!(state.ncols(), 1, "boundary state requires one column");
+    let mut out = vec![0.0; system_size];
+
+    for facet in &cache.facets {
+        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+            continue;
+        };
+        assert_eq!(kernel.nfields(), nfields);
+        if let Some(names) = kernel.field_names() {
+            assert_eq!(names.as_slice(), fields.names());
+        }
+        let maps = if field_reduced_dofs.len() == 1 {
+            (0..nfields)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let prescribed = if field_prescribed_values.len() == 1 {
+            (0..nfields)
+                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let npts = cache.wts.len();
+        let (state_values, state_grads) = tensor_boundary_state(
+            facet,
+            nfields,
+            &maps,
+            &prescribed,
+            state,
+            field_offsets,
+            npts,
+            kernel.tensor_requires_gradients(),
+        );
+        let tensor_state = CellState {
+            nfields,
+            npts,
+            gdim: 2,
+            values: &state_values,
+            grads: &state_grads,
+        };
+        let tensor_ctx = TensorFacetCtx {
+            time,
+            facet: facet.facet,
+            npts,
+            wts: &cache.wts,
+            jfacet_det: &facet.jfacet_det,
+            points: &facet.points,
+            normal: &facet.normal,
+        };
+        for equation in 0..nfields {
+            for q in 0..npts {
+                let flux = kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
+                let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
+                for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                    if let Some(reduced) = maps[equation][cell_i] {
+                        out[field_offsets[equation] + reduced] +=
+                            weight * facet.values[facet_i * npts + q];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn apply_quad_state_boundary_terms_cached(
     cache: &QuadStateBoundaryCache,
     fields: &FieldRegistry,
@@ -1258,88 +1281,6 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
         };
         let npts = cache.wts.len();
         let nfacet = facet.facet_dofs.len();
-        if kernel.supports_tensor_jacobian() {
-            let include_gradients = kernel.tensor_requires_gradients();
-            let (state_values, state_grads) = tensor_boundary_state(
-                facet,
-                nfields,
-                &maps,
-                &prescribed,
-                state,
-                field_offsets,
-                npts,
-                include_gradients,
-            );
-            let tensor_state = CellState {
-                nfields,
-                npts,
-                gdim: 2,
-                values: &state_values,
-                grads: &state_grads,
-            };
-            let tensor_ctx = TensorFacetCtx {
-                time,
-                facet: facet.facet,
-                npts,
-                wts: &cache.wts,
-                jfacet_det: &facet.jfacet_det,
-                points: &facet.points,
-                normal: &facet.normal,
-            };
-            for column in 0..direction.ncols() {
-                let (direction_values, direction_grads) = if include_gradients {
-                    tensor_boundary_direction(
-                        facet,
-                        nfields,
-                        &maps,
-                        direction,
-                        field_offsets,
-                        column,
-                        npts,
-                        true,
-                    )
-                } else {
-                    (
-                        tensor_boundary_trace_direction(
-                            facet,
-                            nfields,
-                            &maps,
-                            direction,
-                            field_offsets,
-                            column,
-                            npts,
-                        ),
-                        Vec::new(),
-                    )
-                };
-                let tensor_direction = CellState {
-                    nfields,
-                    npts,
-                    gdim: 2,
-                    values: &direction_values,
-                    grads: &direction_grads,
-                };
-                for equation in 0..nfields {
-                    for q in 0..npts {
-                        let action = kernel.tensor_jacobian_action(
-                            &tensor_ctx,
-                            &tensor_state,
-                            &tensor_direction,
-                            equation,
-                            q,
-                        );
-                        let weight = cache.wts[q] * facet.jfacet_det[q] * action;
-                        for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                            if let Some(reduced) = maps[equation][cell_i] {
-                                out[(field_offsets[equation] + reduced, column)] +=
-                                    weight * facet.values[facet_i * npts + q];
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
         let mut state_values = vec![0.0; nfields * npts];
         let mut state_grads = vec![0.0; nfields * 2 * npts];
         for field in 0..nfields {
@@ -1413,4 +1354,269 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
         }
     }
     out
+}
+
+pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
+    cache: &QuadStateBoundaryCache,
+    fields: &FieldRegistry,
+    time: f64,
+    state: MatRef<'_, f64>,
+    direction: MatRef<'_, f64>,
+    field_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &[Vec<Vec<Option<f64>>>],
+    field_offsets: &[usize],
+    terms: &StateTensorBoundaryTerms<2>,
+) -> Mat<f64> {
+    let nfields = fields.len();
+    let system_size = *field_offsets.last().unwrap();
+    assert_eq!(field_offsets.len(), nfields + 1);
+    assert_eq!(state.nrows(), system_size, "state size mismatch");
+    assert_eq!(state.ncols(), 1, "boundary state requires one column");
+    assert_eq!(
+        direction.nrows(),
+        system_size,
+        "boundary direction size mismatch"
+    );
+    let mut out = Mat::<f64>::zeros(system_size, direction.ncols());
+
+    for facet in &cache.facets {
+        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+            continue;
+        };
+        assert_eq!(kernel.nfields(), nfields);
+        if let Some(names) = kernel.field_names() {
+            assert_eq!(names.as_slice(), fields.names());
+        }
+        let maps = if field_reduced_dofs.len() == 1 {
+            (0..nfields)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let prescribed = if field_prescribed_values.len() == 1 {
+            (0..nfields)
+                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let npts = cache.wts.len();
+        let include_gradients = kernel.tensor_requires_gradients();
+        let (state_values, state_grads) = tensor_boundary_state(
+            facet,
+            nfields,
+            &maps,
+            &prescribed,
+            state,
+            field_offsets,
+            npts,
+            include_gradients,
+        );
+        let tensor_state = CellState {
+            nfields,
+            npts,
+            gdim: 2,
+            values: &state_values,
+            grads: &state_grads,
+        };
+        let tensor_ctx = TensorFacetCtx {
+            time,
+            facet: facet.facet,
+            npts,
+            wts: &cache.wts,
+            jfacet_det: &facet.jfacet_det,
+            points: &facet.points,
+            normal: &facet.normal,
+        };
+        for column in 0..direction.ncols() {
+            let (direction_values, direction_grads) = tensor_boundary_direction(
+                facet,
+                nfields,
+                &maps,
+                direction,
+                field_offsets,
+                column,
+                npts,
+                include_gradients,
+            );
+            let tensor_direction = CellState {
+                nfields,
+                npts,
+                gdim: 2,
+                values: &direction_values,
+                grads: &direction_grads,
+            };
+            for equation in 0..nfields {
+                for q in 0..npts {
+                    let action = kernel.tensor_jacobian_action(
+                        &tensor_ctx,
+                        &tensor_state,
+                        &tensor_direction,
+                        equation,
+                        q,
+                    );
+                    let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                        if let Some(reduced) = maps[equation][cell_i] {
+                            out[(field_offsets[equation] + reduced, column)] +=
+                                weight * facet.values[facet_i * npts + q];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
+    cache: &QuadStateBoundaryCache,
+    fields: &FieldRegistry,
+    time: f64,
+    state: MatRef<'_, f64>,
+    field_reduced_dofs: &[Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &[Vec<Vec<Option<f64>>>],
+    field_offsets: &[usize],
+    terms: &StateTensorBoundaryTerms<2>,
+) -> SparseColMat<usize, f64> {
+    let nfields = fields.len();
+    let system_size = *field_offsets.last().unwrap();
+    assert_eq!(field_offsets.len(), nfields + 1);
+    assert_eq!(state.nrows(), system_size, "state size mismatch");
+    assert_eq!(state.ncols(), 1, "boundary state requires one column");
+    let mut triplets = Vec::new();
+
+    for facet in &cache.facets {
+        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+            continue;
+        };
+        assert_eq!(kernel.nfields(), nfields);
+        if let Some(names) = kernel.field_names() {
+            assert_eq!(names.as_slice(), fields.names());
+        }
+        let maps = if field_reduced_dofs.len() == 1 {
+            (0..nfields)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let prescribed = if field_prescribed_values.len() == 1 {
+            (0..nfields)
+                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            (0..nfields)
+                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let npts = cache.wts.len();
+        let include_gradients = kernel.tensor_requires_gradients();
+        let (state_values, state_grads) = tensor_boundary_state(
+            facet,
+            nfields,
+            &maps,
+            &prescribed,
+            state,
+            field_offsets,
+            npts,
+            include_gradients,
+        );
+        let tensor_state = CellState {
+            nfields,
+            npts,
+            gdim: 2,
+            values: &state_values,
+            grads: &state_grads,
+        };
+        let tensor_ctx = TensorFacetCtx {
+            time,
+            facet: facet.facet,
+            npts,
+            wts: &cache.wts,
+            jfacet_det: &facet.jfacet_det,
+            points: &facet.points,
+            normal: &facet.normal,
+        };
+
+        let mut columns = std::collections::HashSet::new();
+        for unknown in 0..nfields {
+            for &cell_i in &facet.cell_indices {
+                let Some(reduced) = maps[unknown][cell_i] else {
+                    continue;
+                };
+                if !columns.insert((unknown, reduced)) {
+                    continue;
+                }
+                let mut direction_values = vec![0.0; nfields * npts];
+                for (facet_i, &basis_cell_i) in facet.cell_indices.iter().enumerate() {
+                    if maps[unknown][basis_cell_i] != Some(reduced) {
+                        continue;
+                    }
+                    for q in 0..npts {
+                        direction_values[unknown * npts + q] += facet.values[facet_i * npts + q];
+                    }
+                }
+                let mut direction_grads = if include_gradients {
+                    vec![0.0; nfields * 2 * npts]
+                } else {
+                    Vec::new()
+                };
+                if include_gradients {
+                    for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate()
+                    {
+                        if maps[unknown][cell_i] != Some(reduced) {
+                            continue;
+                        }
+                        for q in 0..npts {
+                            for gd in 0..2 {
+                                direction_grads[(unknown * 2 + gd) * npts + q] +=
+                                    cell_grads[gd * npts + q];
+                            }
+                        }
+                    }
+                }
+                let tensor_direction = CellState {
+                    nfields,
+                    npts,
+                    gdim: 2,
+                    values: &direction_values,
+                    grads: &direction_grads,
+                };
+                for equation in 0..nfields {
+                    for q in 0..npts {
+                        let action = kernel.tensor_jacobian_action(
+                            &tensor_ctx,
+                            &tensor_state,
+                            &tensor_direction,
+                            equation,
+                            q,
+                        );
+                        let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                        for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                            if let Some(row) = maps[equation][cell_i] {
+                                let value = weight * facet.values[facet_i * npts + q];
+                                if value != 0.0 {
+                                    triplets.push(Triplet::new(
+                                        field_offsets[equation] + row,
+                                        field_offsets[unknown] + reduced,
+                                        value,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
 }

@@ -1,7 +1,7 @@
 use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
-use super::kernel_common::{BilinearForm, ResidualKernel};
+use super::kernel_common::{BilinearForm, ResidualKernel, TensorResidualKernel};
 
 /// Scalar 2D diffusion kernel for `-div(nu * grad(T))`.
 pub struct KernelDiffusion2D {
@@ -61,45 +61,6 @@ impl BilinearForm for KernelDiffusion2D {
 }
 
 impl ResidualKernel for KernelDiffusion2D {
-    fn supports_tensor_residual(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian(&self) -> bool {
-        true
-    }
-
-    fn tensor_residual(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        let nu = self.nu.eval(&material);
-        [0.0, nu * state.grad(0, q, 0), nu * state.grad(0, q, 1)]
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        let nu = self.nu.eval(&material);
-        let dnu = self.nu.derivative(&material, 0).unwrap_or(0.0);
-        let du = direction.value(0, q);
-        [
-            0.0,
-            nu * direction.grad(0, q, 0) + dnu * du * state.grad(0, q, 0),
-            nu * direction.grad(0, q, 1) + dnu * du * state.grad(0, q, 1),
-        ]
-    }
-
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -138,5 +99,51 @@ impl ResidualKernel for KernelDiffusion2D {
             .sum::<f64>();
         self.nu.eval(&material) * grad_dot
             + self.nu.derivative(&material, unknown).unwrap_or(0.0) * trial.v(q) * state_grad_dot
+    }
+}
+
+/// Tensor-product 2D diffusion kernel.
+pub struct TensorKernelDiffusion2D(pub KernelDiffusion2D);
+
+impl TensorKernelDiffusion2D {
+    pub fn new(nu: f64) -> Self {
+        Self(KernelDiffusion2D::new(nu))
+    }
+    pub fn with_coefficient<N>(nu: N) -> Self
+    where
+        N: MaterialProperty<f64> + 'static,
+    {
+        Self(KernelDiffusion2D::with_coefficient(nu))
+    }
+}
+
+impl TensorResidualKernel<2> for TensorKernelDiffusion2D {
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let nu = self.0.nu.eval(&ctx.material_context(Some(state), q));
+        [0.0, nu * state.grad(0, q, 0), nu * state.grad(0, q, 1)]
+    }
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let nu = self.0.nu.eval(&material);
+        let dnu = self.0.nu.derivative(&material, 0).unwrap_or(0.0);
+        let du = direction.value(0, q);
+        [
+            0.0,
+            nu * direction.grad(0, q, 0) + dnu * du * state.grad(0, q, 0),
+            nu * direction.grad(0, q, 1) + dnu * du * state.grad(0, q, 1),
+        ]
     }
 }

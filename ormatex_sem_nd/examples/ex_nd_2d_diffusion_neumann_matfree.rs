@@ -20,10 +20,10 @@ fn main() {
     let (problem, mass, kernel) =
         diffusion_neumann_problem(mesh, 2, ormatex_sem_nd::MeshMetadata::default());
     let boundary = unit_square_neumann_robin_boundary(&problem);
-    let system = ResidualDiffusionNeumannSys::new(
+    let system = ResidualDiffusionNeumannSys::new_tensor(
         &problem,
         mass,
-        kernel,
+        ormatex_sem_nd::TensorKernelAdvDiff2D(kernel),
         boundary.mat,
         boundary.rhs,
         JacobianBackend::MatrixFree,

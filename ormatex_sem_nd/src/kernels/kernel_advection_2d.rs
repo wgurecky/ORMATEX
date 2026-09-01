@@ -1,7 +1,7 @@
 use crate::common::{CellState, LocalCtx, TensorCtx};
 use crate::material::{ConstantCoefficient, MaterialProperty};
 
-use super::kernel_common::{BilinearForm, ResidualKernel};
+use super::kernel_common::{BilinearForm, ResidualKernel, TensorResidualKernel};
 
 /// Scalar 2D advection kernel for `velocity . grad(u)`.
 pub struct KernelAdvection2D {
@@ -66,52 +66,6 @@ impl BilinearForm for KernelAdvection2D {
 }
 
 impl ResidualKernel for KernelAdvection2D {
-    fn supports_tensor_residual(&self) -> bool {
-        true
-    }
-
-    fn supports_tensor_jacobian(&self) -> bool {
-        true
-    }
-
-    fn tensor_residual(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        let value = state.value(0, q);
-        [
-            0.0,
-            -self.vel[0].eval(&material) * value,
-            -self.vel[1].eval(&material) * value,
-        ]
-    }
-
-    fn tensor_jacobian_action(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        _equation: usize,
-        q: usize,
-    ) -> [f64; 3] {
-        let material = ctx.material_context(Some(state), q);
-        let value = state.value(0, q);
-        let direction_value = direction.value(0, q);
-        [
-            0.0,
-            -(self.vel[0].eval(&material)
-                + self.vel[0].derivative(&material, 0).unwrap_or(0.0) * value)
-                * direction_value,
-            -(self.vel[1].eval(&material)
-                + self.vel[1].derivative(&material, 0).unwrap_or(0.0) * value)
-                * direction_value,
-        ]
-    }
-
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -152,5 +106,59 @@ impl ResidualKernel for KernelAdvection2D {
                 (velocity + derivative * state.value(0, q)) * trial.v(q) * test.grad(q, d)
             })
             .sum::<f64>())
+    }
+}
+
+/// Tensor-product 2D advection kernel.
+pub struct TensorKernelAdvection2D(pub KernelAdvection2D);
+
+impl TensorKernelAdvection2D {
+    pub fn new(vel: [f64; 2]) -> Self {
+        Self(KernelAdvection2D::new(vel))
+    }
+    pub fn with_velocity<V>(vel: [V; 2]) -> Self
+    where
+        V: MaterialProperty<f64> + 'static,
+    {
+        Self(KernelAdvection2D::with_velocity(vel))
+    }
+}
+
+impl TensorResidualKernel<2> for TensorKernelAdvection2D {
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let value = state.value(0, q);
+        [
+            0.0,
+            -self.0.vel[0].eval(&material) * value,
+            -self.0.vel[1].eval(&material) * value,
+        ]
+    }
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        _equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let material = ctx.material_context(Some(state), q);
+        let value = state.value(0, q);
+        let dv = direction.value(0, q);
+        [
+            0.0,
+            -(self.0.vel[0].eval(&material)
+                + self.0.vel[0].derivative(&material, 0).unwrap_or(0.0) * value)
+                * dv,
+            -(self.0.vel[1].eval(&material)
+                + self.0.vel[1].derivative(&material, 0).unwrap_or(0.0) * value)
+                * dv,
+        ]
     }
 }

@@ -30,10 +30,26 @@ pub use kernels::{
     KernelEdacSplitBoundaryFlux2D, KernelEdacViscousStress2D, KernelLinearReaction, KernelMass,
     KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, ResidualKernelSum,
     RobinConvection, SmagorinskyLilly2D, StateBoundaryIntegrator, StateBoundaryTerms,
+    StateTensorBoundaryIntegrator, StateTensorBoundaryTerms, TensorKernelAdvDiff,
+    TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
+    TensorKernelAdvection2D, TensorKernelConservationLaw1D, TensorKernelDiffusion,
+    TensorKernelDiffusion2D, TensorKernelEdacDongOutflow2D, TensorKernelEdacMomentumConvection2D,
+    TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacNavierStokes2D,
+    TensorKernelEdacPressureAdvection2D, TensorKernelEdacPressureAdvectionSplit2D,
+    TensorKernelEdacPressureDiffusion2D, TensorKernelEdacPressureDivergence2D,
+    TensorKernelEdacPressureGradient2D, TensorKernelEdacSplitBoundaryFlux2D,
+    TensorKernelEdacViscousStress2D, TensorKernelLinearReaction, TensorKernelMass,
+    TensorKernelVolumeSource, TensorResidualKernel, TensorResidualKernelSum,
 };
 pub use material::{
     CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,
     MeshMetadata, PhysicalRegion, RegionCoefficient,
 };
-pub use sem_1d::{BoundaryPoint, DofReduction1D, SEM1DProblem, SEM1DResidualOperator};
-pub use sem_2d::{DofReduction2D, SEM2DProblem, SEM2DResidualOperator};
+pub use sem_1d::{
+    BoundaryPoint, DofReduction1D, SEM1DMixedResidualOperator, SEM1DProblem,
+    SEM1DResidualExecution, SEM1DResidualOperator, SEM1DTensorResidualOperator,
+};
+pub use sem_2d::{
+    DofReduction2D, SEM2DMixedResidualOperator, SEM2DProblem, SEM2DResidualExecution,
+    SEM2DResidualOperator, SEM2DTensorResidualOperator,
+};

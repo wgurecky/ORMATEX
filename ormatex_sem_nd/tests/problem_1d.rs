@@ -12,7 +12,7 @@ use ormatex_sem_nd::material::{
 use ormatex_sem_nd::{
     BilinearForm, BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry,
     FluxKernel1D, KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian,
-    ResidualKernel, SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms,
+    ResidualKernel, SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms, TensorKernelAdvDiff,
 };
 
 #[path = "../examples/support/euler_1d.rs"]
@@ -418,16 +418,11 @@ fn tensor_1d_in_place_jacobian_matches_allocating_action() {
     let direction = Mat::from_fn(n, 2, |row, column| {
         (0.17 * row as f64 + column as f64).sin()
     });
-    let kernel = KernelAdvDiff::new(0.2, -0.4);
-    let expected = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let kernel = TensorKernelAdvDiff(KernelAdvDiff::new(0.2, -0.4));
+    let operator = problem.tensor_residual_operator(&kernel);
+    let expected = operator.apply_jacobian(state.as_ref(), direction.as_ref());
     let mut actual = Mat::zeros(n, 2);
-    problem.apply_jacobian_into(
-        0.0,
-        &kernel,
-        state.as_ref(),
-        direction.as_ref(),
-        actual.as_mut(),
-    );
+    operator.apply_jacobian_into(state.as_ref(), direction.as_ref(), actual.as_mut());
     for row in 0..n {
         for column in 0..2 {
             assert!((actual[(row, column)] - expected[(row, column)]).abs() < 1e-12);
@@ -448,18 +443,17 @@ fn tensor_1d_path_matches_generic_residual_jacobian_and_bilinear() {
     let direction = Mat::from_fn(n, 2, |row, column| {
         (0.17 * row as f64 + column as f64).sin()
     });
-    let tensor = KernelAdvDiff::new(0.13, 0.4);
+    let tensor = TensorKernelAdvDiff(KernelAdvDiff::new(0.13, 0.4));
     let generic = GenericAdvDiff1D(KernelAdvDiff::new(0.13, 0.4));
 
-    let tensor_residual = problem.assemble_residual(0.0, &tensor, state.as_ref());
+    let tensor_operator = problem.tensor_residual_operator(&tensor);
+    let tensor_residual = tensor_operator.residual(state.as_ref());
     let generic_residual = problem.assemble_residual(0.0, &generic, state.as_ref());
     for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
         assert!((tensor - generic).abs() < 1e-10);
     }
 
-    let tensor_jacobian = problem
-        .assemble_residual_jacobian(0.0, &tensor, state.as_ref())
-        .to_dense();
+    let tensor_jacobian = tensor_operator.assemble_jacobian(state.as_ref()).to_dense();
     let generic_jacobian = problem
         .assemble_residual_jacobian(0.0, &generic, state.as_ref())
         .to_dense();
@@ -469,7 +463,7 @@ fn tensor_1d_path_matches_generic_residual_jacobian_and_bilinear() {
         }
     }
 
-    let tensor_action = problem.apply_jacobian(0.0, &tensor, state.as_ref(), direction.as_ref());
+    let tensor_action = tensor_operator.apply_jacobian(state.as_ref(), direction.as_ref());
     let generic_action = problem.apply_jacobian(0.0, &generic, state.as_ref(), direction.as_ref());
     for row in 0..n {
         for column in 0..direction.ncols() {
@@ -477,7 +471,7 @@ fn tensor_1d_path_matches_generic_residual_jacobian_and_bilinear() {
         }
     }
 
-    let tensor_matrix = problem.assemble_bilinear(0.0, &tensor).to_dense();
+    let tensor_matrix = tensor_operator.assemble_jacobian(state.as_ref()).to_dense();
     let generic_matrix = problem.assemble_bilinear(0.0, &generic).to_dense();
     for row in 0..n {
         for col in 0..n {

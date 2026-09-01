@@ -1,7 +1,9 @@
 use crate::common::{
-    add_dirichlet_rhs_correction, apply_quad_state_boundary_terms_cached, assemble_lumped_mass,
-    assemble_quad_boundaries, assemble_quad_state_boundary_jacobian,
-    assemble_quad_state_boundary_residual_cached, build_quad_state_boundary_cache, cell_ctx,
+    add_dirichlet_rhs_correction, apply_quad_state_boundary_terms_cached,
+    apply_quad_state_tensor_boundary_terms_cached, assemble_lumped_mass, assemble_quad_boundaries,
+    assemble_quad_state_boundary_jacobian, assemble_quad_state_boundary_residual_cached,
+    assemble_quad_state_tensor_boundary_jacobian_cached,
+    assemble_quad_state_tensor_boundary_residual_cached, build_quad_state_boundary_cache, cell_ctx,
     interpolate_cell_state, interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state,
     push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, BoundaryFacet,
     CellData, CellState, FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap,
@@ -11,7 +13,8 @@ use crate::fields::{FieldRegistry, FieldValues};
 use crate::jacobian::CompleteResidualOperator;
 use crate::kernels::kernel_common::{
     apply_tensor_bilinear_column, apply_tensor_jacobian, assemble_tensor_residual, BilinearForm,
-    BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms,
+    BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms, StateTensorBoundaryTerms,
+    TensorResidualKernel,
 };
 use crate::material::MeshMetadata;
 use faer::prelude::*;
@@ -243,6 +246,447 @@ where
     terms: Option<&'b StateBoundaryTerms>,
 }
 
+/// Statically dispatched tensor-product residual operator.
+pub struct SEM2DTensorResidualOperator<'p, 'k, 'b, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+{
+    problem: &'p SEM2DProblem<M>,
+    kernel: &'k K,
+    time: f64,
+    terms: Option<&'b StateTensorBoundaryTerms<2>>,
+}
+
+impl<'p, 'k, 'b, M, K> SEM2DTensorResidualOperator<'p, 'k, 'b, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    K: TensorResidualKernel<2> + Sync,
+{
+    pub fn system_size(&self) -> usize {
+        self.problem.system_size()
+    }
+    pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        let layout = self.problem.field_layout();
+        let mut residual =
+            self.problem
+                .assemble_tensor_residual_static(self.time, self.kernel, state, &layout);
+        if let Some(terms) = self.terms {
+            let boundary = self
+                .problem
+                .assemble_state_tensor_boundary_residual(self.time, state, terms);
+            for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                *volume += boundary;
+            }
+        }
+        residual
+    }
+    pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        let layout = self.problem.field_layout();
+        let mut jacobian =
+            self.problem
+                .assemble_tensor_jacobian(self.time, self.kernel, state, &layout);
+        if let Some(terms) = self.terms {
+            let boundary = self
+                .problem
+                .assemble_state_tensor_boundary_jacobian(self.time, state, terms);
+            jacobian = jacobian.as_ref() + boundary.as_ref();
+        }
+        jacobian
+    }
+    pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
+        let layout = self.problem.field_layout();
+        self.problem.apply_tensor_jacobian_into(
+            self.time,
+            self.kernel,
+            state,
+            direction,
+            &layout,
+            out.as_mut(),
+        );
+        if let Some(terms) = self.terms {
+            out += self
+                .problem
+                .apply_state_tensor_boundary_jacobian(self.time, state, direction, terms);
+        }
+        out
+    }
+    pub fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        let layout = self.problem.field_layout();
+        self.problem.apply_tensor_jacobian_into(
+            self.time,
+            self.kernel,
+            state,
+            direction,
+            &layout,
+            out.rb_mut(),
+        );
+        if let Some(terms) = self.terms {
+            out += self
+                .problem
+                .apply_state_tensor_boundary_jacobian(self.time, state, direction, terms);
+        }
+    }
+    pub fn at_time(mut self, time: f64) -> Self {
+        self.time = time;
+        self
+    }
+
+    pub fn with_state_boundary<'terms>(
+        self,
+        terms: &'terms StateTensorBoundaryTerms<2>,
+    ) -> SEM2DTensorResidualOperator<'p, 'k, 'terms, M, K> {
+        SEM2DTensorResidualOperator {
+            problem: self.problem,
+            kernel: self.kernel,
+            time: self.time,
+            terms: Some(terms),
+        }
+    }
+}
+
+impl<M, K> CompleteResidualOperator for SEM2DTensorResidualOperator<'_, '_, '_, M, K>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    K: TensorResidualKernel<2> + Sync,
+{
+    fn system_size(&self) -> usize {
+        SEM2DTensorResidualOperator::system_size(self)
+    }
+    fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        SEM2DTensorResidualOperator::residual(self, state)
+    }
+    fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        SEM2DTensorResidualOperator::assemble_jacobian(self, state)
+    }
+    fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        SEM2DTensorResidualOperator::apply_jacobian(self, state, direction)
+    }
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        SEM2DTensorResidualOperator::apply_jacobian_into(self, state, direction, out);
+    }
+}
+
+/// Residual operator that combines one statically dispatched tensor kernel
+/// with one traditional weak-form kernel.
+pub struct SEM2DMixedResidualOperator<'p, 't, 'w, 'bt, 'bw, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+{
+    problem: &'p SEM2DProblem<M>,
+    tensor_kernel: &'t T,
+    weak_kernel: &'w W,
+    time: f64,
+    tensor_terms: Option<&'bt StateTensorBoundaryTerms<2>>,
+    weak_terms: Option<&'bw StateBoundaryTerms>,
+}
+
+impl<'p, 't, 'w, 'bt, 'bw, M, T, W> SEM2DMixedResidualOperator<'p, 't, 'w, 'bt, 'bw, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    T: TensorResidualKernel<2> + Sync,
+    W: ResidualKernel + Sync,
+{
+    pub fn system_size(&self) -> usize {
+        self.problem.system_size()
+    }
+
+    pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        let layout = self.problem.field_layout();
+        let mut residual = self.problem.assemble_tensor_residual_static(
+            self.time,
+            self.tensor_kernel,
+            state,
+            &layout,
+        );
+        let weak = self
+            .problem
+            .assemble_residual(self.time, self.weak_kernel, state);
+        for (tensor, weak) in residual.iter_mut().zip(weak) {
+            *tensor += weak;
+        }
+        if let Some(terms) = self.weak_terms {
+            let boundary = self
+                .problem
+                .assemble_state_boundary_residual(self.time, state, terms);
+            for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                *volume += boundary;
+            }
+        }
+        if let Some(terms) = self.tensor_terms {
+            let boundary = self
+                .problem
+                .assemble_state_tensor_boundary_residual(self.time, state, terms);
+            for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                *volume += boundary;
+            }
+        }
+        residual
+    }
+
+    pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        let layout = self.problem.field_layout();
+        let tensor =
+            self.problem
+                .assemble_tensor_jacobian(self.time, self.tensor_kernel, state, &layout);
+        let weak = self
+            .problem
+            .assemble_residual_jacobian(self.time, self.weak_kernel, state);
+        let mut jacobian = tensor.as_ref() + weak.as_ref();
+        if let Some(terms) = self.weak_terms {
+            let boundary = self
+                .problem
+                .assemble_state_boundary_jacobian(self.time, state, terms);
+            jacobian = jacobian.as_ref() + boundary.as_ref();
+        }
+        if let Some(terms) = self.tensor_terms {
+            let boundary = self
+                .problem
+                .assemble_state_tensor_boundary_jacobian(self.time, state, terms);
+            jacobian = jacobian.as_ref() + boundary.as_ref();
+        }
+        jacobian
+    }
+
+    pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        let mut out = Mat::<f64>::zeros(self.system_size(), direction.ncols());
+        let layout = self.problem.field_layout();
+        self.problem.apply_tensor_jacobian_into(
+            self.time,
+            self.tensor_kernel,
+            state,
+            direction,
+            &layout,
+            out.as_mut(),
+        );
+        out += self
+            .problem
+            .apply_jacobian(self.time, self.weak_kernel, state, direction);
+        if let Some(terms) = self.weak_terms {
+            out += self
+                .problem
+                .apply_state_boundary_jacobian(self.time, state, direction, terms);
+        }
+        if let Some(terms) = self.tensor_terms {
+            out += self
+                .problem
+                .apply_state_tensor_boundary_jacobian(self.time, state, direction, terms);
+        }
+        out
+    }
+
+    pub fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+    ) {
+        let layout = self.problem.field_layout();
+        self.problem.apply_tensor_jacobian_into(
+            self.time,
+            self.tensor_kernel,
+            state,
+            direction,
+            &layout,
+            out.rb_mut(),
+        );
+        out += self
+            .problem
+            .apply_jacobian(self.time, self.weak_kernel, state, direction);
+        if let Some(terms) = self.weak_terms {
+            out += self
+                .problem
+                .apply_state_boundary_jacobian(self.time, state, direction, terms);
+        }
+        if let Some(terms) = self.tensor_terms {
+            out += self
+                .problem
+                .apply_state_tensor_boundary_jacobian(self.time, state, direction, terms);
+        }
+    }
+
+    pub fn at_time(mut self, time: f64) -> Self {
+        self.time = time;
+        self
+    }
+
+    pub fn with_weak_state_boundary<'terms>(
+        self,
+        terms: &'terms StateBoundaryTerms,
+    ) -> SEM2DMixedResidualOperator<'p, 't, 'w, 'bt, 'terms, M, T, W> {
+        SEM2DMixedResidualOperator {
+            problem: self.problem,
+            tensor_kernel: self.tensor_kernel,
+            weak_kernel: self.weak_kernel,
+            time: self.time,
+            tensor_terms: self.tensor_terms,
+            weak_terms: Some(terms),
+        }
+    }
+
+    pub fn with_tensor_state_boundary<'terms>(
+        self,
+        terms: &'terms StateTensorBoundaryTerms<2>,
+    ) -> SEM2DMixedResidualOperator<'p, 't, 'w, 'terms, 'bw, M, T, W> {
+        SEM2DMixedResidualOperator {
+            problem: self.problem,
+            tensor_kernel: self.tensor_kernel,
+            weak_kernel: self.weak_kernel,
+            time: self.time,
+            tensor_terms: Some(terms),
+            weak_terms: self.weak_terms,
+        }
+    }
+}
+
+impl<M, T, W> CompleteResidualOperator for SEM2DMixedResidualOperator<'_, '_, '_, '_, '_, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    T: TensorResidualKernel<2> + Sync,
+    W: ResidualKernel + Sync,
+{
+    fn system_size(&self) -> usize {
+        SEM2DMixedResidualOperator::system_size(self)
+    }
+
+    fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        SEM2DMixedResidualOperator::residual(self, state)
+    }
+
+    fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        SEM2DMixedResidualOperator::assemble_jacobian(self, state)
+    }
+
+    fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        SEM2DMixedResidualOperator::apply_jacobian(self, state, direction)
+    }
+
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        SEM2DMixedResidualOperator::apply_jacobian_into(self, state, direction, out);
+    }
+}
+
+/// Selects a weak, tensor, or mixed residual operator without erasing the
+/// concrete kernel types. The match is performed once at the operator
+/// boundary; each branch retains static dispatch through the SEM loops.
+pub enum SEM2DResidualExecution<'p, 't, 'w, 'bt, 'bw, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+{
+    Weak(SEM2DResidualOperator<'p, 'w, 'bw, M, W>),
+    Tensor(SEM2DTensorResidualOperator<'p, 't, 'bt, M, T>),
+    Mixed(SEM2DMixedResidualOperator<'p, 't, 'w, 'bt, 'bw, M, T, W>),
+}
+
+impl<'p, 't, 'w, 'bt, 'bw, M, T, W> SEM2DResidualExecution<'p, 't, 'w, 'bt, 'bw, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    T: TensorResidualKernel<2> + Sync,
+    W: ResidualKernel + Sync,
+{
+    pub fn system_size(&self) -> usize {
+        match self {
+            Self::Weak(operator) => operator.system_size(),
+            Self::Tensor(operator) => operator.system_size(),
+            Self::Mixed(operator) => operator.system_size(),
+        }
+    }
+
+    pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        match self {
+            Self::Weak(operator) => operator.residual(state),
+            Self::Tensor(operator) => operator.residual(state),
+            Self::Mixed(operator) => operator.residual(state),
+        }
+    }
+
+    pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        match self {
+            Self::Weak(operator) => operator.assemble_jacobian(state),
+            Self::Tensor(operator) => operator.assemble_jacobian(state),
+            Self::Mixed(operator) => operator.assemble_jacobian(state),
+        }
+    }
+
+    pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        match self {
+            Self::Weak(operator) => operator.apply_jacobian(state, direction),
+            Self::Tensor(operator) => operator.apply_jacobian(state, direction),
+            Self::Mixed(operator) => operator.apply_jacobian(state, direction),
+        }
+    }
+
+    pub fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        match self {
+            Self::Weak(operator) => {
+                CompleteResidualOperator::apply_jacobian_into(operator, state, direction, out)
+            }
+            Self::Tensor(operator) => operator.apply_jacobian_into(state, direction, out),
+            Self::Mixed(operator) => operator.apply_jacobian_into(state, direction, out),
+        }
+    }
+
+    pub fn at_time(self, time: f64) -> Self {
+        match self {
+            Self::Weak(operator) => Self::Weak(operator.at_time(time)),
+            Self::Tensor(operator) => Self::Tensor(operator.at_time(time)),
+            Self::Mixed(operator) => Self::Mixed(operator.at_time(time)),
+        }
+    }
+}
+
+impl<M, T, W> CompleteResidualOperator for SEM2DResidualExecution<'_, '_, '_, '_, '_, M, T, W>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
+    T: TensorResidualKernel<2> + Sync,
+    W: ResidualKernel + Sync,
+{
+    fn system_size(&self) -> usize {
+        SEM2DResidualExecution::system_size(self)
+    }
+
+    fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
+        SEM2DResidualExecution::residual(self, state)
+    }
+
+    fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
+        SEM2DResidualExecution::assemble_jacobian(self, state)
+    }
+
+    fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
+        SEM2DResidualExecution::apply_jacobian(self, state, direction)
+    }
+
+    fn apply_jacobian_into(
+        &self,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        SEM2DResidualExecution::apply_jacobian_into(self, state, direction, out);
+    }
+}
+
 impl<'p, 'k, 'b, M, K> SEM2DResidualOperator<'p, 'k, 'b, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
@@ -360,6 +804,68 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             kernel,
             time: 0.0,
             terms: None,
+        }
+    }
+    pub fn tensor_residual_operator<'p, 'k, K: TensorResidualKernel<2> + Sync>(
+        &'p self,
+        kernel: &'k K,
+    ) -> SEM2DTensorResidualOperator<'p, 'k, 'static, M, K>
+    where
+        M: Sync,
+    {
+        self.validate_fields(
+            kernel.nfields(),
+            kernel.field_names(),
+            "tensor residual kernel",
+        );
+        SEM2DTensorResidualOperator {
+            problem: self,
+            kernel,
+            time: 0.0,
+            terms: None,
+        }
+    }
+
+    pub fn mixed_residual_operator<'p, 't, 'w, T, W>(
+        &'p self,
+        tensor_kernel: &'t T,
+        weak_kernel: &'w W,
+    ) -> SEM2DMixedResidualOperator<'p, 't, 'w, 'static, 'static, M, T, W>
+    where
+        M: Sync,
+        T: TensorResidualKernel<2> + Sync,
+        W: ResidualKernel + Sync,
+    {
+        assert_eq!(
+            tensor_kernel.nfields(),
+            weak_kernel.nfields(),
+            "mixed residual kernel field count mismatch"
+        );
+        self.validate_fields(
+            tensor_kernel.nfields(),
+            tensor_kernel.field_names(),
+            "tensor residual kernel",
+        );
+        self.validate_fields(
+            weak_kernel.nfields(),
+            weak_kernel.field_names(),
+            "residual kernel",
+        );
+        if let (Some(tensor_names), Some(weak_names)) =
+            (tensor_kernel.field_names(), weak_kernel.field_names())
+        {
+            assert_eq!(
+                tensor_names, weak_names,
+                "mixed residual kernel field names/order mismatch"
+            );
+        }
+        SEM2DMixedResidualOperator {
+            problem: self,
+            tensor_kernel,
+            weak_kernel,
+            time: 0.0,
+            tensor_terms: None,
+            weak_terms: None,
         }
     }
     /// Build a GLL quadrilateral spectral-element problem.
@@ -952,9 +1458,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             1,
             "residual assembly requires one state column"
         );
-        if kernel.supports_tensor_residual() && self.cell_data.tensor.is_some() {
-            return self.assemble_tensor_residual(time, kernel, state, &layout);
-        }
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
         let local_stride = nfields * cd.ndofs;
@@ -1026,7 +1529,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         residual
     }
 
-    fn assemble_tensor_residual<K: ResidualKernel + Sync>(
+    fn assemble_tensor_residual_static<K: TensorResidualKernel<2> + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1122,6 +1625,62 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         )
     }
 
+    fn assemble_state_tensor_boundary_residual(
+        &self,
+        time: f64,
+        state: MatRef<f64>,
+        terms: &StateTensorBoundaryTerms<2>,
+    ) -> Vec<f64> {
+        assemble_quad_state_tensor_boundary_residual_cached(
+            &self.state_boundary_cache,
+            &self.fields,
+            time,
+            state,
+            &self.cell_reduced_dofs,
+            &self.cell_prescribed_values,
+            &self.field_layout().offsets,
+            terms,
+        )
+    }
+
+    fn assemble_state_tensor_boundary_jacobian(
+        &self,
+        time: f64,
+        state: MatRef<f64>,
+        terms: &StateTensorBoundaryTerms<2>,
+    ) -> SparseColMat<usize, f64> {
+        assemble_quad_state_tensor_boundary_jacobian_cached(
+            &self.state_boundary_cache,
+            &self.fields,
+            time,
+            state,
+            &self.cell_reduced_dofs,
+            &self.cell_prescribed_values,
+            &self.field_layout().offsets,
+            terms,
+        )
+    }
+
+    fn apply_state_tensor_boundary_jacobian(
+        &self,
+        time: f64,
+        state: MatRef<f64>,
+        direction: MatRef<f64>,
+        terms: &StateTensorBoundaryTerms<2>,
+    ) -> Mat<f64> {
+        apply_quad_state_tensor_boundary_terms_cached(
+            &self.state_boundary_cache,
+            &self.fields,
+            time,
+            state,
+            direction,
+            &self.cell_reduced_dofs,
+            &self.cell_prescribed_values,
+            &self.field_layout().offsets,
+            terms,
+        )
+    }
+
     fn assemble_complete_residual<K: ResidualKernel + Sync>(
         &self,
         time: f64,
@@ -1160,9 +1719,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             1,
             "Jacobian assembly requires one state column"
         );
-        if kernel.supports_tensor_jacobian() && self.cell_data.tensor.is_some() {
-            return self.assemble_tensor_jacobian(time, kernel, state, &layout);
-        }
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
@@ -1232,7 +1788,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
     }
 
-    fn assemble_tensor_jacobian<K: ResidualKernel + Sync>(
+    fn assemble_tensor_jacobian<K: TensorResidualKernel<2> + Sync>(
         &self,
         time: f64,
         kernel: &K,
@@ -1405,10 +1961,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             "output column count mismatch"
         );
         out.fill(0.0);
-        if kernel.supports_tensor_jacobian() && self.cell_data.tensor.is_some() {
-            self.apply_tensor_jacobian_into(time, kernel, state, direction, &layout, out);
-            return;
-        }
         let gdim = self.mesh.geometry_dim();
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
@@ -1506,7 +2058,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         }
     }
 
-    fn apply_tensor_jacobian_into<K: ResidualKernel + Sync>(
+    fn apply_tensor_jacobian_into<K: TensorResidualKernel<2> + Sync>(
         &self,
         time: f64,
         kernel: &K,

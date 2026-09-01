@@ -9,6 +9,8 @@ use ndmesh::{
 use ormatex_sem_nd::{
     BoundaryIntegrator, CellState, DofReduction2D, FacetCtx, FieldRegistry, KernelAdvDiff2D,
     KernelAdvDiffSUPG2D, KernelMass, LinearForm, LocalCtx, ResidualKernel, SEM2DProblem,
+    StateTensorBoundaryTerms, TensorKernelAdvDiff2D, TensorKernelEdacDongOutflow2D,
+    TensorKernelEdacNavierStokes2D, TensorKernelEdacSplitBoundaryFlux2D,
 };
 use ormatex_sem_nd::{
     ConstantCoefficient, KernelEdacDongOutflow2D, KernelEdacNavierStokes2D,
@@ -459,6 +461,62 @@ fn high_order_tensor_state_boundary_action_matches_assembled_jacobian() {
 }
 
 #[test]
+fn tensor_state_boundary_operator_matches_weak_boundary_path() {
+    let problem = SEM2DProblem::new(
+        unit_square(1, 1, ReferenceCellType::Quadrilateral, 1),
+        3,
+        FieldRegistry::new(["u", "v", "p"]),
+        DofReduction2D::None,
+    );
+    let state = Mat::from_fn(problem.system_size(), 1, |row, _| 0.2 + 0.01 * row as f64);
+    let direction = Mat::from_fn(problem.system_size(), 1, |row, _| 0.03 * (row + 1) as f64);
+    let weak_terms = StateBoundaryTerms::new().with_default(KernelEdacSplitBoundaryFlux2D);
+    let tensor_terms =
+        StateTensorBoundaryTerms::new().with_default(TensorKernelEdacSplitBoundaryFlux2D);
+    let weak_kernel = GenericEdac(KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1));
+    let tensor_kernel = TensorKernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1);
+    let weak = problem
+        .residual_operator(&weak_kernel)
+        .with_state_boundary(&weak_terms);
+    let tensor = problem
+        .tensor_residual_operator(&tensor_kernel)
+        .with_state_boundary(&tensor_terms);
+
+    let weak_residual = weak.residual(state.as_ref());
+    let tensor_residual = tensor.residual(state.as_ref());
+    for (weak, tensor) in weak_residual.iter().zip(tensor_residual) {
+        assert!((weak - tensor).abs() < 1e-10);
+    }
+
+    let weak_action = weak.apply_jacobian(state.as_ref(), direction.as_ref());
+    let tensor_action = tensor.apply_jacobian(state.as_ref(), direction.as_ref());
+    for row in 0..problem.system_size() {
+        assert!((weak_action[(row, 0)] - tensor_action[(row, 0)]).abs() < 1e-10);
+    }
+
+    let weak_dong_terms =
+        StateBoundaryTerms::new().with_default(KernelEdacDongOutflow2D::new(1.0, 0.05, 1.0));
+    let tensor_dong_terms = StateTensorBoundaryTerms::new()
+        .with_default(TensorKernelEdacDongOutflow2D::new(1.0, 0.05, 1.0));
+    let weak_dong = problem
+        .residual_operator(&weak_kernel)
+        .with_state_boundary(&weak_dong_terms);
+    let tensor_dong = problem
+        .tensor_residual_operator(&tensor_kernel)
+        .with_state_boundary(&tensor_dong_terms);
+    let weak_dong_residual = weak_dong.residual(state.as_ref());
+    let tensor_dong_residual = tensor_dong.residual(state.as_ref());
+    for (weak, tensor) in weak_dong_residual.iter().zip(tensor_dong_residual) {
+        assert!((weak - tensor).abs() < 1e-10);
+    }
+    let weak_dong_action = weak_dong.apply_jacobian(state.as_ref(), direction.as_ref());
+    let tensor_dong_action = tensor_dong.apply_jacobian(state.as_ref(), direction.as_ref());
+    for row in 0..problem.system_size() {
+        assert!((weak_dong_action[(row, 0)] - tensor_dong_action[(row, 0)]).abs() < 1e-10);
+    }
+}
+
+#[test]
 fn volume_kernel_reads_physical_quadrature_points() {
     let mesh: QuadMesh = unit_square(2, 1, ReferenceCellType::Quadrilateral, 1);
     let problem = SEM2DProblem::new(mesh, 2, FieldRegistry::new(["x"]), DofReduction2D::None);
@@ -538,11 +596,13 @@ fn high_order_tensor_action_matches_assembled_on_skew_cells() {
     let direction = Mat::from_fn(n, 2, |row, column| {
         (0.17 * (row + 1) as f64 * (column as f64 + 1.0)).sin()
     });
-    let kernel = KernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let kernel = TensorKernelAdvDiff2D::new(0.13, [0.4, -0.2]);
+    let tensor_operator = problem.tensor_residual_operator(&kernel);
     let assembled = problem
-        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
+        .tensor_residual_operator(&kernel)
+        .assemble_jacobian(state.as_ref())
         .to_dense();
-    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let action = tensor_operator.apply_jacobian(state.as_ref(), direction.as_ref());
     let expected = assembled.as_ref() * direction.as_ref();
     for row in 0..n {
         for column in 0..direction.ncols() {
@@ -567,16 +627,15 @@ fn high_order_edac_tensor_action_matches_assembled() {
     let n = problem.system_size();
     let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.01 * row as f64);
     let direction = Mat::from_fn(n, 1, |row, _| (0.13 * row as f64).sin());
-    let kernel = KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1);
+    let kernel = TensorKernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1);
     let generic = GenericEdac(KernelEdacNavierStokes2D::new(1.0, 0.01, 4.0, 0.1));
-    let tensor_residual = problem.assemble_residual(0.0, &kernel, state.as_ref());
+    let tensor_operator = problem.tensor_residual_operator(&kernel);
+    let tensor_residual = tensor_operator.residual(state.as_ref());
     let generic_residual = problem.assemble_residual(0.0, &generic, state.as_ref());
     for (tensor, generic) in tensor_residual.iter().zip(generic_residual) {
         assert!((tensor - generic).abs() < 1e-10);
     }
-    let assembled = problem
-        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
-        .to_dense();
+    let assembled = tensor_operator.assemble_jacobian(state.as_ref()).to_dense();
     let generic_assembled = problem
         .assemble_residual_jacobian(0.0, &generic, state.as_ref())
         .to_dense();
@@ -585,7 +644,7 @@ fn high_order_edac_tensor_action_matches_assembled() {
             assert!((assembled[(row, col)] - generic_assembled[(row, col)]).abs() < 1e-10);
         }
     }
-    let action = problem.apply_jacobian(0.0, &kernel, state.as_ref(), direction.as_ref());
+    let action = tensor_operator.apply_jacobian(state.as_ref(), direction.as_ref());
     let expected = assembled.as_ref() * direction.as_ref();
     for row in 0..n {
         assert!(
