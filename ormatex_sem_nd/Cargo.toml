@@ -37,5 +37,13 @@ name = "navier-stokes-cavity-comp-tensor"
 path = "examples/navier-stokes/cavity_comp_tensor.rs"
 
 [[example]]
+name = "navier-stokes-cavity-comp-generic"
+path = "examples/navier-stokes/cavity_comp_generic.rs"
+
+[[example]]
 name = "navier-stokes-cylinder-tensor"
 path = "examples/navier-stokes/cylinder_tensor.rs"
+
+[[example]]
+name = "navier-stokes-cylinder-generic"
+path = "examples/navier-stokes/cylinder_generic.rs"

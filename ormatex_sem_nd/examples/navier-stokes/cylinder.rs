@@ -6,47 +6,21 @@ use std::io::{BufWriter, Write};
 use faer::prelude::*;
 use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
-    gmsh_quad_data, DofReduction2D, EdacNavierStokes2DConfig, FieldRegistry,
-    KernelEdacDirectionalDoNothing2D, KernelEdacMomentumConvectionSplit2D,
-    KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
-    KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacViscousStress2D,
-    MeshMetadata, ResidualKernelSum, SEM2DProblem,
+    EdacNavierStokes2DConfig, KernelEdacDirectionalDoNothing2D,
+    KernelEdacMomentumConvectionSplit2D, KernelEdacPressureAdvectionSplit2D,
+    KernelEdacPressureDiffusion2D, KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D,
+    KernelEdacViscousStress2D, ResidualKernelSum,
 };
 
+#[path = "../support/cylinder_setup.rs"]
+mod cylinder_setup;
 #[path = "../support/edac.rs"]
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
+
+use cylinder_setup::{nearest, problem};
 use edac::{epi3, write_spatial_csv, FluidSystem};
-
-fn boundary_facets(data: &MeshMetadata, tag: usize) -> Vec<usize> {
-    data.facet_regions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, region)| {
-            (region.map(|region| region.tag) == Some(tag)).then_some(index)
-        })
-        .collect()
-}
-
-fn dirichlet(values: &[(usize, f64)]) -> DofReduction2D {
-    DofReduction2D::Dirichlet {
-        facets: values.to_vec(),
-    }
-}
-
-fn nearest(positions: &[(f64, f64)], target: (f64, f64)) -> usize {
-    positions
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            let da = (a.0 - target.0).hypot(a.1 - target.1);
-            let db = (b.0 - target.0).hypot(b.1 - target.1);
-            da.partial_cmp(&db).unwrap()
-        })
-        .map(|(index, _)| index)
-        .expect("field has no retained DOFs")
-}
 
 fn split_kernel() -> ResidualKernelSum<'static> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -60,83 +34,23 @@ fn split_kernel() -> ResidualKernelSum<'static> {
 
 fn main() {
     let directional = std::env::args().any(|arg| arg == "--directional");
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/navier-stokes/cylinder.msh"
-    );
-    let data = gmsh_quad_data(path).expect("failed to load all-quad cylinder mesh");
-    let mesh = data.mesh;
-    let metadata = data.metadata;
-    let inlet = boundary_facets(&metadata, 1);
-    let outlet = boundary_facets(&metadata, 2);
-    let cylinder = boundary_facets(&metadata, 5);
-    assert!(!inlet.is_empty() && !outlet.is_empty() && !cylinder.is_empty());
-
-    // Prescribe the free-stream velocity at the inlet. The default outlet uses
-    // a pressure reference; --directional replaces it with a split DDN outlet.
-    let u_in = 1.0;
-    let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, u_in)).collect();
-    let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let wall_u: Vec<_> = cylinder.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let slip_wall: Vec<_> = metadata
-        .facet_regions
-        .iter()
-        .enumerate()
-        .filter_map(|(facet, region)| {
-            (region.map(|region| region.tag) == Some(3)
-                || region.map(|region| region.tag) == Some(4))
-            .then_some(facet)
-        })
-        .collect();
-    let wall_v: Vec<_> = cylinder
-        .iter()
-        .copied()
-        .chain(slip_wall.iter().copied())
-        .map(|facet| (facet, 0.0))
-        .collect();
-    let outlet_p: Vec<_> = outlet.iter().copied().map(|facet| (facet, 0.0)).collect();
-    let problem = SEM2DProblem::new_with_metadata(
-        mesh,
-        2,
-        FieldRegistry::new(["u", "v", "p"]),
-        DofReduction2D::FieldSpecific {
-            reductions: vec![
-                dirichlet(
-                    &inlet_u
-                        .iter()
-                        .chain(wall_u.iter())
-                        .copied()
-                        .collect::<Vec<_>>(),
-                ),
-                dirichlet(
-                    &inlet_v
-                        .iter()
-                        .chain(wall_v.iter())
-                        .copied()
-                        .collect::<Vec<_>>(),
-                ),
-                if directional {
-                    DofReduction2D::None
-                } else {
-                    dirichlet(&outlet_p)
-                },
-            ],
-        },
-        metadata,
-    );
+    let case = problem(directional);
+    let problem = case.problem;
+    let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
 
     let system = if directional {
         FluidSystem::new(&problem, split_kernel())
-            .with_wall_boundaries(cylinder.clone(), slip_wall.clone())
+            .with_wall_boundaries(case.cylinder.clone(), case.slip_wall.clone())
             .with_directional_do_nothing_outflow(
                 KernelEdacDirectionalDoNothing2D::new(1.0),
-                outlet,
+                case.outlet,
                 true,
             )
     } else {
-        FluidSystem::new(&problem, split_kernel()).with_wall_boundaries(cylinder, slip_wall)
+        FluidSystem::new(&problem, split_kernel())
+            .with_wall_boundaries(case.cylinder, case.slip_wall)
     };
-    let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
+
     let dt = 0.005;
     let nsteps = 1000;
     let mut integrator = epi3(state0.as_ref());
