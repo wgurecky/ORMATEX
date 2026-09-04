@@ -12,7 +12,7 @@ use crate::kernels::kernel_common::{
     BilinearForm, BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms,
     TensorResidualKernel,
 };
-use crate::material::MeshMetadata;
+use crate::mesh::{MeshMetadata, PhysicalRegion};
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 
@@ -53,7 +53,7 @@ pub struct BoundaryPoint {
     pub index: usize,
     pub coordinate: f64,
     pub normal: f64,
-    pub physical_region: Option<crate::material::PhysicalRegion>,
+    pub physical_region: Option<PhysicalRegion>,
 }
 
 fn build_dof_map_1d<F>(n: usize, reduction: DofReduction1D, boundary_dof: F) -> ReducedDofMap

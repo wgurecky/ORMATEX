@@ -14,7 +14,7 @@ use crate::fields::FieldRegistry;
 use crate::kernels::kernel_common::{
     BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryTerms,
 };
-use crate::material::{MeshMetadata, PhysicalRegion};
+use crate::mesh::{FacetMeta, MeshMetadata, PhysicalRegion};
 
 use super::contexts::{CellState, FacetCtx, TensorFacetCtx};
 
@@ -33,7 +33,7 @@ pub struct StateBoundaryContributions {
 }
 
 pub(crate) struct QuadStateBoundaryFacet {
-    pub(crate) facet: crate::material::FacetMeta,
+    pub(crate) facet: FacetMeta,
     pub(crate) cell_index: usize,
     pub(crate) facet_dofs: Vec<usize>,
     pub(crate) cell_indices: Vec<usize>,

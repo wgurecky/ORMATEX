@@ -4,64 +4,8 @@ use std::collections::HashMap;
 
 use crate::common::CellState;
 
-/// A Gmsh-style physical region identifier.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct PhysicalRegion {
-    pub dimension: usize,
-    pub tag: usize,
-}
-
-/// Metadata for one volume cell.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CellMeta {
-    pub local_index: usize,
-    pub physical_region: Option<PhysicalRegion>,
-}
-
-/// Metadata for one boundary facet.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FacetMeta {
-    pub local_index: usize,
-    pub physical_region: Option<PhysicalRegion>,
-}
-
-/// Optional mesh metadata indexed by mesh-local entity index.
-///
-/// Empty region vectors mean no region metadata. Nonempty vectors must follow
-/// the `local_index()` ordering of the corresponding mesh entity type.
-#[derive(Clone, Debug, Default)]
-pub struct MeshMetadata {
-    pub cell_regions: Vec<Option<PhysicalRegion>>,
-    pub facet_regions: Vec<Option<PhysicalRegion>>,
-    pub physical_names: HashMap<PhysicalRegion, String>,
-}
-
-impl MeshMetadata {
-    pub fn validate(&self, cell_count: usize, facet_count: usize) {
-        assert!(
-            self.cell_regions.is_empty() || self.cell_regions.len() == cell_count,
-            "cell-region metadata length does not match the mesh"
-        );
-        assert!(
-            self.facet_regions.is_empty() || self.facet_regions.len() == facet_count,
-            "facet-region metadata length does not match the mesh"
-        );
-    }
-
-    pub fn cell(&self, index: usize) -> CellMeta {
-        CellMeta {
-            local_index: index,
-            physical_region: self.cell_regions.get(index).copied().flatten(),
-        }
-    }
-
-    pub fn facet(&self, index: usize) -> FacetMeta {
-        FacetMeta {
-            local_index: index,
-            physical_region: self.facet_regions.get(index).copied().flatten(),
-        }
-    }
-}
+// Keep the old module paths available while mesh metadata has its own home.
+pub use crate::mesh::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion};
 
 /// All information available while evaluating a coefficient at one point.
 ///

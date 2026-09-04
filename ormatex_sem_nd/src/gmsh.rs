@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-use crate::material::{MeshMetadata, PhysicalRegion};
+use crate::mesh::{MeshMetadata, PhysicalRegion};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{
     traits::{Builder, Entity, Geometry, Mesh, Point, Topology},
@@ -28,10 +28,25 @@ pub fn gmsh_quad_data(path: &str) -> Result<GmshQuadData, String> {
     let mut lines = Vec::new();
     let mut quads = Vec::new();
     let mut physical_names = HashMap::new();
+    let mut mesh_format_seen = false;
     let mut input = source.lines();
 
     while let Some(section) = input.next() {
         match section.trim() {
+            "$MeshFormat" => {
+                let fields: Vec<_> = input
+                    .next()
+                    .ok_or("missing mesh-format header")?
+                    .split_whitespace()
+                    .collect();
+                if fields.len() != 3 || !fields[0].starts_with("2.") || fields[1] != "0" {
+                    return Err("only ASCII MSH2 meshes are supported".into());
+                }
+                if input.next().map(str::trim) != Some("$EndMeshFormat") {
+                    return Err("missing $EndMeshFormat".into());
+                }
+                mesh_format_seen = true;
+            }
             "$PhysicalNames" => {
                 let count: usize = input
                     .next()
@@ -48,10 +63,15 @@ pub fn gmsh_quad_data(path: &str) -> Result<GmshQuadData, String> {
                         .parse()
                         .map_err(|_| "invalid physical dimension")?;
                     let tag = fields[1].parse().map_err(|_| "invalid physical tag")?;
-                    physical_names.insert(
-                        PhysicalRegion { dimension, tag },
-                        fields[2].trim().trim_matches('"').to_string(),
-                    );
+                    if physical_names
+                        .insert(
+                            PhysicalRegion { dimension, tag },
+                            fields[2].trim().trim_matches('"').to_string(),
+                        )
+                        .is_some()
+                    {
+                        return Err("duplicate physical name declaration".into());
+                    }
                 }
                 if input.next().map(str::trim) != Some("$EndPhysicalNames") {
                     return Err("missing $EndPhysicalNames".into());
@@ -114,9 +134,10 @@ pub fn gmsh_quad_data(path: &str) -> Result<GmshQuadData, String> {
                     }
                     let physical_tag = fields[3..nodes_start]
                         .first()
-                        .map(|tag| tag.parse())
+                        .map(|tag| tag.parse::<usize>())
                         .transpose()
-                        .map_err(|_| "invalid physical tag")?;
+                        .map_err(|_| "invalid physical tag")?
+                        .filter(|tag| *tag != 0);
                     let element_nodes: Result<Vec<usize>, _> = fields[nodes_start..]
                         .iter()
                         .map(|node| node.parse())
@@ -158,6 +179,9 @@ pub fn gmsh_quad_data(path: &str) -> Result<GmshQuadData, String> {
         }
     }
 
+    if !mesh_format_seen {
+        return Err("missing $MeshFormat section".into());
+    }
     if nodes.is_empty() || quads.is_empty() {
         return Err("mesh must contain nodes and quadrilateral cells".into());
     }
@@ -321,5 +345,7 @@ mod tests {
             }],
             "cylinder"
         );
+        assert!(!data.metadata.boundary_facets("cylinder").is_empty());
+        assert!(!data.metadata.cell_indices("domain").is_empty());
     }
 }

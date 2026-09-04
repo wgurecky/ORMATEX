@@ -1,20 +1,10 @@
-use ormatex_sem_nd::{DofReduction2D, FieldRegistry, MeshMetadata, QuadMesh, SEM2DProblem};
+use ormatex_sem_nd::{DofReduction2D, FieldRegistry, QuadMesh, SEM2DProblem};
 
 pub struct CylinderCase {
     pub problem: SEM2DProblem<QuadMesh>,
     pub outlet: Vec<usize>,
     pub cylinder: Vec<usize>,
     pub slip_wall: Vec<usize>,
-}
-
-fn boundary_facets(data: &MeshMetadata, tag: usize) -> Vec<usize> {
-    data.facet_regions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, region)| {
-            (region.map(|region| region.tag) == Some(tag)).then_some(index)
-        })
-        .collect()
 }
 
 fn dirichlet(values: &[(usize, f64)]) -> DofReduction2D {
@@ -44,23 +34,18 @@ pub fn problem(directional: bool) -> CylinderCase {
     let data = ormatex_sem_nd::gmsh_quad_data(path).expect("failed to load all-quad cylinder mesh");
     let mesh = data.mesh;
     let metadata = data.metadata;
-    let inlet = boundary_facets(&metadata, 1);
-    let outlet = boundary_facets(&metadata, 2);
-    let cylinder = boundary_facets(&metadata, 5);
+    let inlet = metadata.boundary_facets("inlet");
+    let outlet = metadata.boundary_facets("outlet");
+    let cylinder = metadata.boundary_facets("cylinder");
     assert!(!inlet.is_empty() && !outlet.is_empty() && !cylinder.is_empty());
 
     let inlet_u: Vec<_> = inlet.iter().copied().map(|facet| (facet, 1.0)).collect();
     let inlet_v: Vec<_> = inlet.iter().copied().map(|facet| (facet, 0.0)).collect();
     let wall_u: Vec<_> = cylinder.iter().copied().map(|facet| (facet, 0.0)).collect();
     let slip_wall: Vec<_> = metadata
-        .facet_regions
-        .iter()
-        .enumerate()
-        .filter_map(|(facet, region)| {
-            (region.map(|region| region.tag) == Some(3)
-                || region.map(|region| region.tag) == Some(4))
-            .then_some(facet)
-        })
+        .boundary_facets("bottom")
+        .into_iter()
+        .chain(metadata.boundary_facets("top"))
         .collect();
     let wall_v: Vec<_> = cylinder
         .iter()

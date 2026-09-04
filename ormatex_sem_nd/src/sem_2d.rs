@@ -16,7 +16,7 @@ use crate::kernels::kernel_common::{
     BoundaryIntegrator, LinearForm, ResidualKernel, StateBoundaryTerms, StateTensorBoundaryTerms,
     TensorResidualKernel,
 };
-use crate::material::MeshMetadata;
+use crate::mesh::MeshMetadata;
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 

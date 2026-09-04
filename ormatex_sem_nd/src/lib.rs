@@ -6,6 +6,7 @@ pub mod gmsh;
 pub mod jacobian;
 pub mod kernels;
 pub mod material;
+pub mod mesh;
 pub mod sem_1d;
 pub mod sem_2d;
 mod simd;
@@ -45,9 +46,9 @@ pub use kernels::{
     TensorResidualKernelSum,
 };
 pub use material::{
-    CellMeta, Coefficient, ConstantCoefficient, FacetMeta, MaterialContext, MaterialProperty,
-    MeshMetadata, PhysicalRegion, RegionCoefficient,
+    Coefficient, ConstantCoefficient, MaterialContext, MaterialProperty, RegionCoefficient,
 };
+pub use mesh::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
 pub use sem_1d::{
     BoundaryPoint, DofReduction1D, SEM1DMixedResidualOperator, SEM1DProblem,
     SEM1DResidualExecution, SEM1DResidualOperator, SEM1DTensorResidualOperator,
