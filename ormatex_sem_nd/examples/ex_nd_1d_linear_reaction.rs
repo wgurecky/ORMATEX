@@ -75,7 +75,7 @@ fn main() {
     let nsteps = 100;
 
     let problem = SEM1DProblem::new(
-        unit_interval(nx),
+        unit_interval(nx, 1),
         p,
         FieldRegistry::new(["c0", "c1", "c2"]),
         DofReduction1D::Periodic { facets: [0, nx] },

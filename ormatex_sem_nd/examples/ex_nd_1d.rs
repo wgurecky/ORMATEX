@@ -29,7 +29,7 @@ fn main() {
     let nsteps = 200;
     let snapshot_every = 20;
 
-    let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> = unit_interval(nx);
+    let mesh: SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>> = unit_interval(nx, 1);
     let problem = SEM1DProblem::new(
         mesh,
         p,

@@ -78,7 +78,7 @@ fn main() {
     let dt = 0.002;
     let nsteps = 25;
 
-    let mesh = unit_interval(nx);
+    let mesh = unit_interval(nx, 1);
     let problem = SEM1DProblem::new(
         mesh,
         p,

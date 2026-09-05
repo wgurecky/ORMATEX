@@ -30,7 +30,7 @@ fn p2_transient_diffusion_reaches_dirichlet_linear_profile() {
     let left_temperature = 1.5;
     let right_temperature = 4.5;
     let problem = SEM1DProblem::new(
-        unit_interval(nx),
+        unit_interval(nx, 1),
         2,
         FieldRegistry::new(["temperature"]),
         DofReduction1D::Dirichlet {
@@ -51,7 +51,7 @@ fn p2_transient_diffusion_reaches_dirichlet_linear_profile() {
 #[test]
 fn p2_transient_diffusion_reaches_neumann_robin_linear_profile() {
     let problem = SEM1DProblem::new(
-        unit_interval(8),
+        unit_interval(8, 1),
         2,
         FieldRegistry::new(["temperature"]),
         DofReduction1D::None,

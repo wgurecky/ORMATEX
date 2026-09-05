@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-faer = { version = "0.23.2", features = ["unstable"] }
-ndelement = { git = "https://codeberg.org/nd-project/nd.git" }
-ndmesh = { git = "https://codeberg.org/nd-project/nd.git" }
-ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" }
+faer = { version = "0.23", features = ["unstable"] }
+ndelement = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
+ndmesh = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
+ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
 rlst = "0.6"
 quadraturerules = "0.12.0"
 rayon = "1"
@@ -15,6 +15,15 @@ pulp = "0.21.5"
 
 [dev-dependencies]
 ormatex = { path = "..", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+blas-src = { version = "0.14", features = ["accelerate"] }
+lapack-src = { version = "0.13", features = ["accelerate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openblas-src = { version = "0.10", features = ["system"] }
+lapack-src = { version = "0.13", features = ["openblas"] }
+blas-src = { version = "0.14", features = ["openblas"] }
 
 [[example]]
 name = "navier-stokes-cylinder"

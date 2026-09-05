@@ -12,7 +12,7 @@ use ormatex_sem_nd::{
 #[test]
 fn one_dimensional_fields_can_have_different_reductions() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         1,
         FieldRegistry::new(["a", "b"]),
         DofReduction1D::FieldSpecific {
@@ -96,7 +96,7 @@ fn explicit_dirichlet_values_can_override_shared_corners() {
 #[test]
 fn field_specific_offsets_are_used_by_multifield_assembly() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         1,
         FieldRegistry::new(["a", "b"]),
         DofReduction1D::FieldSpecific {
@@ -134,7 +134,7 @@ fn field_specific_offsets_are_used_by_multifield_assembly() {
 #[test]
 fn named_field_values_include_reduced_positions() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         1,
         FieldRegistry::new(["temperature", "pressure"]),
         DofReduction1D::None,
@@ -151,7 +151,7 @@ fn named_field_values_include_reduced_positions() {
 #[should_panic(expected = "field names/order do not match")]
 fn named_kernel_must_match_problem_field_order() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         1,
         FieldRegistry::new(["a", "b"]),
         DofReduction1D::None,

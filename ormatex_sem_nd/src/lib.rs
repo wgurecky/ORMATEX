@@ -1,5 +1,17 @@
 //! Spectral-element finite-element infrastructure built on `ndmesh`.
 
+// Link the BLAS/LAPACK implementation into binaries using this crate.
+#[cfg(target_os = "linux")]
+extern crate blas_src;
+#[cfg(target_os = "linux")]
+extern crate lapack_src;
+#[cfg(target_os = "linux")]
+extern crate openblas_src;
+#[cfg(target_os = "macos")]
+extern crate blas_src;
+#[cfg(target_os = "macos")]
+extern crate lapack_src;
+
 pub mod common;
 pub mod fields;
 pub mod gmsh;

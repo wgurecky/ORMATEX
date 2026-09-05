@@ -218,7 +218,7 @@ fn flux_context() -> LocalCtx<'static> {
 }
 
 fn mesh(nx: usize) -> IntervalMesh {
-    unit_interval(nx)
+    unit_interval(nx, 1)
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn boundary_kernel_reads_endpoint_coordinates_and_normal() {
 #[test]
 fn state_boundary_1d_paths_match() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         2,
         FieldRegistry::new(["u"]),
         DofReduction1D::None,
@@ -336,7 +336,7 @@ fn state_boundary_1d_paths_match() {
 #[test]
 fn unified_matrix_free_jacobian_includes_1d_state_boundary() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         2,
         FieldRegistry::new(["u"]),
         DofReduction1D::None,
@@ -408,7 +408,7 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
 #[test]
 fn tensor_1d_in_place_jacobian_matches_allocating_action() {
     let problem = SEM1DProblem::new(
-        unit_interval(2),
+        unit_interval(2, 1),
         8,
         FieldRegistry::new(["temperature"]),
         DofReduction1D::None,
@@ -433,7 +433,7 @@ fn tensor_1d_in_place_jacobian_matches_allocating_action() {
 #[test]
 fn tensor_1d_path_matches_generic_residual_jacobian_and_bilinear() {
     let problem = SEM1DProblem::new(
-        unit_interval(2),
+        unit_interval(2, 1),
         8,
         FieldRegistry::new(["temperature"]),
         DofReduction1D::None,

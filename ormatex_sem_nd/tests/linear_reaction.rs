@@ -32,7 +32,7 @@ fn kernel() -> KernelLinearReaction {
 #[test]
 fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
     let problem = SEM1DProblem::new(
-        unit_interval(1),
+        unit_interval(1, 1),
         2,
         FieldRegistry::new(["c0", "c1", "c2"]),
         DofReduction1D::None,

@@ -43,7 +43,7 @@ fn p2_epi3_krylov_advects_and_diffuses_periodic_gaussian() {
     let nsteps = (final_time / dt) as usize;
 
     let problem = SEM1DProblem::new(
-        unit_interval(nx),
+        unit_interval(nx, 1),
         2,
         FieldRegistry::new(["u"]),
         DofReduction1D::Periodic { facets: [0, nx] },
