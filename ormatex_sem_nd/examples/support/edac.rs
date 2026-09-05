@@ -298,11 +298,12 @@ impl<'a, K> TensorFluidSystem<'a, K> {
             "directional do-nothing outflow requires at least one facet"
         );
         let terms = if split_form {
-            StateTensorBoundaryTerms::new()
+            self.terms
+                .clone()
                 .with_default(TensorKernelEdacSplitBoundaryFlux2D)
                 .with_entities(facets, kernel.with_split_flux())
         } else {
-            StateTensorBoundaryTerms::new().with_entities(facets, kernel)
+            self.terms.clone().with_entities(facets, kernel)
         };
         self.with_state_boundary(terms)
     }

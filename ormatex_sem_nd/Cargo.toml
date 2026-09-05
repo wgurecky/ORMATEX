@@ -47,3 +47,7 @@ path = "examples/navier-stokes/cylinder_tensor.rs"
 [[example]]
 name = "navier-stokes-cylinder-generic"
 path = "examples/navier-stokes/cylinder_generic.rs"
+
+[[example]]
+name = "navier-stokes-backward-step-tensor"
+path = "examples/navier-stokes/backward_step_tensor.rs"

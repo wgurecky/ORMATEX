@@ -1,14 +1,15 @@
 use faer::prelude::{Mat, MatRef};
 use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{
-    ciarlet::LagrangeElementFamily,
+    ciarlet::{LagrangeElementFamily, LagrangeVariant},
     traits::{ElementFamily, FiniteElement},
-    types::ReferenceCellType,
+    types::{Continuity, ReferenceCellType},
 };
 use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::traits::{Entity, Geometry, GeometryMap, Mesh, Point, Topology};
 use quadraturerules::{single_integral_quadrature, Domain, QuadratureRule};
 use rlst::{rlst_dynamic_array, DynArray};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::fields::FieldRegistry;
 use crate::kernels::kernel_common::{
@@ -30,6 +31,65 @@ pub struct BoundaryContributions {
 pub struct StateBoundaryContributions {
     pub residual: Vec<f64>,
     pub jacobian: SparseColMat<usize, f64>,
+}
+
+/// Collect Dirichlet values with preferred-facet precedence.
+///
+/// Every closure DOF on `preferred` facets is assigned first. Values on
+/// `fallback` facets are then assigned only to DOFs not already covered by a
+/// preferred facet. This resolves shared corners without requiring callers to
+/// inspect p-dependent endpoint DOFs. The result is suitable for
+/// `DofReduction2D::DirichletValues`.
+pub fn dirichlet_values_with_precedence<M>(
+    mesh: &M,
+    p: usize,
+    preferred: &[(usize, f64)],
+    fallback: &[(usize, f64)],
+) -> Vec<(usize, f64)>
+where
+    M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+{
+    assert!(p >= 1, "Dirichlet boundary values require p >= 1");
+    let family = LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+    let space = FunctionSpaceImpl::new(mesh, &family);
+    let mut values = BTreeMap::new();
+    let mut preferred_dofs = HashSet::new();
+
+    for &(facet, value) in preferred {
+        assert!(value.is_finite(), "Dirichlet value must be finite");
+        for &dof in space
+            .entity_closure_dofs(ReferenceCellType::Interval, facet)
+            .expect("boundary facet has no closure DOFs")
+        {
+            if let Some(previous) = values.insert(dof, value) {
+                assert!(
+                    (previous - value).abs() <= 1e-12 * previous.abs().max(value.abs()).max(1.0),
+                    "conflicting preferred Dirichlet values for DOF {dof}"
+                );
+            }
+            preferred_dofs.insert(dof);
+        }
+    }
+
+    for &(facet, value) in fallback {
+        assert!(value.is_finite(), "Dirichlet value must be finite");
+        for &dof in space
+            .entity_closure_dofs(ReferenceCellType::Interval, facet)
+            .expect("boundary facet has no closure DOFs")
+        {
+            if preferred_dofs.contains(&dof) {
+                continue;
+            }
+            if let Some(previous) = values.insert(dof, value) {
+                assert!(
+                    (previous - value).abs() <= 1e-12 * previous.abs().max(value.abs()).max(1.0),
+                    "conflicting fallback Dirichlet values for DOF {dof}"
+                );
+            }
+        }
+    }
+
+    values.into_iter().collect()
 }
 
 pub(crate) struct QuadStateBoundaryFacet {
@@ -1619,4 +1679,94 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
     }
 
     SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndelement::types::ReferenceCellType;
+    use ndfunctionspace::traits::FunctionSpace;
+    use ndmesh::{
+        shapes::unit_square,
+        traits::{Entity, Geometry, Mesh, Point, Topology},
+    };
+    use std::collections::HashMap;
+
+    fn square_inlet_and_walls<M>(mesh: &M) -> (usize, Vec<usize>)
+    where
+        M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
+    {
+        let inlet = mesh
+            .entity_iter(ReferenceCellType::Interval)
+            .find(|facet| {
+                facet.geometry().points().all(|point| {
+                    let mut xy = [0.0; 2];
+                    point.coords(&mut xy);
+                    xy[0].abs() < 1e-12
+                })
+            })
+            .expect("unit square has no left boundary")
+            .local_index();
+        let walls = mesh
+            .entity_iter(ReferenceCellType::Interval)
+            .filter_map(|facet| {
+                let points: Vec<_> = facet
+                    .geometry()
+                    .points()
+                    .map(|point| {
+                        let mut xy = [0.0; 2];
+                        point.coords(&mut xy);
+                        xy
+                    })
+                    .collect();
+                let horizontal = points.iter().all(|xy| xy[1].abs() < 1e-12)
+                    || points.iter().all(|xy| (xy[1] - 1.0).abs() < 1e-12);
+                horizontal.then_some(facet.local_index())
+            })
+            .collect();
+        (inlet, walls)
+    }
+
+    #[test]
+    fn dirichlet_values_support_gll_orders_and_prefer_walls() {
+        let mesh = unit_square(1, 1, ReferenceCellType::Quadrilateral, 1);
+        let (inlet, walls) = square_inlet_and_walls(&mesh);
+
+        for p in 1..=3 {
+            let family =
+                LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+            let space = FunctionSpaceImpl::new(&mesh, &family);
+            let inlet_dofs = space
+                .entity_closure_dofs(ReferenceCellType::Interval, inlet)
+                .unwrap();
+            let inlet_endpoints: HashSet<_> = mesh
+                .entity(ReferenceCellType::Interval, inlet)
+                .unwrap()
+                .topology()
+                .sub_entity_iter(ReferenceCellType::Point)
+                .flat_map(|vertex| {
+                    space
+                        .entity_closure_dofs(ReferenceCellType::Point, vertex)
+                        .unwrap()
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let preferred: Vec<_> = walls.iter().copied().map(|facet| (facet, 0.0)).collect();
+            let values: HashMap<_, _> =
+                dirichlet_values_with_precedence(&mesh, p, &preferred, &[(inlet, 1.0)])
+                    .into_iter()
+                    .collect();
+
+            assert_eq!(inlet_dofs.len(), p + 1);
+            for &dof in inlet_dofs {
+                let expected = if inlet_endpoints.contains(&dof) {
+                    0.0
+                } else {
+                    1.0
+                };
+                assert_eq!(values[&dof], expected);
+            }
+        }
+    }
 }

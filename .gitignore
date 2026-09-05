@@ -3,3 +3,5 @@
 __pycache__
 *.egg-info
 *.png
+target/*
+ormatex_sem_nd/target/*

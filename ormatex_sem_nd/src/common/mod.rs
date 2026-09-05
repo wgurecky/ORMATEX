@@ -15,7 +15,10 @@ pub(crate) use boundary::{
     assemble_quad_state_tensor_boundary_residual_cached, build_quad_state_boundary_cache,
     QuadStateBoundaryCache,
 };
-pub use boundary::{BoundaryContributions, BoundaryFacet, StateBoundaryContributions};
+pub use boundary::{
+    dirichlet_values_with_precedence, BoundaryContributions, BoundaryFacet,
+    StateBoundaryContributions,
+};
 pub(crate) use cell::{
     cell_ctx, interpolate_cell_state, interpolate_tensor_cell_coefficients,
     interpolate_tensor_cell_state, CellData, TensorProductData, CELL_BATCH_SIZE,

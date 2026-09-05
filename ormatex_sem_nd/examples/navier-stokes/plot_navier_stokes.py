@@ -23,6 +23,7 @@ DEFAULT_FILES = (
     "navier_stokes_cylinder.csv",
     "navier_stokes_cylinder_tensor.csv",
     "navier_stokes_cylinder_generic.csv",
+    "navier_stokes_backward_step_tensor.csv",
 )
 
 
