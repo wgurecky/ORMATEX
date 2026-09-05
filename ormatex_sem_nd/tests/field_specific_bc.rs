@@ -148,8 +148,7 @@ fn named_field_values_include_reduced_positions() {
 }
 
 #[test]
-#[should_panic(expected = "field names/order do not match")]
-fn named_kernel_must_match_problem_field_order() {
+fn named_kernel_can_use_a_different_local_field_order() {
     let problem = SEM1DProblem::new(
         unit_interval(1, 1),
         1,
@@ -164,5 +163,10 @@ fn named_kernel_must_match_problem_field_order() {
     .unwrap();
     let kernel = KernelLinearReaction::with_field_names(rates, ["b", "a"]);
     let state = Mat::zeros(problem.system_size(), 1);
-    problem.assemble_residual(0.0, &kernel, state.as_ref());
+    assert_eq!(
+        problem
+            .assemble_residual(0.0, &kernel, state.as_ref())
+            .len(),
+        problem.system_size()
+    );
 }

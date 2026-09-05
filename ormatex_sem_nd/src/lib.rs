@@ -3,14 +3,14 @@
 // Link the BLAS/LAPACK implementation into binaries using this crate.
 #[cfg(target_os = "linux")]
 extern crate blas_src;
+#[cfg(target_os = "macos")]
+extern crate blas_src;
 #[cfg(target_os = "linux")]
+extern crate lapack_src;
+#[cfg(target_os = "macos")]
 extern crate lapack_src;
 #[cfg(target_os = "linux")]
 extern crate openblas_src;
-#[cfg(target_os = "macos")]
-extern crate blas_src;
-#[cfg(target_os = "macos")]
-extern crate lapack_src;
 
 pub mod common;
 pub mod fields;
@@ -36,25 +36,28 @@ pub use jacobian::{
 pub use kernels::{
     BilinearForm, BoundaryIntegrator, EdacNavierStokes2DConfig, FluxKernel1D, KernelAdvDiff,
     KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
+    KernelBoussinesq2D, KernelEnergyAdvectionDiffusion2D,
     KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D, KernelEdacDirectionalDoNothing2D,
     KernelEdacDongOutflow2D, KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit2D,
     KernelEdacNavierStokes2D, KernelEdacNoSlipWall2D, KernelEdacPressureAdvection2D,
     KernelEdacPressureAdvectionSplit2D, KernelEdacPressureDiffusion2D,
     KernelEdacPressureDivergence2D, KernelEdacPressureGradient2D, KernelEdacSlipWall2D,
     KernelEdacSplitBoundaryFlux2D, KernelEdacViscousStress2D, KernelLinearReaction, KernelMass,
-    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, ResidualKernelSum,
-    RobinConvection, SmagorinskyLilly2D, StateBoundaryIntegrator, StateBoundaryTerms,
-    StateTensorBoundaryIntegrator, StateTensorBoundaryTerms, TensorKernelAdvDiff,
-    TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
-    TensorKernelAdvection2D, TensorKernelConservationLaw1D, TensorKernelDiffusion,
-    TensorKernelDiffusion2D, TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
-    TensorKernelEdacMomentumConvection2D, TensorKernelEdacMomentumConvectionSplit2D,
-    TensorKernelEdacNavierStokes2D, TensorKernelEdacNoSlipWall2D,
-    TensorKernelEdacPressureAdvection2D, TensorKernelEdacPressureAdvectionSplit2D,
-    TensorKernelEdacPressureDiffusion2D, TensorKernelEdacPressureDivergence2D,
-    TensorKernelEdacPressureGradient2D, TensorKernelEdacSlipWall2D,
-    TensorKernelEdacSplitBoundaryFlux2D, TensorKernelEdacViscousStress2D,
-    TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource, TensorResidualKernel,
+    KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel, ResidualKernelSet,
+    ResidualKernelSum, RobinConvection, SmagorinskyLilly2D, StateBoundaryIntegrator,
+    StateBoundaryTerms, StateTensorBoundaryIntegrator, StateTensorBoundaryTerms,
+    TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
+    TensorKernelAdvection2D, TensorKernelBoussinesq2D, TensorKernelConservationLaw1D,
+    TensorKernelEnergyAdvectionDiffusion2D,
+    TensorKernelDiffusion, TensorKernelDiffusion2D, TensorKernelEdacDirectionalDoNothing2D,
+    TensorKernelEdacDongOutflow2D, TensorKernelEdacMomentumConvection2D,
+    TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacNavierStokes2D,
+    TensorKernelEdacNoSlipWall2D, TensorKernelEdacPressureAdvection2D,
+    TensorKernelEdacPressureAdvectionSplit2D, TensorKernelEdacPressureDiffusion2D,
+    TensorKernelEdacPressureDivergence2D, TensorKernelEdacPressureGradient2D,
+    TensorKernelEdacSlipWall2D, TensorKernelEdacSplitBoundaryFlux2D,
+    TensorKernelEdacViscousStress2D, TensorKernelLinearReaction, TensorKernelMass,
+    TensorKernelVolumeSource, TensorResidualKernel, TensorResidualKernelSet,
     TensorResidualKernelSum,
 };
 pub use material::{

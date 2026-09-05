@@ -101,7 +101,7 @@ pub(crate) fn interpolate_cell_state<'a>(
     let quadrature_point_count = cell_data.npts;
     assert_eq!(field_reduced_dofs.len(), field_count);
     assert_eq!(field_prescribed_values.len(), field_count);
-    assert!(field_offsets.len() > field_count);
+    assert!(field_offsets.len() >= field_count);
     values[..field_count * quadrature_point_count].fill(0.0);
     field_grads[..field_count * geometric_dimension * quadrature_point_count].fill(0.0);
     for field_index in 0..field_count {
@@ -138,6 +138,7 @@ pub(crate) fn interpolate_cell_state<'a>(
         gdim: geometric_dimension,
         values: &values[..field_count * quadrature_point_count],
         grads: &field_grads[..field_count * geometric_dimension * quadrature_point_count],
+        field_indices: &[],
     }
 }
 
@@ -219,6 +220,7 @@ pub(crate) fn interpolate_tensor_cell_coefficients<'a>(
         gdim: geometric_dimension,
         values: &values[..field_count * npts],
         grads: &field_grads[..field_count * geometric_dimension * npts],
+        field_indices: &[],
     }
 }
 
@@ -238,7 +240,7 @@ pub(crate) fn interpolate_tensor_cell_state<'a>(
 ) -> CellState<'a> {
     assert_eq!(field_reduced_dofs.len(), field_count);
     assert_eq!(field_prescribed_values.len(), field_count);
-    assert!(field_offsets.len() > field_count);
+    assert!(field_offsets.len() >= field_count);
     assert_eq!(coefficients.len(), field_count * cell_data.ndofs);
     for field in 0..field_count {
         assert_eq!(

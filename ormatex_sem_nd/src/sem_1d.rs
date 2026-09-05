@@ -1,11 +1,11 @@
 use crate::common::{
     add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
     interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state,
-    push_local_matrix_triplets, scatter_local_vector, BoundaryContributions, CellData, CellState,
-    FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap, StateBoundaryContributions, TensorCtx,
-    TensorProductData, CELL_BATCH_SIZE,
+    push_local_matrix_triplets, push_rectangular_local_matrix_triplets, scatter_local_vector,
+    BoundaryContributions, CellData, CellState, FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap,
+    StateBoundaryContributions, TensorCtx, TensorProductData, CELL_BATCH_SIZE,
 };
-use crate::fields::{FieldRegistry, FieldValues};
+use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::jacobian::CompleteResidualOperator;
 use crate::kernels::kernel_common::{
     apply_tensor_bilinear_column_1d, apply_tensor_jacobian_1d, assemble_tensor_residual_1d,
@@ -540,7 +540,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        self.validate_fields(kernel.nfields(), kernel.field_names(), "residual kernel");
+        self.resolve_residual_selection(kernel, "residual kernel");
         SEM1DResidualOperator {
             problem: self,
             kernel,
@@ -555,9 +555,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        self.validate_fields(
-            kernel.nfields(),
-            kernel.field_names(),
+        self.fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
             "tensor residual kernel",
         );
         SEM1DTensorResidualOperator {
@@ -978,6 +980,44 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         }
     }
 
+    fn cell_field_maps_for(
+        &self,
+        cell: usize,
+        fields: &[usize],
+    ) -> (Vec<&[Option<usize>]>, Vec<&[Option<f64>]>) {
+        if self.cell_reduced_dofs.len() == 1 {
+            (
+                vec![&self.cell_reduced_dofs[0][cell]; fields.len()],
+                vec![&self.cell_prescribed_values[0][cell]; fields.len()],
+            )
+        } else {
+            (
+                fields
+                    .iter()
+                    .map(|&field| self.cell_reduced_dofs[field][cell].as_slice())
+                    .collect(),
+                fields
+                    .iter()
+                    .map(|&field| self.cell_prescribed_values[field][cell].as_slice())
+                    .collect(),
+            )
+        }
+    }
+
+    fn resolve_residual_selection<K: ResidualKernel>(
+        &self,
+        kernel: &K,
+        context: &str,
+    ) -> FieldSelection {
+        self.fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            context,
+        )
+    }
+
     pub fn dof_positions(&self) -> Vec<f64> {
         let mut out = vec![f64::NAN; self.reduced_size()];
         for (full, &x) in self.dof_x.iter().enumerate() {
@@ -1087,10 +1127,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
-        assert!(nfields > 0, "kernel must contain at least one field");
-        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let selection = self.resolve_residual_selection(kernel, "residual kernel");
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
         let layout = self.field_layout();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -1098,7 +1148,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             "residual assembly requires one state column"
         );
         let cd = &self.cell_data;
-        let local_stride = nfields * cd.ndofs;
+        let local_stride = noutputs * cd.ndofs;
         let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
@@ -1106,8 +1156,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 || {
                     (
                         vec![0.0; cd.ndofs * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
                         vec![0.0; local_stride],
                     )
                 },
@@ -1115,20 +1165,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     let mut batch = vec![0.0; reduced_batch.len() * local_stride];
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
                             &mut basis_grads[..ndofs * cd.npts],
                         );
                         let state_cell = self.prepare_cell_state(
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -1153,11 +1203,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 .enumerate()
             {
                 let ndofs = reduced_dofs.len();
-                let cell_size = nfields * ndofs;
+                let cell_size = noutputs * ndofs;
                 let local =
                     &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
-                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
-                scatter_local_vector(&mut residual, local, &field_maps, nfields, &layout.offsets);
+                let (field_maps, _) =
+                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
+                scatter_local_vector(&mut residual, local, &field_maps, noutputs, &output_offsets);
             }
         }
         residual
@@ -1173,18 +1224,36 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
+        let selection = self.fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor residual kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         let cd = &self.cell_data;
-        let local_stride = nfields * cd.ndofs;
+        let local_stride = noutputs * cd.ndofs;
         let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
                 || {
                     (
-                        vec![0.0; local_stride],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
+                        vec![0.0; ninputs * cd.ndofs],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
                         vec![0.0; local_stride],
                     )
                 },
@@ -1192,21 +1261,21 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     let mut batch = vec![0.0; reduced_batch.len() * local_stride];
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
                             cd,
                             1,
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
-                            &mut coefficients[..cell_size],
-                            &mut field_values[..nfields * cd.npts],
-                            &mut field_grads[..nfields * cd.npts],
+                            &mut coefficients[..ninputs * cd.ndofs],
+                            &mut field_values[..ninputs * cd.npts],
+                            &mut field_grads[..ninputs * cd.npts],
                             cell_index,
                         );
                         let ctx = self.tensor_ctx(time, cell_index);
@@ -1233,9 +1302,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             {
                 let ndofs = reduced_dofs.len();
                 let local = &batch
-                    [cell_offset * local_stride..cell_offset * local_stride + nfields * ndofs];
-                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
-                scatter_local_vector(&mut residual, local, &field_maps, nfields, &layout.offsets);
+                    [cell_offset * local_stride..cell_offset * local_stride + noutputs * ndofs];
+                let (field_maps, _) =
+                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
+                scatter_local_vector(&mut residual, local, &field_maps, noutputs, &output_offsets);
             }
         }
         residual
@@ -1354,6 +1424,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 gdim: 1,
                 values: &state_values,
                 grads: &state_grads,
+                field_indices: &[],
             };
             let mut local_residual = include_residual.then(|| vec![0.0; nfields]);
             let mut local_jacobian = include_jacobian.then(|| vec![0.0; nfields * nfields]);
@@ -1551,6 +1622,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 gdim: 1,
                 values: &state_values,
                 grads: &state_grads,
+                field_indices: &[],
             };
             let mut local_direction = vec![0.0; nfields];
             let mut local_action = vec![0.0; nfields];
@@ -1585,10 +1657,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
-        assert!(nfields > 0, "kernel must contain at least one field");
-        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let selection = self.resolve_residual_selection(kernel, "residual kernel");
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
         let layout = self.field_layout();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -1596,7 +1678,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             "Jacobian assembly requires one state column"
         );
         let cd = &self.cell_data;
-        let local_size = nfields * cd.ndofs;
+        let row_size = noutputs * cd.ndofs;
+        let col_size = ninputs * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
@@ -1604,30 +1687,31 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 || {
                     (
                         vec![0.0; cd.ndofs * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; local_size * local_size],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; row_size * col_size],
                     )
                 },
                 |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                        Vec::with_capacity(reduced_batch.len() * row_size * col_size);
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let row_cell_size = noutputs * ndofs;
+                        let col_cell_size = ninputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
                             &mut basis_grads[..ndofs * cd.npts],
                         );
                         let state_cell = self.prepare_cell_state(
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -1635,18 +1719,23 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         );
                         let ctx =
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
-                        local[..cell_size * cell_size].fill(0.0);
+                        local[..row_cell_size * col_cell_size].fill(0.0);
                         kernel.assemble_local_jacobian(
                             &ctx,
                             &state_cell,
-                            &mut local[..cell_size * cell_size],
+                            &mut local[..row_cell_size * col_cell_size],
                         );
-                        push_local_matrix_triplets(
+                        let (row_maps, _) =
+                            self.cell_field_maps_for(cell_index, &selection.outputs);
+                        push_rectangular_local_matrix_triplets(
                             &mut triplets,
-                            &local[..cell_size * cell_size],
+                            &local[..row_cell_size * col_cell_size],
+                            &row_maps,
                             &field_maps,
-                            nfields,
-                            &layout.offsets,
+                            noutputs,
+                            ninputs,
+                            &output_offsets,
+                            &input_offsets,
                             |value| value != 0.0,
                         );
                     }
@@ -1669,22 +1758,41 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
+        let selection = self.fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor residual kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         let cd = &self.cell_data;
-        let local_size = nfields * cd.ndofs;
+        let row_size = noutputs * cd.ndofs;
+        let col_size = ninputs * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
                 || {
                     (
-                        vec![0.0; local_size],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; local_size * local_size],
-                        vec![0.0; local_size],
+                        vec![0.0; col_size],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; row_size * col_size],
+                        vec![0.0; col_size],
                     )
                 },
                 |(
@@ -1698,39 +1806,40 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 ),
                  (batch_index, reduced_batch)| {
                     let mut triplets =
-                        Vec::with_capacity(reduced_batch.len() * local_size * local_size);
+                        Vec::with_capacity(reduced_batch.len() * row_size * col_size);
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let row_cell_size = noutputs * ndofs;
+                        let col_cell_size = ninputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
                             cd,
                             1,
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
-                            &mut state_coefficients[..cell_size],
-                            &mut state_values[..nfields * cd.npts],
-                            &mut state_grads[..nfields * cd.npts],
+                            &mut state_coefficients[..col_cell_size],
+                            &mut state_values[..ninputs * cd.npts],
+                            &mut state_grads[..ninputs * cd.npts],
                             cell_index,
                         );
                         let ctx = self.tensor_ctx(time, cell_index);
-                        local_matrix[..cell_size * cell_size].fill(0.0);
-                        for unknown in 0..nfields {
+                        local_matrix[..row_cell_size * col_cell_size].fill(0.0);
+                        for unknown in 0..ninputs {
                             for trial in 0..ndofs {
-                                local_direction[..cell_size].fill(0.0);
+                                local_direction[..col_cell_size].fill(0.0);
                                 local_direction[unknown * ndofs + trial] = 1.0;
                                 let direction_cell = interpolate_tensor_cell_coefficients(
                                     cd,
                                     1,
-                                    nfields,
-                                    &local_direction[..cell_size],
-                                    &mut direction_values[..nfields * cd.npts],
-                                    &mut direction_grads[..nfields * cd.npts],
+                                    ninputs,
+                                    &local_direction[..col_cell_size],
+                                    &mut direction_values[..ninputs * cd.npts],
+                                    &mut direction_grads[..ninputs * cd.npts],
                                     cell_index,
                                 );
                                 apply_tensor_jacobian_1d(
@@ -1738,23 +1847,28 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                                     &ctx,
                                     &state_cell,
                                     &direction_cell,
-                                    &mut local_direction[..cell_size],
+                                    &mut local_direction[..row_cell_size],
                                 );
-                                for equation in 0..nfields {
+                                for equation in 0..noutputs {
                                     for test in 0..ndofs {
-                                        local_matrix[(equation * ndofs + test) * cell_size
+                                        local_matrix[(equation * ndofs + test) * col_cell_size
                                             + unknown * ndofs
                                             + trial] = local_direction[equation * ndofs + test];
                                     }
                                 }
                             }
                         }
-                        push_local_matrix_triplets(
+                        let (row_maps, _) =
+                            self.cell_field_maps_for(cell_index, &selection.outputs);
+                        push_rectangular_local_matrix_triplets(
                             &mut triplets,
-                            &local_matrix[..cell_size * cell_size],
+                            &local_matrix[..row_cell_size * col_cell_size],
+                            &row_maps,
                             &field_maps,
-                            nfields,
-                            &layout.offsets,
+                            noutputs,
+                            ninputs,
+                            &output_offsets,
+                            &input_offsets,
                             |value| value != 0.0,
                         );
                     }
@@ -1808,10 +1922,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     ) where
         M: Sync,
     {
-        let nfields = kernel.nfields();
-        assert!(nfields > 0, "kernel must contain at least one field");
-        self.validate_fields(nfields, kernel.field_names(), "residual kernel");
+        let selection = self.resolve_residual_selection(kernel, "residual kernel");
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
         let layout = self.field_layout();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -1831,9 +1955,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         );
         out.fill(0.0);
         let cd = &self.cell_data;
-        let local_size = nfields * cd.ndofs;
+        let input_size = ninputs * cd.ndofs;
+        let output_size = noutputs * cd.ndofs;
         let ncols = direction.ncols();
-        let action_stride = local_size * ncols;
+        let action_stride = output_size * ncols;
         let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
@@ -1841,10 +1966,10 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 || {
                     (
                         vec![0.0; cd.ndofs * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; local_size],
-                        vec![0.0; local_size],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; input_size],
+                        vec![0.0; output_size],
                     )
                 },
                 |(basis_grads, field_values, field_grads, local_direction, local_action),
@@ -1852,20 +1977,21 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     let mut batch = vec![0.0; reduced_batch.len() * action_stride];
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let input_cell_size = ninputs * ndofs;
+                        let output_cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
                             &mut basis_grads[..ndofs * cd.npts],
                         );
                         let state_cell = self.prepare_cell_state(
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
                             &basis_grads[..ndofs * cd.npts],
                             field_values,
@@ -1874,23 +2000,23 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ctx =
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
                         for column in 0..ncols {
-                            for field in 0..nfields {
+                            for field in 0..ninputs {
                                 for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
                                     local_direction[field * ndofs + local_i] = reduced_i
                                         .map_or(0.0, |i| {
-                                            direction[(layout.offsets[field] + i, column)]
+                                            direction[(input_offsets[field] + i, column)]
                                         });
                                 }
                             }
                             kernel.apply_local_jacobian(
                                 &ctx,
                                 &state_cell,
-                                &local_direction[..cell_size],
-                                &mut local_action[..cell_size],
+                                &local_direction[..input_cell_size],
+                                &mut local_action[..output_cell_size],
                             );
-                            let start = cell_offset * action_stride + column * local_size;
-                            batch[start..start + cell_size]
-                                .copy_from_slice(&local_action[..cell_size]);
+                            let start = cell_offset * action_stride + column * output_size;
+                            batch[start..start + output_cell_size]
+                                .copy_from_slice(&local_action[..output_cell_size]);
                         }
                     }
                     batch
@@ -1905,14 +2031,15 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 .enumerate()
             {
                 let ndofs = reduced_dofs.len();
-                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
+                let (field_maps, _) =
+                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
                 for column in 0..ncols {
-                    let start = cell_offset * action_stride + column * local_size;
-                    let local = &batch[start..start + nfields * ndofs];
-                    for field in 0..nfields {
+                    let start = cell_offset * action_stride + column * output_size;
+                    let local = &batch[start..start + noutputs * ndofs];
+                    for field in 0..noutputs {
                         for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
                             if let Some(reduced_i) = reduced_i {
-                                out[(layout.offsets[field] + reduced_i, column)] +=
+                                out[(output_offsets[field] + reduced_i, column)] +=
                                     local[field * ndofs + local_i];
                             }
                         }
@@ -1933,24 +2060,43 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     ) where
         M: Sync,
     {
-        let nfields = kernel.nfields();
+        let selection = self.fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor residual kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         let cd = &self.cell_data;
-        let local_size = nfields * cd.ndofs;
+        let input_size = ninputs * cd.ndofs;
+        let output_size = noutputs * cd.ndofs;
         let ncols = direction.ncols();
-        let action_stride = local_size * ncols;
+        let action_stride = output_size * ncols;
         let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
             .par_chunks(CELL_BATCH_SIZE)
             .enumerate()
             .map_init(
                 || {
                     (
-                        vec![0.0; nfields * cd.ndofs],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; nfields * cd.npts],
-                        vec![0.0; local_size],
-                        vec![0.0; local_size],
+                        vec![0.0; input_size],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; ninputs * cd.npts],
+                        vec![0.0; input_size.max(output_size)],
+                        vec![0.0; output_size],
                     )
                 },
                 |(
@@ -1966,40 +2112,41 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     let mut batch = vec![0.0; reduced_batch.len() * action_stride];
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
-                        let cell_size = nfields * ndofs;
+                        let input_cell_size = ninputs * ndofs;
+                        let output_cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps(cell_index, nfields);
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
                             cd,
                             1,
-                            nfields,
+                            ninputs,
                             &field_maps,
                             &field_prescribed,
-                            &layout.offsets,
+                            &input_offsets,
                             state,
-                            &mut state_coefficients[..cell_size],
-                            &mut state_values[..nfields * cd.npts],
-                            &mut state_grads[..nfields * cd.npts],
+                            &mut state_coefficients[..input_cell_size],
+                            &mut state_values[..ninputs * cd.npts],
+                            &mut state_grads[..ninputs * cd.npts],
                             cell_index,
                         );
                         let ctx = self.tensor_ctx(time, cell_index);
                         for column in 0..ncols {
-                            for field in 0..nfields {
+                            for field in 0..ninputs {
                                 for (local, &reduced) in field_maps[field].iter().enumerate() {
                                     local_direction[field * ndofs + local] =
                                         reduced.map_or(0.0, |reduced| {
-                                            direction[(layout.offsets[field] + reduced, column)]
+                                            direction[(input_offsets[field] + reduced, column)]
                                         });
                                 }
                             }
                             let direction_cell = interpolate_tensor_cell_coefficients(
                                 cd,
                                 1,
-                                nfields,
-                                &local_direction[..cell_size],
-                                &mut direction_values[..nfields * cd.npts],
-                                &mut direction_grads[..nfields * cd.npts],
+                                ninputs,
+                                &local_direction[..input_cell_size],
+                                &mut direction_values[..ninputs * cd.npts],
+                                &mut direction_grads[..ninputs * cd.npts],
                                 cell_index,
                             );
                             apply_tensor_jacobian_1d(
@@ -2007,11 +2154,11 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                                 &ctx,
                                 &state_cell,
                                 &direction_cell,
-                                &mut local_action[..cell_size],
+                                &mut local_action[..output_cell_size],
                             );
-                            let start = cell_offset * action_stride + column * local_size;
-                            batch[start..start + cell_size]
-                                .copy_from_slice(&local_action[..cell_size]);
+                            let start = cell_offset * action_stride + column * output_size;
+                            batch[start..start + output_cell_size]
+                                .copy_from_slice(&local_action[..output_cell_size]);
                         }
                     }
                     batch
@@ -2026,14 +2173,15 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 .enumerate()
             {
                 let ndofs = reduced_dofs.len();
-                let (field_maps, _) = self.cell_field_maps(cell_start + cell_offset, nfields);
+                let (field_maps, _) =
+                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
                 for column in 0..ncols {
-                    let start = cell_offset * action_stride + column * local_size;
-                    let local_action = &batch[start..start + nfields * ndofs];
-                    for field in 0..nfields {
+                    let start = cell_offset * action_stride + column * output_size;
+                    let local_action = &batch[start..start + noutputs * ndofs];
+                    for field in 0..noutputs {
                         for (local_dof, &reduced) in field_maps[field].iter().enumerate() {
                             if let Some(reduced) = reduced {
-                                out[(layout.offsets[field] + reduced, column)] +=
+                                out[(output_offsets[field] + reduced, column)] +=
                                     local_action[field * ndofs + local_dof];
                             }
                         }
@@ -2066,10 +2214,21 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
-        assert!(nfields > 0, "bilinear form must contain at least one field");
-        self.validate_fields(nfields, kernel.field_names(), "bilinear form");
+        let names = kernel.field_names();
+        let selection = self.fields.resolve_selection(
+            kernel.nfields(),
+            names.clone(),
+            kernel.nfields(),
+            names,
+            "bilinear form",
+        );
+        let nfields = selection.inputs.len();
         let layout = self.field_layout();
+        let offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         if kernel.supports_tensor_bilinear_1d() && self.cell_data.tensor.is_some() {
             return self.assemble_tensor_bilinear(time, kernel, &layout);
         }
@@ -2092,7 +2251,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
-                        let (field_maps, _) = self.cell_field_maps(cell_index, nfields);
+                        let (field_maps, _) =
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         let ctx = self.prepare_cell_ctx(
                             time,
                             cell_index,
@@ -2106,7 +2266,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             &local[..cell_size * cell_size],
                             &field_maps,
                             nfields,
-                            &layout.offsets,
+                            &offsets,
                             |value| value.abs() > 1e-12,
                         );
                     }
@@ -2128,7 +2288,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
-        let nfields = kernel.nfields();
+        let names = kernel.field_names();
+        let selection = self.fields.resolve_selection(
+            kernel.nfields(),
+            names.clone(),
+            kernel.nfields(),
+            names,
+            "bilinear form",
+        );
+        let nfields = selection.inputs.len();
+        let offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
@@ -2152,7 +2325,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
-                        let (field_maps, _) = self.cell_field_maps(cell_index, nfields);
+                        let (field_maps, _) =
+                            self.cell_field_maps_for(cell_index, &selection.inputs);
                         let ctx = self.tensor_ctx(time, cell_index);
                         local_matrix[..cell_size * cell_size].fill(0.0);
                         for unknown in 0..nfields {
@@ -2189,7 +2363,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             &local_matrix[..cell_size * cell_size],
                             &field_maps,
                             nfields,
-                            &layout.offsets,
+                            &offsets,
                             |value| value.abs() > 1e-12,
                         );
                     }
@@ -2203,10 +2377,20 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     }
 
     pub fn assemble_linear<K: LinearForm>(&self, time: f64, kernel: &K) -> Vec<f64> {
-        let nfields = kernel.nfields();
-        assert!(nfields > 0, "linear form must contain at least one field");
-        self.validate_fields(nfields, kernel.field_names(), "linear form");
+        let selection = self.fields.resolve_selection(
+            kernel.nfields(),
+            kernel.field_names(),
+            kernel.nfields(),
+            kernel.field_names(),
+            "linear form",
+        );
+        let nfields = selection.outputs.len();
         let layout = self.field_layout();
+        let offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
         let cd = &self.cell_data;
         let mut grads = vec![0.0; cd.ndofs * cd.npts];
         let mut local = vec![0.0; nfields * cd.ndofs];
@@ -2215,7 +2399,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         for c in 0..self.cell_reduced_dofs[0].len() {
             let reduced_dofs = &self.cell_reduced_dofs[0][c];
             let ndofs = reduced_dofs.len();
-            let (field_maps, _) = self.cell_field_maps(c, nfields);
+            let (field_maps, _) = self.cell_field_maps_for(c, &selection.outputs);
             let ctx = self.prepare_cell_ctx(time, c, ndofs, &mut grads[..ndofs * cd.npts]);
             kernel.assemble_local_rhs(&ctx, &mut local[..nfields * ndofs]);
             scatter_local_vector(
@@ -2223,7 +2407,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 &local[..nfields * ndofs],
                 &field_maps,
                 nfields,
-                &layout.offsets,
+                &offsets,
             );
         }
         rhs

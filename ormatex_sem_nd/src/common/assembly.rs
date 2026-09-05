@@ -42,27 +42,60 @@ pub(crate) fn push_local_matrix_triplets(
     field_offsets: &[usize],
     keep: impl Fn(f64) -> bool,
 ) {
-    let local_dof_count = field_reduced_dofs[0].len();
-    let local_size = field_count * local_dof_count;
-    for equation in 0..field_count {
-        for (test_dof, &reduced_test_dof) in field_reduced_dofs[equation].iter().enumerate() {
+    push_rectangular_local_matrix_triplets(
+        triplets,
+        local,
+        field_reduced_dofs,
+        field_reduced_dofs,
+        field_count,
+        field_count,
+        field_offsets,
+        field_offsets,
+        keep,
+    );
+}
+
+/// Append a rectangular field-major local matrix as global triplets.
+pub(crate) fn push_rectangular_local_matrix_triplets(
+    triplets: &mut Vec<Triplet<usize, usize, f64>>,
+    local: &[f64],
+    row_field_reduced_dofs: &[&[Option<usize>]],
+    col_field_reduced_dofs: &[&[Option<usize>]],
+    row_field_count: usize,
+    col_field_count: usize,
+    row_field_offsets: &[usize],
+    col_field_offsets: &[usize],
+    keep: impl Fn(f64) -> bool,
+) {
+    assert!(row_field_count > 0 && col_field_count > 0);
+    assert_eq!(row_field_reduced_dofs.len(), row_field_count);
+    assert_eq!(col_field_reduced_dofs.len(), col_field_count);
+    assert_eq!(row_field_offsets.len(), row_field_count);
+    assert_eq!(col_field_offsets.len(), col_field_count);
+    let row_dof_count = row_field_reduced_dofs[0].len();
+    let col_dof_count = col_field_reduced_dofs[0].len();
+    let row_size = row_field_count * row_dof_count;
+    let col_size = col_field_count * col_dof_count;
+    assert_eq!(local.len(), row_size * col_size);
+    for equation in 0..row_field_count {
+        for (test_dof, &reduced_test_dof) in row_field_reduced_dofs[equation].iter().enumerate() {
             let Some(reduced_test_dof) = reduced_test_dof else {
                 continue;
             };
-            for unknown in 0..field_count {
+            for unknown in 0..col_field_count {
                 for (trial_dof, &reduced_trial_dof) in
-                    field_reduced_dofs[unknown].iter().enumerate()
+                    col_field_reduced_dofs[unknown].iter().enumerate()
                 {
                     let Some(reduced_trial_dof) = reduced_trial_dof else {
                         continue;
                     };
-                    let value = local[(equation * local_dof_count + test_dof) * local_size
-                        + unknown * local_dof_count
+                    let value = local[(equation * row_dof_count + test_dof) * col_size
+                        + unknown * col_dof_count
                         + trial_dof];
                     if keep(value) {
                         triplets.push(Triplet::new(
-                            field_offsets[equation] + reduced_test_dof,
-                            field_offsets[unknown] + reduced_trial_dof,
+                            row_field_offsets[equation] + reduced_test_dof,
+                            col_field_offsets[unknown] + reduced_trial_dof,
                             value,
                         ));
                     }

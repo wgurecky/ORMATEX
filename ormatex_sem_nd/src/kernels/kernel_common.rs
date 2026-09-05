@@ -134,6 +134,26 @@ pub trait ResidualKernel {
         None
     }
 
+    /// Number of compact state fields consumed by this term.
+    fn input_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    /// Number of compact residual fields produced by this term.
+    fn output_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    /// Optional ordered names for compact state fields.
+    fn input_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
+    }
+
+    /// Optional ordered names for compact residual fields.
+    fn output_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,
@@ -155,11 +175,12 @@ pub trait ResidualKernel {
     ) -> f64;
 
     fn assemble_local_residual(&self, ctx: &LocalCtx, state: &CellState, out: &mut [f64]) {
-        let nf = self.nfields();
+        let ni = self.input_nfields();
+        let no = self.output_nfields();
         let n = ctx.ndofs;
-        assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
-        assert_eq!(out.len(), nf * n, "local residual size mismatch");
-        for equation in 0..nf {
+        assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
+        assert_eq!(out.len(), no * n, "local residual size mismatch");
+        for equation in 0..no {
             for ti in 0..n {
                 let mut acc = 0.0;
                 for q in 0..ctx.npts {
@@ -173,17 +194,19 @@ pub trait ResidualKernel {
     }
 
     fn assemble_local_jacobian(&self, ctx: &LocalCtx, state: &CellState, out: &mut [f64]) {
-        let nf = self.nfields();
+        let ni = self.input_nfields();
+        let no = self.output_nfields();
         let n = ctx.ndofs;
-        let local_size = nf * n;
-        assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+        let row_size = no * n;
+        let col_size = ni * n;
+        assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
         assert_eq!(
             out.len(),
-            local_size * local_size,
+            row_size * col_size,
             "local Jacobian size mismatch"
         );
-        for equation in 0..nf {
-            for unknown in 0..nf {
+        for equation in 0..no {
+            for unknown in 0..ni {
                 for ti in 0..n {
                     for si in 0..n {
                         let mut acc = 0.0;
@@ -194,7 +217,7 @@ pub trait ResidualKernel {
                         }
                         let row = equation * n + ti;
                         let col = unknown * n + si;
-                        out[row * local_size + col] = acc;
+                        out[row * col_size + col] = acc;
                     }
                 }
             }
@@ -208,16 +231,22 @@ pub trait ResidualKernel {
         direction: &[f64],
         out: &mut [f64],
     ) {
-        let nf = self.nfields();
+        let ni = self.input_nfields();
+        let no = self.output_nfields();
         let n = ctx.ndofs;
-        let local_size = nf * n;
-        assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
-        assert_eq!(direction.len(), local_size, "local direction size mismatch");
-        assert_eq!(out.len(), local_size, "local Jacobian action size mismatch");
-        for equation in 0..nf {
+        let input_size = ni * n;
+        let output_size = no * n;
+        assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
+        assert_eq!(direction.len(), input_size, "local direction size mismatch");
+        assert_eq!(
+            out.len(),
+            output_size,
+            "local Jacobian action size mismatch"
+        );
+        for equation in 0..no {
             for ti in 0..n {
                 let mut acc = 0.0;
-                for unknown in 0..nf {
+                for unknown in 0..ni {
                     for si in 0..n {
                         for q in 0..ctx.npts {
                             acc += ctx.wts[q]
@@ -243,6 +272,18 @@ pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
     }
     fn field_names(&self) -> Option<Vec<String>> {
         None
+    }
+    fn input_nfields(&self) -> usize {
+        self.nfields()
+    }
+    fn output_nfields(&self) -> usize {
+        self.nfields()
+    }
+    fn input_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
+    }
+    fn output_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
     }
     fn tensor_residual(
         &self,
@@ -399,22 +440,23 @@ pub(crate) fn assemble_tensor_residual_1d<K: TensorResidualKernel<1>>(
     state: &CellState<'_>,
     out: &mut [f64],
 ) {
-    let nf = kernel.nfields();
+    let ni = kernel.input_nfields();
+    let no = kernel.output_nfields();
     let n = ctx.n1d;
     assert_eq!(
         ctx.geometric_dimension(),
         1,
         "1D tensor context requires gdim == 1"
     );
-    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
     assert_eq!(
         state.npts, ctx.npts,
         "tensor state/context point count mismatch"
     );
-    assert_eq!(out.len(), nf * n, "local 1D tensor residual size mismatch");
+    assert_eq!(out.len(), no * n, "local 1D tensor residual size mismatch");
     out.fill(0.0);
 
-    for equation in 0..nf {
+    for equation in 0..no {
         for q in 0..n {
             let [f0, f1, _] = kernel.tensor_residual(ctx, state, equation, q);
             let weight = ctx.wdet[q];
@@ -437,17 +479,18 @@ pub(crate) fn assemble_tensor_residual<K: TensorResidualKernel<2>>(
     state: &CellState<'_>,
     out: &mut [f64],
 ) {
-    let nf = kernel.nfields();
+    let ni = kernel.input_nfields();
+    let no = kernel.output_nfields();
     let n = ctx.n1d * ctx.n1d;
-    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
     assert_eq!(
         state.npts, ctx.npts,
         "tensor state/context point count mismatch"
     );
-    assert_eq!(out.len(), nf * n, "local tensor residual size mismatch");
+    assert_eq!(out.len(), no * n, "local tensor residual size mismatch");
     out.fill(0.0);
 
-    for equation in 0..nf {
+    for equation in 0..no {
         for j in 0..ctx.n1d {
             for i in 0..ctx.n1d {
                 let q = j * ctx.n1d + i;
@@ -584,16 +627,17 @@ pub(crate) fn apply_tensor_jacobian_1d<K: TensorResidualKernel<1>>(
     direction: &CellState<'_>,
     out: &mut [f64],
 ) {
-    let nf = kernel.nfields();
+    let ni = kernel.input_nfields();
+    let no = kernel.output_nfields();
     let n = ctx.n1d;
     assert_eq!(
         ctx.geometric_dimension(),
         1,
         "1D tensor context requires gdim == 1"
     );
-    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
     assert_eq!(
-        direction.nfields, nf,
+        direction.nfields, ni,
         "kernel/direction field count mismatch"
     );
     assert_eq!(
@@ -606,12 +650,12 @@ pub(crate) fn apply_tensor_jacobian_1d<K: TensorResidualKernel<1>>(
     );
     assert_eq!(
         out.len(),
-        nf * n,
+        no * n,
         "local 1D tensor Jacobian action size mismatch"
     );
     out.fill(0.0);
 
-    for equation in 0..nf {
+    for equation in 0..no {
         for q in 0..n {
             let [f0, f1, _] = kernel.tensor_jacobian_action(ctx, state, direction, equation, q);
             let weight = ctx.wdet[q];
@@ -635,11 +679,12 @@ pub(crate) fn apply_tensor_jacobian<K: TensorResidualKernel<2>>(
     direction: &CellState<'_>,
     out: &mut [f64],
 ) {
-    let nf = kernel.nfields();
+    let ni = kernel.input_nfields();
+    let no = kernel.output_nfields();
     let n = ctx.n1d * ctx.n1d;
-    assert_eq!(state.nfields, nf, "kernel/state field count mismatch");
+    assert_eq!(state.nfields, ni, "kernel/state field count mismatch");
     assert_eq!(
-        direction.nfields, nf,
+        direction.nfields, ni,
         "kernel/direction field count mismatch"
     );
     assert_eq!(
@@ -652,12 +697,12 @@ pub(crate) fn apply_tensor_jacobian<K: TensorResidualKernel<2>>(
     );
     assert_eq!(
         out.len(),
-        nf * n,
+        no * n,
         "local tensor Jacobian action size mismatch"
     );
     out.fill(0.0);
 
-    for equation in 0..nf {
+    for equation in 0..no {
         for j in 0..ctx.n1d {
             for i in 0..ctx.n1d {
                 let q = j * ctx.n1d + i;
@@ -811,6 +856,333 @@ impl ResidualKernel for ResidualKernelSum<'_> {
     }
 }
 
+/// Named composition for terms with different local field selections.
+///
+/// The union state is interpolated once by the SEM layer. Each child receives
+/// a zero-copy local view through `CellState::field_indices`, so existing
+/// compact kernels keep their original positional field contracts.
+pub struct ResidualKernelSet<'a> {
+    kernels: Vec<Box<dyn ResidualKernel + Send + Sync + 'a>>,
+    fields: Vec<String>,
+    input_maps: Vec<Vec<usize>>,
+    output_maps: Vec<Vec<usize>>,
+}
+
+impl<'a> ResidualKernelSet<'a> {
+    pub fn from_kernel<K>(kernel: K) -> Self
+    where
+        K: ResidualKernel + Send + Sync + 'a,
+    {
+        Self::new(vec![Box::new(kernel)])
+    }
+
+    pub fn new(kernels: Vec<Box<dyn ResidualKernel + Send + Sync + 'a>>) -> Self {
+        assert!(
+            !kernels.is_empty(),
+            "residual kernel set must contain a kernel"
+        );
+        let mut set = Self {
+            kernels: Vec::new(),
+            fields: Vec::new(),
+            input_maps: Vec::new(),
+            output_maps: Vec::new(),
+        };
+        for kernel in kernels {
+            set.push(kernel);
+        }
+        set
+    }
+
+    pub fn with<K>(mut self, kernel: K) -> Self
+    where
+        K: ResidualKernel + Send + Sync + 'a,
+    {
+        self.push(Box::new(kernel));
+        self
+    }
+
+    fn push(&mut self, kernel: Box<dyn ResidualKernel + Send + Sync + 'a>) {
+        let input_names = kernel
+            .input_field_names()
+            .expect("heterogeneous residual terms require named input fields");
+        let output_names = kernel
+            .output_field_names()
+            .expect("heterogeneous residual terms require named output fields");
+        assert_eq!(input_names.len(), kernel.input_nfields());
+        assert_eq!(output_names.len(), kernel.output_nfields());
+        let input_maps = input_names
+            .iter()
+            .map(|name| self.union_field(name))
+            .collect();
+        let output_maps = output_names
+            .iter()
+            .map(|name| self.union_field(name))
+            .collect();
+        self.kernels.push(kernel);
+        self.input_maps.push(input_maps);
+        self.output_maps.push(output_maps);
+    }
+
+    fn union_field(&mut self, name: &str) -> usize {
+        if let Some(index) = self.fields.iter().position(|field| field == name) {
+            index
+        } else {
+            let index = self.fields.len();
+            self.fields.push(name.to_owned());
+            index
+        }
+    }
+
+    fn child_state<'s>(state: &'s CellState<'s>, map: &'s [usize]) -> CellState<'s> {
+        CellState {
+            nfields: map.len(),
+            npts: state.npts,
+            gdim: state.gdim,
+            values: state.values,
+            grads: state.grads,
+            field_indices: map,
+        }
+    }
+}
+
+impl ResidualKernel for ResidualKernelSet<'_> {
+    fn nfields(&self) -> usize {
+        self.fields.len()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        Some(self.fields.clone())
+    }
+
+    fn residual_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        q: usize,
+        test_i: usize,
+    ) -> f64 {
+        self.kernels
+            .iter()
+            .zip(&self.output_maps)
+            .zip(&self.input_maps)
+            .map(|((kernel, output_map), input_map)| {
+                output_map
+                    .iter()
+                    .position(|&field| field == equation)
+                    .map_or(0.0, |local_equation| {
+                        let child = Self::child_state(state, input_map);
+                        kernel.residual_integrand(ctx, &child, local_equation, q, test_i)
+                    })
+            })
+            .sum()
+    }
+
+    fn jacobian_integrand(
+        &self,
+        ctx: &LocalCtx,
+        state: &CellState,
+        equation: usize,
+        unknown: usize,
+        q: usize,
+        test_i: usize,
+        trial_i: usize,
+    ) -> f64 {
+        self.kernels
+            .iter()
+            .zip(&self.output_maps)
+            .zip(&self.input_maps)
+            .map(|((kernel, output_map), input_map)| {
+                let Some(local_equation) = output_map.iter().position(|&field| field == equation)
+                else {
+                    return 0.0;
+                };
+                let Some(local_unknown) = input_map.iter().position(|&field| field == unknown)
+                else {
+                    return 0.0;
+                };
+                let child = Self::child_state(state, input_map);
+                kernel.jacobian_integrand(
+                    ctx,
+                    &child,
+                    local_equation,
+                    local_unknown,
+                    q,
+                    test_i,
+                    trial_i,
+                )
+            })
+            .sum()
+    }
+}
+
+/// Named tensor composition for terms with different local field selections.
+pub struct TensorResidualKernelSet<'a, const GDIM: usize> {
+    kernels: Vec<Box<dyn TensorResidualKernel<GDIM> + 'a>>,
+    fields: Vec<String>,
+    input_maps: Vec<Vec<usize>>,
+    output_maps: Vec<Vec<usize>>,
+}
+
+impl<'a, const GDIM: usize> TensorResidualKernelSet<'a, GDIM> {
+    pub fn from_kernel<K>(kernel: K) -> Self
+    where
+        K: TensorResidualKernel<GDIM> + 'a,
+    {
+        Self::new(vec![Box::new(kernel)])
+    }
+
+    pub fn new(kernels: Vec<Box<dyn TensorResidualKernel<GDIM> + 'a>>) -> Self {
+        assert!(
+            !kernels.is_empty(),
+            "tensor residual kernel set must contain a kernel"
+        );
+        let mut set = Self {
+            kernels: Vec::new(),
+            fields: Vec::new(),
+            input_maps: Vec::new(),
+            output_maps: Vec::new(),
+        };
+        for kernel in kernels {
+            set.push(kernel);
+        }
+        set
+    }
+
+    pub fn with<K>(mut self, kernel: K) -> Self
+    where
+        K: TensorResidualKernel<GDIM> + 'a,
+    {
+        self.push(Box::new(kernel));
+        self
+    }
+
+    fn push(&mut self, kernel: Box<dyn TensorResidualKernel<GDIM> + 'a>) {
+        let input_names = kernel
+            .input_field_names()
+            .expect("heterogeneous tensor terms require named input fields");
+        let output_names = kernel
+            .output_field_names()
+            .expect("heterogeneous tensor terms require named output fields");
+        assert_eq!(input_names.len(), kernel.input_nfields());
+        assert_eq!(output_names.len(), kernel.output_nfields());
+        let input_maps = input_names
+            .iter()
+            .map(|name| self.union_field(name))
+            .collect();
+        let output_maps = output_names
+            .iter()
+            .map(|name| self.union_field(name))
+            .collect();
+        self.kernels.push(kernel);
+        self.input_maps.push(input_maps);
+        self.output_maps.push(output_maps);
+    }
+
+    fn union_field(&mut self, name: &str) -> usize {
+        if let Some(index) = self.fields.iter().position(|field| field == name) {
+            index
+        } else {
+            let index = self.fields.len();
+            self.fields.push(name.to_owned());
+            index
+        }
+    }
+}
+
+impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorResidualKernelSet<'_, GDIM> {
+    fn nfields(&self) -> usize {
+        self.fields.len()
+    }
+
+    fn field_names(&self) -> Option<Vec<String>> {
+        Some(self.fields.clone())
+    }
+
+    fn tensor_residual(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let mut result = [0.0; 3];
+        for ((kernel, output_map), input_map) in self
+            .kernels
+            .iter()
+            .zip(&self.output_maps)
+            .zip(&self.input_maps)
+        {
+            let Some(local_equation) = output_map.iter().position(|&field| field == equation)
+            else {
+                continue;
+            };
+            let child = CellState {
+                nfields: input_map.len(),
+                npts: state.npts,
+                gdim: state.gdim,
+                values: state.values,
+                grads: state.grads,
+                field_indices: input_map,
+            };
+            let contribution = kernel.tensor_residual(ctx, &child, local_equation, q);
+            result[0] += contribution[0];
+            result[1] += contribution[1];
+            result[2] += contribution[2];
+        }
+        result
+    }
+
+    fn tensor_jacobian_action(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        direction: &CellState<'_>,
+        equation: usize,
+        q: usize,
+    ) -> [f64; 3] {
+        let mut result = [0.0; 3];
+        for ((kernel, output_map), input_map) in self
+            .kernels
+            .iter()
+            .zip(&self.output_maps)
+            .zip(&self.input_maps)
+        {
+            let Some(local_equation) = output_map.iter().position(|&field| field == equation)
+            else {
+                continue;
+            };
+            let child_state = CellState {
+                nfields: input_map.len(),
+                npts: state.npts,
+                gdim: state.gdim,
+                values: state.values,
+                grads: state.grads,
+                field_indices: input_map,
+            };
+            let child_direction = CellState {
+                nfields: input_map.len(),
+                npts: direction.npts,
+                gdim: direction.gdim,
+                values: direction.values,
+                grads: direction.grads,
+                field_indices: input_map,
+            };
+            let contribution = kernel.tensor_jacobian_action(
+                ctx,
+                &child_state,
+                &child_direction,
+                local_equation,
+                q,
+            );
+            result[0] += contribution[0];
+            result[1] += contribution[1];
+            result[2] += contribution[2];
+        }
+        result
+    }
+}
+
 /// Pointwise flux provider for one-dimensional conservation laws.
 pub trait FluxKernel1D {
     fn nfields(&self) -> usize;
@@ -921,6 +1293,22 @@ pub trait StateBoundaryIntegrator: Send + Sync {
     /// Optional ordered names for fields whose meaning is part of the form.
     fn field_names(&self) -> Option<Vec<String>> {
         None
+    }
+
+    fn input_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    fn output_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    fn input_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
+    }
+
+    fn output_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
     }
 
     fn residual_integrand(
@@ -1042,6 +1430,22 @@ pub trait StateTensorBoundaryIntegrator<const GDIM: usize>: Send + Sync {
     /// Optional ordered names for fields whose meaning is part of the form.
     fn field_names(&self) -> Option<Vec<String>> {
         None
+    }
+
+    fn input_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    fn output_nfields(&self) -> usize {
+        self.nfields()
+    }
+
+    fn input_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
+    }
+
+    fn output_field_names(&self) -> Option<Vec<String>> {
+        self.field_names()
     }
 
     /// Whether evaluating this boundary condition needs state gradients.

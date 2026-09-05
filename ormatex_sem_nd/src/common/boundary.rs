@@ -757,18 +757,25 @@ where
         }) else {
             continue;
         };
-        assert_eq!(
-            kernel.nfields(),
-            nfields,
-            "state boundary field count does not match the SEM problem"
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "state boundary kernel",
         );
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(
-                names.as_slice(),
-                fields.names(),
-                "state boundary field names/order do not match the SEM problem"
-            );
-        }
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
 
         let cell = mesh
             .entity(ReferenceCellType::Quadrilateral, cell_index)
@@ -889,42 +896,57 @@ where
             grads: &grads,
         };
 
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let mut state_values = vec![0.0; nfields * npts];
-        for field in 0..nfields {
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let mut state_values = vec![0.0; ninputs * npts];
+        for field in 0..ninputs {
             for (facet_i, &cell_i) in facet_cell_indices.iter().enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     state_values[field * npts + q] += coefficient * values[facet_i * npts + q];
                 }
             }
         }
-        let mut state_grads = vec![0.0; nfields * 2 * npts];
-        for field in 0..nfields {
+        let mut state_grads = vec![0.0; ninputs * 2 * npts];
+        for field in 0..ninputs {
             for (cell_i, _) in cell_dofs.iter().enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     for gd in 0..2 {
@@ -940,56 +962,58 @@ where
             }
         }
         let facet_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
 
-        let local_size = nfields * nfacet;
-        let mut local_residual = include_residual.then(|| vec![0.0; local_size]);
-        let mut local_jacobian = include_jacobian.then(|| vec![0.0; local_size * local_size]);
+        let row_size = noutputs * nfacet;
+        let col_size = ninputs * nfacet;
+        let mut local_residual = include_residual.then(|| vec![0.0; row_size]);
+        let mut local_jacobian = include_jacobian.then(|| vec![0.0; row_size * col_size]);
         if let Some(local_residual) = local_residual.as_mut() {
             kernel.assemble_local_residual(&ctx, &facet_state, local_residual);
         }
         if let Some(local_jacobian) = local_jacobian.as_mut() {
             kernel.assemble_local_jacobian(&ctx, &facet_state, local_jacobian);
         }
-        for equation in 0..nfields {
+        for equation in 0..noutputs {
             for (local_i, &full_i) in facet_dofs.iter().enumerate() {
                 let cell_i = cell_i_for_dof(&cell_dofs, full_i);
                 let target = if field_reduced_dofs.len() == 1 {
                     field_reduced_dofs[0][cell_index][cell_i]
                 } else {
-                    field_reduced_dofs[equation][cell_index][cell_i]
+                    output_maps[equation][cell_i]
                 };
                 let Some(reduced_i) = target else {
                     continue;
                 };
                 if let Some(residual) = residual.as_mut() {
-                    residual[field_offsets[equation] + reduced_i] +=
+                    residual[output_offsets[equation] + reduced_i] +=
                         local_residual.as_ref().unwrap()[equation * nfacet + local_i];
                 }
                 if let Some(local_jacobian) = local_jacobian.as_ref() {
-                    for unknown in 0..nfields {
+                    for unknown in 0..ninputs {
                         for (local_j, &full_j) in facet_dofs.iter().enumerate() {
                             let cell_j = cell_i_for_dof(&cell_dofs, full_j);
                             let target = if field_reduced_dofs.len() == 1 {
                                 field_reduced_dofs[0][cell_index][cell_j]
                             } else {
-                                field_reduced_dofs[unknown][cell_index][cell_j]
+                                input_maps[unknown][cell_j]
                             };
                             let Some(reduced_j) = target else {
                                 continue;
                             };
                             let row = equation * nfacet + local_i;
                             let col = unknown * nfacet + local_j;
-                            let value = local_jacobian[row * local_size + col];
+                            let value = local_jacobian[row * col_size + col];
                             if value != 0.0 {
                                 triplets.push(Triplet::new(
-                                    field_offsets[equation] + reduced_i,
-                                    field_offsets[unknown] + reduced_j,
+                                    output_offsets[equation] + reduced_i,
+                                    input_offsets[unknown] + reduced_j,
                                     value,
                                 ));
                             }
@@ -1118,37 +1142,67 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        assert_eq!(kernel.nfields(), nfields);
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(names.as_slice(), fields.names());
-        }
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "state boundary kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
         let npts = cache.wts.len();
         let nfacet = facet.facet_dofs.len();
-        let mut state_values = vec![0.0; nfields * npts];
-        let mut state_grads = vec![0.0; nfields * 2 * npts];
-        for field in 0..nfields {
+        let mut state_values = vec![0.0; ninputs * npts];
+        let mut state_grads = vec![0.0; ninputs * 2 * npts];
+        for field in 0..ninputs {
             for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     state_values[field * npts + q] +=
@@ -1156,9 +1210,9 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
                 }
             }
             for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     for gd in 0..2 {
@@ -1169,11 +1223,12 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
             }
         }
         let facet_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
         let ctx = FacetCtx {
             time,
@@ -1190,14 +1245,14 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
             values: &facet.values,
             grads: &facet.grads,
         };
-        let mut local = vec![0.0; nfields * nfacet];
+        let mut local = vec![0.0; noutputs * nfacet];
         kernel.assemble_local_residual(&ctx, &facet_state, &mut local);
-        for equation in 0..nfields {
+        for equation in 0..noutputs {
             for (local_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let Some(reduced) = maps[equation][cell_i] else {
+                let Some(reduced) = output_maps[equation][cell_i] else {
                     continue;
                 };
-                out[field_offsets[equation] + reduced] += local[equation * nfacet + local_i];
+                out[output_offsets[equation] + reduced] += local[equation * nfacet + local_i];
             }
         }
     }
@@ -1225,45 +1280,76 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        assert_eq!(kernel.nfields(), nfields);
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(names.as_slice(), fields.names());
-        }
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor state boundary kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
         let npts = cache.wts.len();
         let (state_values, state_grads) = tensor_boundary_state(
             facet,
-            nfields,
-            &maps,
-            &prescribed,
+            ninputs,
+            &input_maps,
+            &input_prescribed,
             state,
-            field_offsets,
+            &input_offsets,
             npts,
             kernel.tensor_requires_gradients(),
         );
         let tensor_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
         let tensor_ctx = TensorFacetCtx {
             time,
@@ -1274,13 +1360,13 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
             points: &facet.points,
             normal: &facet.normal,
         };
-        for equation in 0..nfields {
+        for equation in 0..noutputs {
             for q in 0..npts {
                 let flux = kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
                 let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
                 for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                    if let Some(reduced) = maps[equation][cell_i] {
-                        out[field_offsets[equation] + reduced] +=
+                    if let Some(reduced) = output_maps[equation][cell_i] {
+                        out[output_offsets[equation] + reduced] +=
                             weight * facet.values[facet_i * npts + q];
                     }
                 }
@@ -1317,37 +1403,67 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        assert_eq!(kernel.nfields(), nfields);
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(names.as_slice(), fields.names());
-        }
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor state boundary kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
         let npts = cache.wts.len();
         let nfacet = facet.facet_dofs.len();
-        let mut state_values = vec![0.0; nfields * npts];
-        let mut state_grads = vec![0.0; nfields * 2 * npts];
-        for field in 0..nfields {
+        let mut state_values = vec![0.0; ninputs * npts];
+        let mut state_grads = vec![0.0; ninputs * 2 * npts];
+        for field in 0..ninputs {
             for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     state_values[field * npts + q] +=
@@ -1355,9 +1471,9 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
                 }
             }
             for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate() {
-                let coefficient = maps[field][cell_i]
-                    .map_or(prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(field_offsets[field] + reduced, 0)]
+                let coefficient = input_maps[field][cell_i]
+                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
+                        state[(input_offsets[field] + reduced, 0)]
                     });
                 for q in 0..npts {
                     for gd in 0..2 {
@@ -1368,11 +1484,12 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
             }
         }
         let facet_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
         let ctx = FacetCtx {
             time,
@@ -1389,25 +1506,26 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
             values: &facet.values,
             grads: &facet.grads,
         };
-        let local_size = nfields * nfacet;
-        let mut local_direction = vec![0.0; local_size];
-        let mut local_action = vec![0.0; local_size];
+        let input_size = ninputs * nfacet;
+        let output_size = noutputs * nfacet;
+        let mut local_direction = vec![0.0; input_size];
+        let mut local_action = vec![0.0; output_size];
         for column in 0..direction.ncols() {
-            for field in 0..nfields {
+            for field in 0..ninputs {
                 for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                    local_direction[field * nfacet + facet_i] = maps[field][cell_i]
+                    local_direction[field * nfacet + facet_i] = input_maps[field][cell_i]
                         .map_or(0.0, |reduced| {
-                            direction[(field_offsets[field] + reduced, column)]
+                            direction[(input_offsets[field] + reduced, column)]
                         });
                 }
             }
             kernel.apply_local_jacobian(&ctx, &facet_state, &local_direction, &mut local_action);
-            for field in 0..nfields {
+            for field in 0..noutputs {
                 for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                    let Some(reduced) = maps[field][cell_i] else {
+                    let Some(reduced) = output_maps[field][cell_i] else {
                         continue;
                     };
-                    out[(field_offsets[field] + reduced, column)] +=
+                    out[(output_offsets[field] + reduced, column)] +=
                         local_action[field * nfacet + facet_i];
                 }
             }
@@ -1443,46 +1561,77 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        assert_eq!(kernel.nfields(), nfields);
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(names.as_slice(), fields.names());
-        }
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor state boundary kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
         let npts = cache.wts.len();
         let include_gradients = kernel.tensor_requires_gradients();
         let (state_values, state_grads) = tensor_boundary_state(
             facet,
-            nfields,
-            &maps,
-            &prescribed,
+            ninputs,
+            &input_maps,
+            &input_prescribed,
             state,
-            field_offsets,
+            &input_offsets,
             npts,
             include_gradients,
         );
         let tensor_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
         let tensor_ctx = TensorFacetCtx {
             time,
@@ -1496,22 +1645,23 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
         for column in 0..direction.ncols() {
             let (direction_values, direction_grads) = tensor_boundary_direction(
                 facet,
-                nfields,
-                &maps,
+                ninputs,
+                &input_maps,
                 direction,
-                field_offsets,
+                &input_offsets,
                 column,
                 npts,
                 include_gradients,
             );
             let tensor_direction = CellState {
-                nfields,
+                nfields: ninputs,
                 npts,
                 gdim: 2,
                 values: &direction_values,
                 grads: &direction_grads,
+                field_indices: &[],
             };
-            for equation in 0..nfields {
+            for equation in 0..noutputs {
                 for q in 0..npts {
                     let action = kernel.tensor_jacobian_action(
                         &tensor_ctx,
@@ -1522,8 +1672,8 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
                     );
                     let weight = cache.wts[q] * facet.jfacet_det[q] * action;
                     for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                        if let Some(reduced) = maps[equation][cell_i] {
-                            out[(field_offsets[equation] + reduced, column)] +=
+                        if let Some(reduced) = output_maps[equation][cell_i] {
+                            out[(output_offsets[equation] + reduced, column)] +=
                                 weight * facet.values[facet_i * npts + q];
                         }
                     }
@@ -1555,46 +1705,77 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        assert_eq!(kernel.nfields(), nfields);
-        if let Some(names) = kernel.field_names() {
-            assert_eq!(names.as_slice(), fields.names());
-        }
-        let maps = if field_reduced_dofs.len() == 1 {
-            (0..nfields)
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor state boundary kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<_> = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets: Vec<_> = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let input_maps = if field_reduced_dofs.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_reduced_dofs[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
-        let prescribed = if field_prescribed_values.len() == 1 {
-            (0..nfields)
+        let input_prescribed = if field_prescribed_values.len() == 1 {
+            (0..ninputs)
                 .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         } else {
-            (0..nfields)
-                .map(|field| field_prescribed_values[field][facet.cell_index].as_slice())
+            selection
+                .inputs
+                .iter()
+                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        };
+        let output_maps = if field_reduced_dofs.len() == 1 {
+            (0..noutputs)
+                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
+                .collect::<Vec<_>>()
+        } else {
+            selection
+                .outputs
+                .iter()
+                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
                 .collect::<Vec<_>>()
         };
         let npts = cache.wts.len();
         let include_gradients = kernel.tensor_requires_gradients();
         let (state_values, state_grads) = tensor_boundary_state(
             facet,
-            nfields,
-            &maps,
-            &prescribed,
+            ninputs,
+            &input_maps,
+            &input_prescribed,
             state,
-            field_offsets,
+            &input_offsets,
             npts,
             include_gradients,
         );
         let tensor_state = CellState {
-            nfields,
+            nfields: ninputs,
             npts,
             gdim: 2,
             values: &state_values,
             grads: &state_grads,
+            field_indices: &[],
         };
         let tensor_ctx = TensorFacetCtx {
             time,
@@ -1607,17 +1788,17 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
         };
 
         let mut columns = std::collections::HashSet::new();
-        for unknown in 0..nfields {
+        for unknown in 0..ninputs {
             for &cell_i in &facet.cell_indices {
-                let Some(reduced) = maps[unknown][cell_i] else {
+                let Some(reduced) = input_maps[unknown][cell_i] else {
                     continue;
                 };
                 if !columns.insert((unknown, reduced)) {
                     continue;
                 }
-                let mut direction_values = vec![0.0; nfields * npts];
+                let mut direction_values = vec![0.0; ninputs * npts];
                 for (facet_i, &basis_cell_i) in facet.cell_indices.iter().enumerate() {
-                    if maps[unknown][basis_cell_i] != Some(reduced) {
+                    if input_maps[unknown][basis_cell_i] != Some(reduced) {
                         continue;
                     }
                     for q in 0..npts {
@@ -1625,14 +1806,14 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
                     }
                 }
                 let mut direction_grads = if include_gradients {
-                    vec![0.0; nfields * 2 * npts]
+                    vec![0.0; ninputs * 2 * npts]
                 } else {
                     Vec::new()
                 };
                 if include_gradients {
                     for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate()
                     {
-                        if maps[unknown][cell_i] != Some(reduced) {
+                        if input_maps[unknown][cell_i] != Some(reduced) {
                             continue;
                         }
                         for q in 0..npts {
@@ -1644,13 +1825,14 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
                     }
                 }
                 let tensor_direction = CellState {
-                    nfields,
+                    nfields: ninputs,
                     npts,
                     gdim: 2,
                     values: &direction_values,
                     grads: &direction_grads,
+                    field_indices: &[],
                 };
-                for equation in 0..nfields {
+                for equation in 0..noutputs {
                     for q in 0..npts {
                         let action = kernel.tensor_jacobian_action(
                             &tensor_ctx,
@@ -1661,12 +1843,12 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
                         );
                         let weight = cache.wts[q] * facet.jfacet_det[q] * action;
                         for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                            if let Some(row) = maps[equation][cell_i] {
+                            if let Some(row) = output_maps[equation][cell_i] {
                                 let value = weight * facet.values[facet_i * npts + q];
                                 if value != 0.0 {
                                     triplets.push(Triplet::new(
-                                        field_offsets[equation] + row,
-                                        field_offsets[unknown] + reduced,
+                                        output_offsets[equation] + row,
+                                        input_offsets[unknown] + reduced,
                                         value,
                                     ));
                                 }

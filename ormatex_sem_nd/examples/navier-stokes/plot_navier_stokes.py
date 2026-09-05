@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot Navier-Stokes example fields stored as x,y,u,v,p CSV files."""
+"""Plot Navier-Stokes fields stored as x,y,u,v,p CSV files, optionally with T."""
 
 from __future__ import annotations
 
@@ -24,16 +24,21 @@ DEFAULT_FILES = (
     "navier_stokes_cylinder_tensor.csv",
     "navier_stokes_cylinder_generic.csv",
     "navier_stokes_backward_step_tensor.csv",
+    "de_vahl_davis_cavity.csv",
 )
 
 
 def read_fields(path: Path) -> np.ndarray:
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream)
+        columns = set(reader.fieldnames or ())
         expected = {"x", "y", "u", "v", "p"}
-        if set(reader.fieldnames or ()) != expected:
-            raise ValueError(f"{path} must have columns x,y,u,v,p")
-        rows = [[float(row[name]) for name in ("x", "y", "u", "v", "p")] for row in reader]
+        if "T" in columns:
+            expected.add("T")
+        if columns != expected:
+            raise ValueError(f"{path} must have columns x,y,u,v,p with optional T")
+        names = ("x", "y", "u", "v", "p", "T") if "T" in columns else ("x", "y", "u", "v", "p")
+        rows = [[float(row[name]) for name in names] for row in reader]
     if not rows:
         raise ValueError(f"{path} has no data rows")
     return np.asarray(rows)
@@ -78,11 +83,20 @@ def vector_plot(ax, data: np.ndarray, max_vectors: int) -> None:
 
 def plot_file(path: Path, output_dir: Path, max_vectors: int) -> Path:
     data = read_fields(path)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-    contour(axes[0, 0], data, 2, "u velocity")
-    contour(axes[0, 1], data, 3, "v velocity")
-    contour(axes[1, 0], data, 4, "Pressure")
-    vector_plot(axes[1, 1], data, max_vectors)
+    if data.shape[1] == 6:
+        fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
+        contour(axes[0, 0], data, 2, "u velocity")
+        contour(axes[0, 1], data, 3, "v velocity")
+        contour(axes[0, 2], data, 4, "Pressure")
+        contour(axes[1, 0], data, 5, "Temperature")
+        vector_plot(axes[1, 1], data, max_vectors)
+        axes[1, 2].axis("off")
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
+        contour(axes[0, 0], data, 2, "u velocity")
+        contour(axes[0, 1], data, 3, "v velocity")
+        contour(axes[1, 0], data, 4, "Pressure")
+        vector_plot(axes[1, 1], data, max_vectors)
     title = path.stem
     if path.name == "navier_stokes_cylinder.csv":
         time = final_time(path)

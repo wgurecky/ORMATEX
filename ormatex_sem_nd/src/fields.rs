@@ -1,5 +1,14 @@
 use std::collections::HashMap;
 
+/// Resolved local-to-global field bindings for one kernel term.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FieldSelection {
+    /// Global field IDs used to build the compact kernel state.
+    pub(crate) inputs: Vec<usize>,
+    /// Global field IDs receiving the compact kernel residual.
+    pub(crate) outputs: Vec<usize>,
+}
+
 /// Ordered names for the scalar solution fields in a SEM problem.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldRegistry {
@@ -53,6 +62,62 @@ impl FieldRegistry {
     /// Return the numeric field ID for `name`.
     pub fn id(&self, name: &str) -> Option<usize> {
         self.ids.get(name).copied()
+    }
+
+    pub(crate) fn resolve_selection(
+        &self,
+        input_count: usize,
+        input_names: Option<Vec<String>>,
+        output_count: usize,
+        output_names: Option<Vec<String>>,
+        context: &str,
+    ) -> FieldSelection {
+        FieldSelection {
+            inputs: self.resolve_names(input_count, input_names, context, "input"),
+            outputs: self.resolve_names(output_count, output_names, context, "output"),
+        }
+    }
+
+    fn resolve_names(
+        &self,
+        count: usize,
+        names: Option<Vec<String>>,
+        context: &str,
+        kind: &str,
+    ) -> Vec<usize> {
+        assert!(
+            count > 0,
+            "{context} must contain at least one {kind} field"
+        );
+        match names {
+            Some(names) => {
+                assert_eq!(
+                    names.len(),
+                    count,
+                    "{context} {kind} field-name count does not match field count"
+                );
+                let mut ids = Vec::with_capacity(count);
+                for name in names {
+                    let id = self
+                        .id(&name)
+                        .unwrap_or_else(|| panic!("{context} references unknown field: {name}"));
+                    assert!(
+                        !ids.contains(&id),
+                        "{context} {kind} fields contain duplicate name: {name}"
+                    );
+                    ids.push(id);
+                }
+                ids
+            }
+            None => {
+                assert_eq!(
+                    count,
+                    self.len(),
+                    "{context} {kind} field count does not match the SEM problem"
+                );
+                (0..count).collect()
+            }
+        }
     }
 }
 

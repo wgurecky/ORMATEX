@@ -117,19 +117,16 @@ where
     }
 
     fn system_size(&self, nfields: usize) -> usize {
-        assert_eq!(
-            nfields,
-            self.fields().len(),
-            "kernel/problem field count mismatch"
-        );
+        let _ = nfields;
         SEM1DProblem::system_size(self)
     }
 
     fn validate_kernel_fields<K: ResidualKernel>(&self, kernel: &K) {
-        SEM1DProblem::validate_fields(
-            self,
-            kernel.nfields(),
-            kernel.field_names(),
+        self.fields().resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
             "residual kernel",
         );
     }
@@ -165,19 +162,16 @@ where
     }
 
     fn system_size(&self, nfields: usize) -> usize {
-        assert_eq!(
-            nfields,
-            self.fields().len(),
-            "kernel/problem field count mismatch"
-        );
+        let _ = nfields;
         SEM2DProblem::system_size(self)
     }
 
     fn validate_kernel_fields<K: ResidualKernel>(&self, kernel: &K) {
-        SEM2DProblem::validate_fields(
-            self,
-            kernel.nfields(),
-            kernel.field_names(),
+        self.fields().resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
             "residual kernel",
         );
     }

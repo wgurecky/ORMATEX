@@ -325,13 +325,20 @@ pub struct CellState<'a> {
     /// Physical field gradients in
     /// `[(field_index, geometric_direction), quadrature_point]` order.
     pub grads: &'a [f64],
+    /// Optional local-field to backing-field map. An empty map means identity.
+    pub field_indices: &'a [usize],
 }
 
 impl<'a> CellState<'a> {
     /// Return `field_index`'s interpolated value at `quadrature_index`.
     #[inline(always)]
     pub fn value(&self, field_index: usize, quadrature_index: usize) -> f64 {
-        self.values[field_index * self.npts + quadrature_index]
+        let field = self
+            .field_indices
+            .get(field_index)
+            .copied()
+            .unwrap_or(field_index);
+        self.values[field * self.npts + quadrature_index]
     }
 
     /// Return `field_index`'s physical gradient in `geometric_direction` at
@@ -343,6 +350,11 @@ impl<'a> CellState<'a> {
         quadrature_index: usize,
         geometric_direction: usize,
     ) -> f64 {
-        self.grads[(field_index * self.gdim + geometric_direction) * self.npts + quadrature_index]
+        let field = self
+            .field_indices
+            .get(field_index)
+            .copied()
+            .unwrap_or(field_index);
+        self.grads[(field * self.gdim + geometric_direction) * self.npts + quadrature_index]
     }
 }

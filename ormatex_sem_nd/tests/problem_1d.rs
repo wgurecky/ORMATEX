@@ -631,6 +631,7 @@ fn isothermal_euler_flux_jacobian_matches_finite_difference() {
         gdim: 1,
         values: &[0.4, 1.2],
         grads: &[0.0, 0.0],
+        field_indices: &[],
     };
     let eps = 1e-7;
     for equation in 0..2 {
@@ -661,6 +662,7 @@ fn conservative_euler_flux_jacobian_matches_finite_difference() {
         gdim: 1,
         values: &[1.0, 0.3, 2.6],
         grads: &[0.0, 0.0, 0.0],
+        field_indices: &[],
     };
     let eps = 1e-7;
     let ctx = flux_context();

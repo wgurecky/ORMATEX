@@ -5,6 +5,7 @@ pub mod kernel_adv_diff_2d;
 pub mod kernel_adv_diff_supg_1d;
 pub mod kernel_adv_diff_supg_2d;
 pub mod kernel_advection_2d;
+pub mod kernel_boussinesq_2d;
 pub mod kernel_common;
 pub mod kernel_conservation_law_1d;
 pub mod kernel_diffusion_1d;
@@ -26,10 +27,15 @@ pub use kernel_adv_diff_2d::{KernelAdvDiff2D, TensorKernelAdvDiff2D};
 pub use kernel_adv_diff_supg_1d::{KernelAdvDiffSUPG, TensorKernelAdvDiffSUPG};
 pub use kernel_adv_diff_supg_2d::{KernelAdvDiffSUPG2D, TensorKernelAdvDiffSUPG2D};
 pub use kernel_advection_2d::{KernelAdvection2D, TensorKernelAdvection2D};
+pub use kernel_boussinesq_2d::{
+    KernelBoussinesq2D, KernelEnergyAdvectionDiffusion2D, TensorKernelBoussinesq2D,
+    TensorKernelEnergyAdvectionDiffusion2D,
+};
 pub use kernel_common::{
-    BilinearForm, BoundaryIntegrator, FluxKernel1D, LinearForm, ResidualKernel, ResidualKernelSum,
-    StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
-    StateTensorBoundaryTerms, TensorResidualKernel, TensorResidualKernelSum,
+    BilinearForm, BoundaryIntegrator, FluxKernel1D, LinearForm, ResidualKernel, ResidualKernelSet,
+    ResidualKernelSum, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
+    StateTensorBoundaryTerms, TensorResidualKernel, TensorResidualKernelSet,
+    TensorResidualKernelSum,
 };
 pub use kernel_conservation_law_1d::{KernelConservationLaw1D, TensorKernelConservationLaw1D};
 pub use kernel_diffusion_1d::{KernelDiffusion, TensorKernelDiffusion};

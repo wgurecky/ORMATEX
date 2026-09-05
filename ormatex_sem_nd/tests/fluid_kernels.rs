@@ -141,6 +141,7 @@ fn state(values: [f64; 3], grads: [f64; 6]) -> CellState<'static> {
         gdim: 2,
         values: Box::leak(Box::new(values)),
         grads: Box::leak(Box::new(grads)),
+        field_indices: &[],
     }
 }
 
