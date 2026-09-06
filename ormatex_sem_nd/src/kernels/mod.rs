@@ -15,6 +15,7 @@ pub mod kernel_edac_navier_stokes_2d;
 pub mod kernel_edac_navier_stokes_2d_com;
 pub mod kernel_edac_navier_stokes_2d_com_split;
 pub mod kernel_edac_wall_2d;
+pub mod kernel_energy_advection_diffusion_2d;
 pub mod kernel_linear_reaction;
 pub mod kernel_mass;
 pub mod kernel_neumann_flux;
@@ -27,10 +28,7 @@ pub use kernel_adv_diff_2d::{KernelAdvDiff2D, TensorKernelAdvDiff2D};
 pub use kernel_adv_diff_supg_1d::{KernelAdvDiffSUPG, TensorKernelAdvDiffSUPG};
 pub use kernel_adv_diff_supg_2d::{KernelAdvDiffSUPG2D, TensorKernelAdvDiffSUPG2D};
 pub use kernel_advection_2d::{KernelAdvection2D, TensorKernelAdvection2D};
-pub use kernel_boussinesq_2d::{
-    KernelBoussinesq2D, KernelEnergyAdvectionDiffusion2D, TensorKernelBoussinesq2D,
-    TensorKernelEnergyAdvectionDiffusion2D,
-};
+pub use kernel_boussinesq_2d::{KernelBoussinesq2D, TensorKernelBoussinesq2D};
 pub use kernel_common::{
     BilinearForm, BoundaryIntegrator, FluxKernel1D, LinearForm, ResidualKernel, ResidualKernelSet,
     ResidualKernelSum, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
@@ -61,6 +59,9 @@ pub use kernel_edac_navier_stokes_2d_com_split::{
 pub use kernel_edac_wall_2d::{
     KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, TensorKernelEdacNoSlipWall2D,
     TensorKernelEdacSlipWall2D,
+};
+pub use kernel_energy_advection_diffusion_2d::{
+    KernelEnergyAdvectionDiffusion2D, TensorKernelEnergyAdvectionDiffusion2D,
 };
 pub use kernel_linear_reaction::{KernelLinearReaction, TensorKernelLinearReaction};
 pub use kernel_mass::{KernelMass, TensorKernelMass};
