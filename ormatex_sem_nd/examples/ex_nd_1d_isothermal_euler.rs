@@ -8,7 +8,7 @@ use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
-    DofReduction1D, FieldRegistry, MatrixFreeMinvJacobian, SEM1DProblem,
+    DofReduction1D, FieldRegistry, MatrixFreeMinvJacobian, ParallelOwnedMinvJacobian, SEM1DProblem,
     TensorKernelConservationLaw1D,
 };
 
@@ -25,6 +25,7 @@ struct IsothermalEulerSystem<'a> {
     problem: &'a SEM1DProblem<IntervalMesh>,
     kernel: TensorKernelConservationLaw1D<IsothermalEuler1D>,
     m_inv: Vec<f64>,
+    assembled: bool,
 }
 
 impl<'a> IsothermalEulerSystem<'a> {
@@ -38,6 +39,7 @@ impl<'a> IsothermalEulerSystem<'a> {
             problem,
             kernel,
             m_inv,
+            assembled: std::env::args().any(|arg| arg == "--assembled-jacobian"),
         }
     }
 }
@@ -59,6 +61,15 @@ impl<'a> OdeSys<'a> for IsothermalEulerSystem<'a> {
         t: f64,
         state: MatRef<'b, f64>,
     ) -> Box<dyn faer::matrix_free::LinOp<f64> + 'a> {
+        if self.assembled {
+            return Box::new(ParallelOwnedMinvJacobian::new(
+                self.problem
+                    .tensor_residual_operator(&self.kernel)
+                    .at_time(t)
+                    .assemble_jacobian(state),
+                &self.m_inv,
+            ));
+        }
         Box::new(MatrixFreeMinvJacobian::new(
             self.problem
                 .tensor_residual_operator(&self.kernel)

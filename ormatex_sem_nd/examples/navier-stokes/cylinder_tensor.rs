@@ -21,7 +21,7 @@ mod edac;
 mod linear_system;
 
 use cylinder_setup::{nearest, problem};
-use edac::{epi3, write_spatial_csv, JacobianBackend, TensorFluidSystem};
+use edac::{epi3, write_spatial_csv, TensorFluidSystem};
 
 fn tensor_split_kernel() -> impl TensorResidualKernel<2> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -39,12 +39,8 @@ fn main() {
     let problem = case.problem;
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
 
-    let system = TensorFluidSystem::new_with_backend(
-        &problem,
-        tensor_split_kernel(),
-        JacobianBackend::MatrixFree,
-    )
-    .with_wall_boundaries(case.cylinder, case.slip_wall);
+    let system = TensorFluidSystem::new(&problem, tensor_split_kernel())
+        .with_wall_boundaries(case.cylinder, case.slip_wall);
     let system = if directional {
         system.with_directional_do_nothing_outflow(
             TensorKernelEdacDirectionalDoNothing2D::new(1.0),

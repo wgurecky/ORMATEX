@@ -2,8 +2,9 @@ use crate::common::{
     add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
     interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state,
     push_local_matrix_triplets, push_rectangular_local_matrix_triplets, scatter_local_vector,
-    BoundaryContributions, CellData, CellState, FacetCtx, FieldDofLayout, LocalCtx, ReducedDofMap,
-    StateBoundaryContributions, TensorCtx, TensorProductData, CELL_BATCH_SIZE,
+    BoundaryContributions, CellData, CellState, ElementRestriction, FacetCtx, FieldDofLayout,
+    LocalCtx, ReducedDofMap, StateBoundaryContributions, TensorCtx, TensorProductData,
+    CELL_BATCH_SIZE,
 };
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::jacobian::CompleteResidualOperator;
@@ -92,6 +93,7 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     cell_data: CellData,
     cell_reduced_dofs: Vec<Vec<Vec<Option<usize>>>>,
     cell_prescribed_values: Vec<Vec<Vec<Option<f64>>>>,
+    restriction: ElementRestriction,
     dof_map: ReducedDofMap,
     field_dof_maps: Vec<ReducedDofMap>,
     dof_x: Vec<f64>,
@@ -802,6 +804,16 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             cell_reduced_dofs.push(reduced);
             cell_prescribed_values.push(prescribed);
         }
+        let field_sizes: Vec<_> = if field_dof_maps.len() == 1 {
+            vec![field_dof_maps[0].reduced_size(); fields.len()]
+        } else {
+            field_dof_maps
+                .iter()
+                .map(ReducedDofMap::reduced_size)
+                .collect()
+        };
+        let restriction =
+            ElementRestriction::new(&cell_reduced_dofs, &cell_prescribed_values, &field_sizes);
 
         Self {
             mesh,
@@ -810,6 +822,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             cell_data,
             cell_reduced_dofs,
             cell_prescribed_values,
+            restriction,
             dof_map,
             field_dof_maps,
             dof_x,
@@ -1168,7 +1181,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
+                            self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -1264,7 +1277,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
+                            self.restriction.maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
                             cd,
                             1,
@@ -1701,7 +1714,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let col_cell_size = ninputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
+                            self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -1726,7 +1739,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             &mut local[..row_cell_size * col_cell_size],
                         );
                         let (row_maps, _) =
-                            self.cell_field_maps_for(cell_index, &selection.outputs);
+                            self.restriction.maps_for(cell_index, &selection.outputs);
                         push_rectangular_local_matrix_triplets(
                             &mut triplets,
                             &local[..row_cell_size * col_cell_size],
@@ -1813,7 +1826,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let col_cell_size = ninputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
+                            self.restriction.maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
                             cd,
                             1,
@@ -1859,7 +1872,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                             }
                         }
                         let (row_maps, _) =
-                            self.cell_field_maps_for(cell_index, &selection.outputs);
+                            self.restriction.maps_for(cell_index, &selection.outputs);
                         push_rectangular_local_matrix_triplets(
                             &mut triplets,
                             &local_matrix[..row_cell_size * col_cell_size],
@@ -1931,11 +1944,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             .iter()
             .map(|&field| layout.offsets[field])
             .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| layout.offsets[field])
-            .collect();
         assert_eq!(state.nrows(), layout.total_size, "state size mismatch");
         assert_eq!(
             state.ncols(),
@@ -1981,7 +1989,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let output_cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
                         let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
+                            self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
                             cell_index,
                             ndofs,
@@ -2000,14 +2008,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ctx =
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
                         for column in 0..ncols {
-                            for field in 0..ninputs {
-                                for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
-                                    local_direction[field * ndofs + local_i] = reduced_i
-                                        .map_or(0.0, |i| {
-                                            direction[(input_offsets[field] + i, column)]
-                                        });
-                                }
-                            }
+                            self.restriction.gather_direction_column(
+                                cell_index,
+                                &selection.inputs,
+                                &input_offsets,
+                                direction,
+                                column,
+                                &mut local_direction[..input_cell_size],
+                            );
                             kernel.apply_local_jacobian(
                                 &ctx,
                                 &state_cell,
@@ -2023,28 +2031,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 },
             )
             .collect();
-        for (batch_index, batch) in batches.into_iter().enumerate() {
-            let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
-                .iter()
-                .enumerate()
-            {
-                let ndofs = reduced_dofs.len();
-                let (field_maps, _) =
-                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
-                for column in 0..ncols {
-                    let start = cell_offset * action_stride + column * output_size;
-                    let local = &batch[start..start + noutputs * ndofs];
-                    for field in 0..noutputs {
-                        for (local_i, &reduced_i) in field_maps[field].iter().enumerate() {
-                            if let Some(reduced_i) = reduced_i {
-                                out[(output_offsets[field] + reduced_i, column)] +=
-                                    local[field * ndofs + local_i];
-                            }
-                        }
-                    }
-                }
+        let actions: Vec<f64> = batches.into_iter().flatten().collect();
+        let reduced = self.restriction.transpose_reduce(
+            &actions,
+            action_stride,
+            output_size,
+            ncols,
+            &selection.outputs,
+        );
+        for column in 0..ncols {
+            for row in 0..layout.total_size {
+                out[(row, column)] = reduced[row * ncols + column];
             }
         }
     }
@@ -2071,11 +2068,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let noutputs = selection.outputs.len();
         let input_offsets: Vec<_> = selection
             .inputs
-            .iter()
-            .map(|&field| layout.offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
             .iter()
             .map(|&field| layout.offsets[field])
             .collect();
@@ -2115,31 +2107,32 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let input_cell_size = ninputs * ndofs;
                         let output_cell_size = noutputs * ndofs;
                         let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
-                        let (field_maps, field_prescribed) =
-                            self.cell_field_maps_for(cell_index, &selection.inputs);
-                        let state_cell = interpolate_tensor_cell_state(
-                            cd,
-                            1,
-                            ninputs,
-                            &field_maps,
-                            &field_prescribed,
+                        self.restriction.gather_state(
+                            cell_index,
+                            &selection.inputs,
                             &input_offsets,
                             state,
                             &mut state_coefficients[..input_cell_size],
+                        );
+                        let state_cell = interpolate_tensor_cell_coefficients(
+                            cd,
+                            1,
+                            ninputs,
+                            &state_coefficients[..input_cell_size],
                             &mut state_values[..ninputs * cd.npts],
                             &mut state_grads[..ninputs * cd.npts],
                             cell_index,
                         );
                         let ctx = self.tensor_ctx(time, cell_index);
                         for column in 0..ncols {
-                            for field in 0..ninputs {
-                                for (local, &reduced) in field_maps[field].iter().enumerate() {
-                                    local_direction[field * ndofs + local] =
-                                        reduced.map_or(0.0, |reduced| {
-                                            direction[(input_offsets[field] + reduced, column)]
-                                        });
-                                }
-                            }
+                            self.restriction.gather_direction_column(
+                                cell_index,
+                                &selection.inputs,
+                                &input_offsets,
+                                direction,
+                                column,
+                                &mut local_direction[..input_cell_size],
+                            );
                             let direction_cell = interpolate_tensor_cell_coefficients(
                                 cd,
                                 1,
@@ -2165,28 +2158,17 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 },
             )
             .collect();
-        for (batch_index, batch) in batches.into_iter().enumerate() {
-            let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
-                .iter()
-                .enumerate()
-            {
-                let ndofs = reduced_dofs.len();
-                let (field_maps, _) =
-                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
-                for column in 0..ncols {
-                    let start = cell_offset * action_stride + column * output_size;
-                    let local_action = &batch[start..start + noutputs * ndofs];
-                    for field in 0..noutputs {
-                        for (local_dof, &reduced) in field_maps[field].iter().enumerate() {
-                            if let Some(reduced) = reduced {
-                                out[(output_offsets[field] + reduced, column)] +=
-                                    local_action[field * ndofs + local_dof];
-                            }
-                        }
-                    }
-                }
+        let actions: Vec<f64> = batches.into_iter().flatten().collect();
+        let reduced = self.restriction.transpose_reduce(
+            &actions,
+            action_stride,
+            output_size,
+            ncols,
+            &selection.outputs,
+        );
+        for column in 0..ncols {
+            for row in 0..layout.total_size {
+                out[(row, column)] = reduced[row * ncols + column];
             }
         }
     }

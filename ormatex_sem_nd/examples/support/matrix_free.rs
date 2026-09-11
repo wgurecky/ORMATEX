@@ -6,7 +6,7 @@ use ndmesh::traits::Mesh;
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
     KernelAdvDiff2D, MatrixFreeJacobianSource, MatrixFreeMinvJacobian, OwnedMinvJacobian,
-    SEM2DProblem, TensorKernelAdvDiff2D,
+    ParallelOwnedMinvJacobian, SEM2DProblem, TensorKernelAdvDiff2D,
 };
 
 use super::linear_system::{lumped_inverse_mass, sparse_add};
@@ -14,6 +14,7 @@ use super::linear_system::{lumped_inverse_mass, sparse_add};
 #[derive(Clone, Copy)]
 pub enum JacobianBackend {
     Assembled,
+    ParallelAssembled,
     MatrixFree,
 }
 
@@ -153,6 +154,22 @@ where
                         .assemble_jacobian(state),
                 };
                 Box::new(OwnedMinvJacobian::new(
+                    sparse_add(volume.as_ref(), self.robin.as_ref()),
+                    &self.m_inv,
+                ))
+            }
+            JacobianBackend::ParallelAssembled => {
+                let volume = match &self.kernel {
+                    ResidualDiffusionKernel::Weak(kernel) => {
+                        self.problem.assemble_residual_jacobian(t, kernel, state)
+                    }
+                    ResidualDiffusionKernel::Tensor(kernel) => self
+                        .problem
+                        .tensor_residual_operator(kernel)
+                        .at_time(t)
+                        .assemble_jacobian(state),
+                };
+                Box::new(ParallelOwnedMinvJacobian::new(
                     sparse_add(volume.as_ref(), self.robin.as_ref()),
                     &self.m_inv,
                 ))

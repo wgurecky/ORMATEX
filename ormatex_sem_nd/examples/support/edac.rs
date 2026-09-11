@@ -6,16 +6,18 @@ use std::path::Path;
 use faer::matrix_free::LinOp;
 use faer::prelude::*;
 use ormatex::matexp_krylov::KrylovExpm;
+use ormatex::matexp_leja::{LejaEllipseAdapterArnoldiIOM, LejaPhiEval, LejaPoints};
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex_sem_nd::{
     CellState, FieldValues, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
     KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
-    MatrixFreeMinvJacobian, OwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem,
-    StateBoundaryTerms, StateTensorBoundaryTerms, TensorKernelEdacDirectionalDoNothing2D,
-    TensorKernelEdacDongOutflow2D, TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D,
-    TensorKernelEdacSplitBoundaryFlux2D, TensorResidualKernel,
+    MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian, QuadMesh, ResidualKernel,
+    SEM2DProblem, StateBoundaryTerms, StateTensorBoundaryTerms,
+    TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
+    TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D, TensorKernelEdacSplitBoundaryFlux2D,
+    TensorResidualKernel,
 };
 
 use super::linear_system::lumped_inverse_mass;
@@ -63,6 +65,7 @@ impl<K: ResidualKernel> ResidualKernel for GenericResidual<K> {
 pub enum JacobianBackend {
     MatrixFree,
     Assembled,
+    ParallelAssembled,
 }
 
 impl JacobianBackend {
@@ -81,7 +84,7 @@ impl JacobianBackend {
             "choose only one of --assembled-jacobian and --matrix-free"
         );
         if assembled {
-            Self::Assembled
+            Self::ParallelAssembled
         } else {
             Self::MatrixFree
         }
@@ -232,6 +235,10 @@ impl<'a, K> FluidSystem<'a, K> {
 }
 
 impl<'a, K> TensorFluidSystem<'a, K> {
+    pub fn new(problem: &'a SEM2DProblem<QuadMesh>, kernel: K) -> Self {
+        Self::new_with_backend(problem, kernel, JacobianBackend::from_args())
+    }
+
     pub fn new_with_backend(
         problem: &'a SEM2DProblem<QuadMesh>,
         kernel: K,
@@ -337,6 +344,10 @@ where
                 operator.assemble_jacobian(state),
                 &self.m_inv,
             )),
+            JacobianBackend::ParallelAssembled => Box::new(ParallelOwnedMinvJacobian::new(
+                operator.assemble_jacobian(state),
+                &self.m_inv,
+            )),
             JacobianBackend::MatrixFree => Box::new(MatrixFreeMinvJacobian::new(
                 operator,
                 state.to_owned(),
@@ -373,6 +384,10 @@ where
                 operator.assemble_jacobian(state),
                 &self.m_inv,
             )),
+            JacobianBackend::ParallelAssembled => Box::new(ParallelOwnedMinvJacobian::new(
+                operator.assemble_jacobian(state),
+                &self.m_inv,
+            )),
             JacobianBackend::MatrixFree => Box::new(MatrixFreeMinvJacobian::new(
                 operator,
                 state.to_owned(),
@@ -386,6 +401,21 @@ pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
     let expmv = Box::new(PadeExpm::new(12));
     let krylov = KrylovExpm::new(expmv, 30, 100, 1e-12, Some(2));
     EpirkIntegrator::new(0.0, state0, "epi3".to_string(), krylov)
+}
+
+pub fn epi3_leja(state0: MatRef<'_, f64>) -> EpirkIntegrator<LejaPhiEval> {
+    let points = LejaPoints::new_from_fn("leja_circle").slice(0, 800);
+    let adapter = LejaEllipseAdapterArnoldiIOM::new(-1.0, 0.0, 1.0, 1e-8, 30, 2, 1.0);
+    let leja = LejaPhiEval::new(
+        points,
+        100,
+        1e-12,
+        "clapm",
+        "dd_taylor",
+        false,
+        Box::new(adapter),
+    );
+    EpirkIntegrator::new(0.0, state0, "epi3".to_string(), leja)
 }
 
 pub fn advance(
@@ -411,6 +441,22 @@ pub fn advance_tensor(
     nsteps: usize,
 ) -> Mat<f64> {
     let mut integrator = epi3(state0);
+    for step in 0..nsteps {
+        let result = integrator
+            .step(system, dt)
+            .unwrap_or_else(|error| panic!("EDAC step {step} failed: {}", error.msg));
+        integrator.accept_step(result);
+    }
+    integrator.state()
+}
+
+pub fn advance_tensor_leja(
+    system: &TensorFluidSystem<'_, impl TensorResidualKernel<2> + Sync + Send>,
+    state0: MatRef<'_, f64>,
+    dt: f64,
+    nsteps: usize,
+) -> Mat<f64> {
+    let mut integrator = epi3_leja(state0);
     for step in 0..nsteps {
         let result = integrator
             .step(system, dt)

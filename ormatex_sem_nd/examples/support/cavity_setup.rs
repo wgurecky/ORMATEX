@@ -74,7 +74,11 @@ fn boundary_facet_values(
 }
 
 pub fn problem() -> SEM2DProblem<QuadMesh> {
-    let mesh = unit_square(8, 8, ReferenceCellType::Quadrilateral, 1);
+    problem_with_resolution(32, 32)
+}
+
+pub fn problem_with_resolution(nx: usize, ny: usize) -> SEM2DProblem<QuadMesh> {
+    let mesh = unit_square(nx, ny, ReferenceCellType::Quadrilateral, 1);
     let family = LagrangeElementFamily::<f64>::new(2, Continuity::Standard, LagrangeVariant::GLL);
     let space = FunctionSpaceImpl::new(&mesh, &family);
     let (u_values, v_values, pressure_dof) = boundary_facet_values(&mesh, &space);

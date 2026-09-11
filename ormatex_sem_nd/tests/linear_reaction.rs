@@ -42,7 +42,9 @@ fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
     assert_eq!(ResidualKernel::nfields(&weak_kernel), 3);
 
     let state = Mat::from_fn(3 * n, 1, |row, _| 0.2 + 0.03 * row as f64);
-    let direction = Mat::from_fn(3 * n, 1, |row, _| (0.2 * row as f64).sin());
+    let direction = Mat::from_fn(3 * n, 2, |row, column| {
+        (0.2 * row as f64 + column as f64).sin()
+    });
     let mass = problem.assemble_lumped_mass().to_dense();
     let jacobian = problem
         .assemble_residual_jacobian(0.0, &weak_kernel, state.as_ref())
@@ -75,7 +77,9 @@ fn sparse_linear_reaction_assembles_expected_blocks_and_action() {
     let action = problem.apply_jacobian(0.0, &weak_kernel, state.as_ref(), direction.as_ref());
     let expected_action = jacobian.as_ref() * direction.as_ref();
     for row in 0..3 * n {
-        assert!((action[(row, 0)] - expected_action[(row, 0)]).abs() < 1e-12);
+        for column in 0..direction.ncols() {
+            assert!((action[(row, column)] - expected_action[(row, column)]).abs() < 1e-12);
+        }
     }
 
     let tensor_kernel = TensorKernelLinearReaction(kernel());

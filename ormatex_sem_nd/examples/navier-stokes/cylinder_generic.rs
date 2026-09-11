@@ -17,7 +17,7 @@ mod edac;
 mod linear_system;
 
 use cylinder_setup::problem;
-use edac::{epi3, write_spatial_csv, FluidSystem, GenericResidual, JacobianBackend};
+use edac::{epi3, write_spatial_csv, FluidSystem, GenericResidual};
 
 fn split_kernel() -> ResidualKernelSum<'static> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -35,12 +35,8 @@ fn main() {
     let problem = case.problem;
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
 
-    let system = FluidSystem::new_with_backend(
-        &problem,
-        GenericResidual(split_kernel()),
-        JacobianBackend::MatrixFree,
-    )
-    .with_wall_boundaries(case.cylinder, case.slip_wall);
+    let system = FluidSystem::new(&problem, GenericResidual(split_kernel()))
+        .with_wall_boundaries(case.cylinder, case.slip_wall);
     let system = if directional {
         system.with_directional_do_nothing_outflow(
             KernelEdacDirectionalDoNothing2D::new(1.0),

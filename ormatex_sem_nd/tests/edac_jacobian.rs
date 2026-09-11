@@ -55,7 +55,7 @@ fn assembled_edac_jacobian_includes_state_boundary_terms() {
     let assembled = FluidSystem::new_with_backend(
         &problem,
         KernelEdacNavierStokes2D::new(1.0, 0.1, 10.0, 0.0),
-        JacobianBackend::Assembled,
+        JacobianBackend::ParallelAssembled,
     )
     .with_state_boundary(terms);
 

@@ -17,7 +17,7 @@ mod edac;
 mod linear_system;
 
 use backward_step_setup::problem;
-use edac::{advance_tensor, write_spatial_csv, JacobianBackend, TensorFluidSystem};
+use edac::{advance_tensor, write_spatial_csv, TensorFluidSystem};
 
 fn tensor_split_kernel() -> impl TensorResidualKernel<2> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -33,17 +33,13 @@ fn main() {
     let case = problem();
     let problem = case.problem;
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
-    let system = TensorFluidSystem::new_with_backend(
-        &problem,
-        tensor_split_kernel(),
-        JacobianBackend::MatrixFree,
-    )
-    .with_wall_boundaries(case.wall, Vec::new())
-    .with_directional_do_nothing_outflow(
-        TensorKernelEdacDirectionalDoNothing2D::new(1.0),
-        case.outlet,
-        true,
-    );
+    let system = TensorFluidSystem::new(&problem, tensor_split_kernel())
+        .with_wall_boundaries(case.wall, Vec::new())
+        .with_directional_do_nothing_outflow(
+            TensorKernelEdacDirectionalDoNothing2D::new(1.0),
+            case.outlet,
+            true,
+        );
     let state = advance_tensor(&system, state0.as_ref(), 0.05, 100);
 
     std::fs::create_dir_all("target").expect("failed to create output directory");

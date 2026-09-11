@@ -12,7 +12,8 @@ use ormatex_sem_nd::material::{
 use ormatex_sem_nd::{
     BilinearForm, BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry,
     FluxKernel1D, KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian,
-    ResidualKernel, SEM1DProblem, StateBoundaryIntegrator, StateBoundaryTerms, TensorKernelAdvDiff,
+    ParallelOwnedMinvJacobian, ResidualKernel, SEM1DProblem, StateBoundaryIntegrator,
+    StateBoundaryTerms, TensorKernelAdvDiff,
 };
 
 #[path = "../examples/support/euler_1d.rs"]
@@ -402,6 +403,43 @@ fn matrix_free_minv_jacobian_matches_assembled_1d_action() {
         * direction.as_ref();
     for row in 0..n {
         assert!((action[(row, 0)] + m_inv[row] * expected[(row, 0)]).abs() < 1e-11);
+    }
+}
+
+#[test]
+fn parallel_minv_jacobian_matches_assembled_1d_action() {
+    let problem = SEM1DProblem::new(
+        mesh(2),
+        2,
+        FieldRegistry::new(["temperature"]),
+        DofReduction1D::None,
+    );
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |i, _| 0.2 + 0.1 * i as f64);
+    let direction = Mat::from_fn(n, 2, |i, column| (0.4 * i as f64 + column as f64).sin());
+    let mass = problem.assemble_lumped_mass();
+    let m_inv: Vec<f64> = (0..n).map(|i| 1.0 / mass[(i, i)]).collect();
+    let kernel = QuadraticReaction;
+    let operator = ParallelOwnedMinvJacobian::new(
+        problem.assemble_residual_jacobian(0.0, &kernel, state.as_ref()),
+        &m_inv,
+    );
+    let mut action = Mat::zeros(n, 2);
+    let mut scratch = MemBuffer::new(StackReq::empty());
+    operator.apply(
+        action.as_mut(),
+        direction.as_ref(),
+        faer::get_global_parallelism(),
+        MemStack::new(&mut scratch),
+    );
+    let expected = problem
+        .assemble_residual_jacobian(0.0, &kernel, state.as_ref())
+        .as_ref()
+        * direction.as_ref();
+    for row in 0..n {
+        for column in 0..2 {
+            assert!((action[(row, column)] + m_inv[row] * expected[(row, column)]).abs() < 1e-11);
+        }
     }
 }
 

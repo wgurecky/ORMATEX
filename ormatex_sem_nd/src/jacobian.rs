@@ -9,6 +9,7 @@ use faer::sparse::{SparseColMat, SparseColMatRef};
 use faer::Par;
 
 use crate::kernels::kernel_common::ResidualKernel;
+use crate::op::ParCsrJacobian;
 use crate::simd;
 use crate::{SEM1DProblem, SEM2DProblem};
 use ndelement::types::ReferenceCellType;
@@ -242,6 +243,68 @@ impl LinOp<f64> for OwnedMinvJacobian<'_> {
         for column in 0..out.ncols() {
             for row in 0..out.nrows() {
                 out[(row, column)] = -self.m_inv[row] * action[(row, column)];
+            }
+        }
+    }
+
+    fn conj_apply(
+        &self,
+        out: MatMut<'_, f64>,
+        rhs: MatRef<'_, f64>,
+        par: Par,
+        stack: &mut MemStack,
+    ) {
+        self.apply(out, rhs, par, stack);
+    }
+}
+
+/// Applies `-M^-1 J` using parallel sparse products for an assembled Jacobian.
+#[derive(Debug)]
+pub struct ParallelOwnedMinvJacobian<'a> {
+    jacobian: ParCsrJacobian,
+    m_inv: &'a [f64],
+}
+
+impl<'a> ParallelOwnedMinvJacobian<'a> {
+    pub fn new(jacobian: SparseColMat<usize, f64>, m_inv: &'a [f64]) -> Self {
+        assert_eq!(
+            jacobian.nrows(),
+            jacobian.ncols(),
+            "Jacobian must be square"
+        );
+        assert_eq!(jacobian.nrows(), m_inv.len(), "Jacobian/mass size mismatch");
+        let n_threads = faer::get_global_parallelism().degree().max(1);
+        Self {
+            jacobian: ParCsrJacobian::new(jacobian, n_threads),
+            m_inv,
+        }
+    }
+}
+
+impl LinOp<f64> for ParallelOwnedMinvJacobian<'_> {
+    fn apply_scratch(&self, rhs_ncols: usize, par: Par) -> StackReq {
+        self.jacobian.apply_scratch(rhs_ncols, par)
+    }
+
+    fn nrows(&self) -> usize {
+        self.jacobian.nrows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.jacobian.ncols()
+    }
+
+    fn apply(
+        &self,
+        mut out: MatMut<'_, f64>,
+        rhs: MatRef<'_, f64>,
+        par: Par,
+        stack: &mut MemStack,
+    ) {
+        self.jacobian.apply(out.rb_mut(), rhs, par, stack);
+        for column in 0..out.ncols() {
+            for row in 0..out.nrows() {
+                out[(row, column)] *= -self.m_inv[row];
             }
         }
     }

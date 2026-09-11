@@ -23,7 +23,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{advance_tensor, JacobianBackend, TensorFluidSystem};
+use edac::{advance_tensor, TensorFluidSystem};
 
 const P: usize = 2;
 const CELLS: usize = 20;
@@ -207,8 +207,7 @@ fn main() {
     let (problem, walls) = load_problem();
     let state0 = initial_state(&problem);
     let system =
-        TensorFluidSystem::new_with_backend(&problem, tensor_kernel(), JacobianBackend::MatrixFree)
-            .with_wall_boundaries(walls, Vec::new());
+        TensorFluidSystem::new(&problem, tensor_kernel()).with_wall_boundaries(walls, Vec::new());
     let state = advance_tensor(&system, state0.as_ref(), DT, STEPS);
     std::fs::create_dir_all("target").expect("failed to create output directory");
     let diagnostics = write_output(

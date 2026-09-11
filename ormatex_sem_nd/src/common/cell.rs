@@ -7,7 +7,7 @@ use crate::simd;
 use super::contexts::{CellState, LocalCtx};
 
 // ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
-pub(crate) const CELL_BATCH_SIZE: usize = 32;
+pub(crate) const CELL_BATCH_SIZE: usize = 128;
 
 /// One-dimensional data needed by a tensor-product evaluator.
 ///
@@ -164,8 +164,6 @@ pub(crate) fn interpolate_tensor_cell_coefficients<'a>(
     assert_eq!(values.len(), field_count * npts);
     assert_eq!(field_grads.len(), field_count * geometric_dimension * npts);
 
-    values.fill(0.0);
-    field_grads.fill(0.0);
     for field in 0..field_count {
         let field_coefficients =
             &coefficients[field * cell_data.ndofs..(field + 1) * cell_data.ndofs];
@@ -193,10 +191,14 @@ pub(crate) fn interpolate_tensor_cell_coefficients<'a>(
                         &field_values[j * n1d..(j + 1) * n1d],
                     );
                 }
-                gradients_y[j * n1d..(j + 1) * n1d].fill(0.0);
-                for a in 0..n1d {
+                let gradients_y = &mut gradients_y[j * n1d..(j + 1) * n1d];
+                let first_factor = tensor.differentiation[j * n1d];
+                for (gradient, &value) in gradients_y.iter_mut().zip(&field_values[..n1d]) {
+                    *gradient = first_factor * value;
+                }
+                for a in 1..n1d {
                     simd::axpy(
-                        &mut gradients_y[j * n1d..(j + 1) * n1d],
+                        gradients_y,
                         tensor.differentiation[j * n1d + a],
                         &field_values[a * n1d..(a + 1) * n1d],
                     );

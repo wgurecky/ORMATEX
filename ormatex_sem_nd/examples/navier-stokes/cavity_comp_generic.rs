@@ -14,7 +14,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{advance, write_spatial_csv, FluidSystem, GenericResidual, JacobianBackend};
+use edac::{advance, write_spatial_csv, FluidSystem, GenericResidual};
 
 const STEPS: usize = 300;
 
@@ -31,11 +31,7 @@ fn composed_kernel() -> ResidualKernelSum<'static> {
 fn main() {
     let problem = cavity_setup::problem();
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
-    let system = FluidSystem::new_with_backend(
-        &problem,
-        GenericResidual(composed_kernel()),
-        JacobianBackend::MatrixFree,
-    );
+    let system = FluidSystem::new(&problem, GenericResidual(composed_kernel()));
     let state = advance(&system, state0.as_ref(), 0.01, STEPS);
 
     std::fs::create_dir_all("target").expect("failed to create output directory");

@@ -46,9 +46,12 @@ impl SmagorinskyLilly2D {
         )
     }
 
-    pub fn strain_magnitude(&self, state: &CellState, q: usize) -> f64 {
-        let (sxx, syy, sxy) = Self::strain_components(state, q);
+    fn strain_magnitude_from_components((sxx, syy, sxy): (f64, f64, f64)) -> f64 {
         (2.0 * (sxx * sxx + syy * syy + 2.0 * sxy * sxy)).sqrt()
+    }
+
+    pub fn strain_magnitude(&self, state: &CellState, q: usize) -> f64 {
+        Self::strain_magnitude_from_components(Self::strain_components(state, q))
     }
 
     pub fn eddy_viscosity(&self, ctx: &LocalCtx, state: &CellState, q: usize) -> f64 {
@@ -69,11 +72,12 @@ impl SmagorinskyLilly2D {
         direction: &CellState,
         q: usize,
     ) -> f64 {
-        let magnitude = self.strain_magnitude(state, q);
+        let components = Self::strain_components(state, q);
+        let magnitude = Self::strain_magnitude_from_components(components);
         if magnitude <= f64::EPSILON {
             return 0.0;
         }
-        let (sxx, syy, sxy) = Self::strain_components(state, q);
+        let (sxx, syy, sxy) = components;
         let dsxx = direction.grad(0, q, 0);
         let dsyy = direction.grad(1, q, 1);
         let dsxy = 0.5 * (direction.grad(0, q, 1) + direction.grad(1, q, 0));
@@ -101,11 +105,12 @@ impl SmagorinskyLilly2D {
     ) -> f64 {
         assert!(velocity_field < 2, "velocity field must be 0 or 1");
         assert!(direction < 2, "gradient direction must be 0 or 1");
-        let magnitude = self.strain_magnitude(state, q);
+        let components = Self::strain_components(state, q);
+        let magnitude = Self::strain_magnitude_from_components(components);
         if magnitude <= f64::EPSILON {
             return 0.0;
         }
-        let (sxx, syy, sxy) = Self::strain_components(state, q);
+        let (sxx, syy, sxy) = components;
         let shear_sum = 2.0 * sxy;
         let dq = match (velocity_field, direction) {
             (0, 0) => 4.0 * sxx,

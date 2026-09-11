@@ -96,6 +96,12 @@ pub(crate) fn dot(left: &[f64], right: &[f64]) -> f64 {
 #[inline]
 pub(crate) fn axpy(target: &mut [f64], factor: f64, source: &[f64]) {
     assert_eq!(target.len(), source.len());
+    if target.len() < 4 {
+        for (target, &source) in target.iter_mut().zip(source) {
+            *target += factor * source;
+        }
+        return;
+    }
     Arch::new().dispatch(Axpy {
         target,
         source,

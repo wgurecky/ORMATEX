@@ -1,4 +1,5 @@
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
+use faer::matrix_free::LinOp;
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
@@ -6,7 +7,8 @@ use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex::ode_sys::OdeSys;
 use ormatex_sem_nd::{
     BilinearForm, BoundaryIntegrator, DofReduction2D, FieldRegistry, KernelAdvDiff2D, LocalCtx,
-    NeumannFlux, ResidualKernel, RobinConvection, SEM2DProblem, TensorKernelAdvDiff2D,
+    NeumannFlux, ParCsrJacobian, ResidualKernel, RobinConvection, SEM2DProblem,
+    TensorKernelAdvDiff2D,
 };
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
@@ -324,8 +326,47 @@ fn matrix_free_jacobian_matches_assembled_action() {
 fn matrix_free_backward_euler_matches_assembled_backend() {
     let matrix_free = run_case(JacobianBackend::MatrixFree, 2);
     let assembled = run_case(JacobianBackend::Assembled, 2);
+    let parallel = run_case(JacobianBackend::ParallelAssembled, 2);
     for row in 0..matrix_free.nrows() {
         assert!((matrix_free[(row, 0)] - assembled[(row, 0)]).abs() < 1e-8);
+        assert!((parallel[(row, 0)] - assembled[(row, 0)]).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn parallel_sparse_linop_handles_multiple_rhs_and_replaces_output() {
+    let jacobian = SparseColMat::try_new_from_triplets(
+        5,
+        5,
+        &[
+            Triplet::new(0, 0, 2.0),
+            Triplet::new(3, 0, -1.0),
+            Triplet::new(1, 1, 3.0),
+            Triplet::new(4, 1, 0.5),
+            Triplet::new(2, 2, -2.0),
+            Triplet::new(0, 3, 4.0),
+            Triplet::new(4, 4, 1.5),
+        ],
+    )
+    .unwrap();
+    let rhs = Mat::from_fn(5, 2, |row, column| (row + 2 * column + 1) as f64);
+    let expected = jacobian.as_ref() * rhs.as_ref();
+    let operator = ParCsrJacobian::new(jacobian, 2);
+
+    for par in [faer::Par::Seq, faer::Par::rayon(2)] {
+        let mut actual = Mat::from_fn(5, 2, |_, _| 99.0);
+        let mut scratch = MemBuffer::new(StackReq::empty());
+        operator.apply(
+            actual.as_mut(),
+            rhs.as_ref(),
+            par,
+            MemStack::new(&mut scratch),
+        );
+        for row in 0..5 {
+            for column in 0..2 {
+                assert!((actual[(row, column)] - expected[(row, column)]).abs() < 1e-12);
+            }
+        }
     }
 }
 
@@ -352,22 +393,31 @@ fn large_2d_diffusion_matrix_free_jacobian_runtime() {
         .num_threads(parallel_threads)
         .build()
         .unwrap();
+    const REPEATS: usize = 16;
+    let serial_operator = problem.tensor_residual_operator(&kernel);
+    let parallel_operator = problem.tensor_residual_operator(&kernel);
 
     let start = Instant::now();
     let serial = serial_pool.install(|| {
-        problem
-            .tensor_residual_operator(&kernel)
-            .apply_jacobian(state.as_ref(), direction.as_ref())
+        let mut action = Mat::zeros(problem.reduced_size(), direction.ncols());
+        for _ in 0..REPEATS {
+            action = serial_operator.apply_jacobian(state.as_ref(), direction.as_ref());
+            std::hint::black_box(&action);
+        }
+        action
     });
-    let serial_time = start.elapsed();
+    let serial_time = start.elapsed() / REPEATS as u32;
 
     let start = Instant::now();
     let parallel = parallel_pool.install(|| {
-        problem
-            .tensor_residual_operator(&kernel)
-            .apply_jacobian(state.as_ref(), direction.as_ref())
+        let mut action = Mat::zeros(problem.reduced_size(), direction.ncols());
+        for _ in 0..REPEATS {
+            action = parallel_operator.apply_jacobian(state.as_ref(), direction.as_ref());
+            std::hint::black_box(&action);
+        }
+        action
     });
-    let parallel_time = start.elapsed();
+    let parallel_time = start.elapsed() / REPEATS as u32;
 
     assert_eq!(serial.nrows(), problem.reduced_size());
     assert_eq!(parallel.nrows(), problem.reduced_size());

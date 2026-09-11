@@ -5,6 +5,7 @@ mod boundary;
 mod cell;
 mod contexts;
 mod reduction;
+mod restriction;
 
 pub(crate) use assembly::{
     assemble_lumped_mass, push_local_matrix_triplets, push_rectangular_local_matrix_triplets,
@@ -28,3 +29,4 @@ pub(crate) use cell::{
 };
 pub use contexts::{CellState, FacetCtx, LocalCtx, ShapeFn, TensorCtx, TensorFacetCtx};
 pub(crate) use reduction::{FieldDofLayout, ReducedDofMap};
+pub(crate) use restriction::ElementRestriction;
