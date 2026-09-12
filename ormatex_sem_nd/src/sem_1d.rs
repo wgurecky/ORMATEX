@@ -642,7 +642,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         );
 
         let family =
-            LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+            LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::Gll);
         let space = FunctionSpaceImpl::new(&mesh, &family);
         let n = space.process_size();
         let element = family.element(ReferenceCellType::Interval);

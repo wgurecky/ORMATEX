@@ -104,7 +104,7 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>,
 {
     assert!(p >= 1, "Dirichlet boundary values require p >= 1");
-    let family = LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+    let family = LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::Gll);
     let space = FunctionSpaceImpl::new(mesh, &family);
     let mut values = BTreeMap::new();
     let mut preferred_dofs = HashSet::new();
@@ -2345,7 +2345,7 @@ mod tests {
 
         for p in 1..=3 {
             let family =
-                LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+                LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::Gll);
             let space = FunctionSpaceImpl::new(&mesh, &family);
             let inlet_dofs = space
                 .entity_closure_dofs(ReferenceCellType::Interval, inlet)

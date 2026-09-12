@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 faer = { version = "0.23", features = ["unstable"] }
-ndelement = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
-ndmesh = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
-ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" , rev = "28211441c0"}
+ndelement = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
+ndmesh = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
+ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
 rlst = "0.6"
 quadraturerules = "0.12.0"
 rayon = "1"

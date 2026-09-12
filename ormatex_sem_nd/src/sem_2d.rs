@@ -892,7 +892,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     ) -> Self {
         assert!(p >= 1, "polynomial degree p must be >= 1");
         let family =
-            LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::GLL);
+            LagrangeElementFamily::<f64>::new(p, Continuity::Standard, LagrangeVariant::Gll);
         let tdim = mesh.topology_dim();
         let gdim = mesh.geometry_dim();
         assert_eq!(tdim, 2, "SEM2DProblem: mesh tdim must be 2");
