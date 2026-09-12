@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use faer::prelude::*;
 use ormatex_sem_nd::{
-    EdacNavierStokes2DConfig, TensorKernelEdacMomentumConvection2D,
+    fuse_tensor_kernels, EdacNavierStokes2DConfig, TensorKernelEdacMomentumConvection2D,
     TensorKernelEdacPressureAdvection2D, TensorKernelEdacPressureDiffusion2D,
     TensorKernelEdacPressureDivergence2D, TensorKernelEdacPressureGradient2D,
-    TensorKernelEdacViscousStress2D, TensorResidualKernelSum,
+    TensorKernelEdacViscousStress2D,
 };
 
 #[path = "../support/cavity_setup.rs"]
@@ -22,21 +22,25 @@ use edac::{advance_tensor, advance_tensor_leja, write_spatial_csv, TensorFluidSy
 const DT: f64 = 0.0025;
 const DEFAULT_STEPS: usize = 1200;
 const DEFAULT_RESOLUTION: usize = 32;
+const DEFAULT_DEGREE: usize = 2;
 
 fn tensor_composed_kernel() -> impl ormatex_sem_nd::TensorResidualKernel<2> {
     let config = EdacNavierStokes2DConfig::new(1.0, 0.1, 10.0, 0.0);
-    TensorResidualKernelSum::from_kernel(TensorKernelEdacMomentumConvection2D::new(config))
-        .with(TensorKernelEdacPressureGradient2D::new(config))
-        .with(TensorKernelEdacViscousStress2D::new(config))
-        .with(TensorKernelEdacPressureDivergence2D::new(config))
-        .with(TensorKernelEdacPressureAdvection2D::new(config))
-        .with(TensorKernelEdacPressureDiffusion2D::new(config))
+    fuse_tensor_kernels!(
+        TensorKernelEdacMomentumConvection2D::new(config),
+        TensorKernelEdacPressureGradient2D::new(config),
+        TensorKernelEdacViscousStress2D::new(config),
+        TensorKernelEdacPressureDivergence2D::new(config),
+        TensorKernelEdacPressureAdvection2D::new(config),
+        TensorKernelEdacPressureDiffusion2D::new(config),
+    )
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let resolution = parse_usize_flag(&args, "--resolution").unwrap_or(DEFAULT_RESOLUTION);
     let steps = parse_usize_flag(&args, "--steps").unwrap_or(DEFAULT_STEPS);
+    let degree = parse_usize_flag(&args, "--degree").unwrap_or(DEFAULT_DEGREE);
     let threads = parse_usize_flag(&args, "--threads");
     let benchmark = args.iter().any(|arg| arg == "--benchmark");
     if let Some(threads) = threads {
@@ -49,7 +53,7 @@ fn main() {
     }
 
     let setup_start = Instant::now();
-    let problem = cavity_setup::problem_with_resolution(resolution, resolution);
+    let problem = cavity_setup::problem_with_resolution_and_degree(resolution, resolution, degree);
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
     let system = TensorFluidSystem::new(&problem, tensor_composed_kernel());
     let setup_time = setup_start.elapsed();
@@ -62,7 +66,7 @@ fn main() {
     let integration_time = integration_start.elapsed();
 
     println!(
-        "cavity tensor: resolution={resolution} steps={steps} dofs={} setup={setup_time:?} integration={integration_time:?} threads={:?} backend={:?}",
+        "cavity tensor: resolution={resolution} degree={degree} steps={steps} dofs={} setup={setup_time:?} integration={integration_time:?} threads={:?} backend={:?}",
         problem.system_size(),
         threads,
         if args.iter().any(|arg| arg == "--assembled-jacobian") {

@@ -2,10 +2,14 @@ use crate::common::{
     add_dirichlet_rhs_correction, assemble_lumped_mass, cell_ctx, interpolate_cell_state,
     interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state,
     push_local_matrix_triplets, push_rectangular_local_matrix_triplets, scatter_local_vector,
-    BoundaryContributions, CellData, CellState, ElementRestriction, FacetCtx, FieldDofLayout,
-    LocalCtx, ReducedDofMap, StateBoundaryContributions, TensorCtx, TensorProductData,
-    CELL_BATCH_SIZE,
+    BoundaryContributions, CellData, CellState, DisjointOut, ElementRestriction, FacetCtx,
+    FieldDofLayout, LocalCtx, ReducedDofMap, StateBoundaryContributions, TensorCtx,
+    TensorProductData, rayon_cell_chunk_size,
 };
+use crate::common::batch::{
+    TensorLaneScratch, extract_lanes, integrate_batch_1d, interpolate_batch_1d,
+};
+use crate::common::batch::SIMD_CELL_WIDTH;
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::jacobian::CompleteResidualOperator;
 use crate::kernels::kernel_common::{
@@ -1140,17 +1144,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
+        // ponytail: dynamic Rayon tile; SIMD width stays separate (SIMD_CELL_WIDTH).
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let selection = self.resolve_residual_selection(kernel, "residual kernel");
         let ninputs = selection.inputs.len();
         let noutputs = selection.outputs.len();
         let layout = self.field_layout();
         let input_offsets: Vec<_> = selection
             .inputs
-            .iter()
-            .map(|&field| layout.offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
             .iter()
             .map(|&field| layout.offsets[field])
             .collect();
@@ -1161,11 +1162,15 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             "residual assembly requires one state column"
         );
         let cd = &self.cell_data;
+        let ncells = self.cell_reduced_dofs[0].len();
         let local_stride = noutputs * cd.ndofs;
-        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+        // ponytail: single cell-major buffer filled in place; E^T reduction is parallel.
+        let mut actions = vec![0.0; ncells * local_stride];
+        actions
+            .par_chunks_mut((local_stride * chunk).max(1))
+            .zip(self.cell_reduced_dofs[0].par_chunks(chunk))
             .enumerate()
-            .map_init(
+            .for_each_init(
                 || {
                     (
                         vec![0.0; cd.ndofs * cd.npts],
@@ -1174,12 +1179,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         vec![0.0; local_stride],
                     )
                 },
-                |(basis_grads, field_values, field_grads, local), (batch_index, reduced_batch)| {
-                    let mut batch = vec![0.0; reduced_batch.len() * local_stride];
+                |(basis_grads, field_values, field_grads, local),
+                 (batch_index, (batch_actions, reduced_batch))| {
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
                         let cell_size = noutputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, field_prescribed) =
                             self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
@@ -1200,31 +1205,14 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ctx =
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
                         kernel.assemble_local_residual(&ctx, &state_cell, &mut local[..cell_size]);
-                        batch[cell_offset * local_stride..cell_offset * local_stride + cell_size]
+                        batch_actions[cell_offset * local_stride
+                            ..cell_offset * local_stride + cell_size]
                             .copy_from_slice(&local[..cell_size]);
                     }
-                    batch
                 },
-            )
-            .collect();
-        let mut residual = vec![0.0; layout.total_size];
-        for (batch_index, batch) in batches.into_iter().enumerate() {
-            let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
-                .iter()
-                .enumerate()
-            {
-                let ndofs = reduced_dofs.len();
-                let cell_size = noutputs * ndofs;
-                let local =
-                    &batch[cell_offset * local_stride..cell_offset * local_stride + cell_size];
-                let (field_maps, _) =
-                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
-                scatter_local_vector(&mut residual, local, &field_maps, noutputs, &output_offsets);
-            }
-        }
-        residual
+            );
+        self.restriction
+            .transpose_reduce(&actions, local_stride, local_stride, 1, &selection.outputs)
     }
 
     fn assemble_tensor_residual_static<K: TensorResidualKernel<1> + Sync>(
@@ -1251,74 +1239,168 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             .iter()
             .map(|&field| layout.offsets[field])
             .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| layout.offsets[field])
-            .collect();
         let cd = &self.cell_data;
         let local_stride = noutputs * cd.ndofs;
-        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
-            .enumerate()
-            .map_init(
-                || {
-                    (
-                        vec![0.0; ninputs * cd.ndofs],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; local_stride],
-                    )
-                },
-                |(coefficients, field_values, field_grads, local), (batch_index, reduced_batch)| {
-                    let mut batch = vec![0.0; reduced_batch.len() * local_stride];
-                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
-                        let ndofs = reduced_dofs.len();
-                        let cell_size = noutputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
-                        let (field_maps, field_prescribed) =
-                            self.restriction.maps_for(cell_index, &selection.inputs);
-                        let state_cell = interpolate_tensor_cell_state(
-                            cd,
-                            1,
-                            ninputs,
-                            &field_maps,
-                            &field_prescribed,
-                            &input_offsets,
-                            state,
-                            &mut coefficients[..ninputs * cd.ndofs],
-                            &mut field_values[..ninputs * cd.npts],
-                            &mut field_grads[..ninputs * cd.npts],
-                            cell_index,
-                        );
-                        let ctx = self.tensor_ctx(time, cell_index);
-                        assemble_tensor_residual_1d(
-                            kernel,
-                            &ctx,
-                            &state_cell,
-                            &mut local[..cell_size],
-                        );
-                        batch[cell_offset * local_stride..cell_offset * local_stride + cell_size]
-                            .copy_from_slice(&local[..cell_size]);
-                    }
-                    batch
-                },
-            )
-            .collect();
+        // ponytail: one color-sequential region scatters straight into the
+        // global residual; no actions buffer, no second reduction pass.
         let mut residual = vec![0.0; layout.total_size];
-        for (batch_index, batch) in batches.into_iter().enumerate() {
-            let cell_start = batch_index * CELL_BATCH_SIZE;
-            for (cell_offset, reduced_dofs) in self.cell_reduced_dofs[0]
-                [cell_start..(cell_start + CELL_BATCH_SIZE).min(self.cell_reduced_dofs[0].len())]
-                .iter()
-                .enumerate()
-            {
-                let ndofs = reduced_dofs.len();
-                let local = &batch
-                    [cell_offset * local_stride..cell_offset * local_stride + noutputs * ndofs];
-                let (field_maps, _) =
-                    self.cell_field_maps_for(cell_start + cell_offset, &selection.outputs);
-                scatter_local_vector(&mut residual, local, &field_maps, noutputs, &output_offsets);
+        {
+            let out = unsafe { DisjointOut::new(&mut residual) };
+            for color_cells in self.restriction.cell_colors() {
+                color_cells
+                    .par_chunks(SIMD_CELL_WIDTH)
+                    .for_each_init(
+                        || {
+                            (
+                                vec![0.0; ninputs * cd.ndofs],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; local_stride],
+                                TensorLaneScratch::new(
+                                    ninputs,
+                                    noutputs,
+                                    cd.ndofs,
+                                    cd.npts,
+                                    1,
+                                ),
+                            )
+                        },
+                        |(coefficients, field_values, field_grads, local, lane),
+                         chunk: &[usize]| {
+                            let w = SIMD_CELL_WIDTH;
+                            let uniform = chunk.len() == w
+                                && chunk.iter().all(|&cell| {
+                                    self.cell_reduced_dofs[0][cell].len() == cd.ndofs
+                                });
+                            if !uniform {
+                                // scalar tail / non-uniform fallback
+                                for &cell in chunk {
+                                    let (field_maps, field_prescribed) =
+                                        self.restriction.maps_for(cell, &selection.inputs);
+                                    let ndofs = field_maps[0].len();
+                                    let cell_size = noutputs * ndofs;
+                                    let state_cell = interpolate_tensor_cell_state(
+                                        cd,
+                                        1,
+                                        ninputs,
+                                        &field_maps,
+                                        &field_prescribed,
+                                        &input_offsets,
+                                        state,
+                                        &mut coefficients[..ninputs * cd.ndofs],
+                                        &mut field_values[..ninputs * cd.npts],
+                                        &mut field_grads[..ninputs * cd.npts],
+                                        cell,
+                                    );
+                                    let ctx = self.tensor_ctx(time, cell);
+                                    assemble_tensor_residual_1d(
+                                        kernel,
+                                        &ctx,
+                                        &state_cell,
+                                        &mut local[..cell_size],
+                                    );
+                                    // SAFETY: same-color cells are row-disjoint.
+                                    unsafe {
+                                        self.restriction.scatter_add_column(
+                                            cell,
+                                            &selection.outputs,
+                                            &local[..cell_size],
+                                            out,
+                                        )
+                                    };
+                                }
+                                return;
+                            }
+                            // batched group: lane-contiguous gather, lane tensor ops
+                            self.restriction.gather_state_batch(
+                                chunk,
+                                &selection.inputs,
+                                &input_offsets,
+                                state,
+                                &mut lane.packed_coeffs,
+                                w,
+                            );
+                            interpolate_batch_1d(
+                                cd,
+                                ninputs,
+                                &lane.packed_coeffs,
+                                &mut lane.lane_values,
+                                &mut lane.lane_grads,
+                                chunk,
+                                w,
+                            );
+                            // lane extraction for scalar-fallback physics
+                            extract_lanes(
+                                &lane.lane_values,
+                                &lane.lane_grads,
+                                1,
+                                ninputs,
+                                cd.npts,
+                                w,
+                                w,
+                                &mut lane.scalar_values,
+                                &mut lane.scalar_grads,
+                            );
+                            let ctxs: Vec<TensorCtx> =
+                                chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
+                            let states: Vec<CellState> = (0..w)
+                                .map(|l| CellState {
+                                    nfields: ninputs,
+                                    npts: cd.npts,
+                                    gdim: 1,
+                                    values: &lane.scalar_values
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    grads: &lane.scalar_grads
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    field_indices: &[],
+                                })
+                                .collect();
+                            let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
+                            let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
+                            let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
+                            for eq in 0..noutputs {
+                                for q in 0..cd.npts {
+                                    kernel.tensor_residual_batch(
+                                        &ctxs,
+                                        &states,
+                                        eq,
+                                        q,
+                                        &mut t0[..w],
+                                        &mut t1x[..w],
+                                        &mut t1y[..w],
+                                    );
+                                    for l in 0..w {
+                                        lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
+                                        lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
+                                    }
+                                }
+                            }
+                            lane.packed_out.fill(0.0);
+                            integrate_batch_1d(
+                                cd,
+                                noutputs,
+                                &lane.flux0,
+                                &lane.flux1x,
+                                &mut lane.packed_out,
+                                chunk,
+                                w,
+                            );
+                            for (l, &cell) in chunk.iter().enumerate() {
+                                for o in 0..local_stride {
+                                    lane.cell_local[o] = lane.packed_out[o * w + l];
+                                }
+                                // SAFETY: same-color cells are row-disjoint.
+                                unsafe {
+                                    self.restriction.scatter_add_column(
+                                        cell,
+                                        &selection.outputs,
+                                        &lane.cell_local,
+                                        out,
+                                    )
+                                };
+                            }
+                        },
+                    );
             }
         }
         residual
@@ -1670,6 +1752,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let selection = self.resolve_residual_selection(kernel, "residual kernel");
         let ninputs = selection.inputs.len();
         let noutputs = selection.outputs.len();
@@ -1694,7 +1777,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let row_size = noutputs * cd.ndofs;
         let col_size = ninputs * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+            .par_chunks(chunk)
             .enumerate()
             .map_init(
                 || {
@@ -1712,7 +1795,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let row_cell_size = noutputs * ndofs;
                         let col_cell_size = ninputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, field_prescribed) =
                             self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
@@ -1771,6 +1854,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let selection = self.fields.resolve_selection(
             kernel.input_nfields(),
             kernel.input_field_names(),
@@ -1794,7 +1878,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let row_size = noutputs * cd.ndofs;
         let col_size = ninputs * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+            .par_chunks(chunk)
             .enumerate()
             .map_init(
                 || {
@@ -1824,7 +1908,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                         let ndofs = reduced_dofs.len();
                         let row_cell_size = noutputs * ndofs;
                         let col_cell_size = ninputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, field_prescribed) =
                             self.restriction.maps_for(cell_index, &selection.inputs);
                         let state_cell = interpolate_tensor_cell_state(
@@ -1935,6 +2019,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     ) where
         M: Sync,
     {
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let selection = self.resolve_residual_selection(kernel, "residual kernel");
         let ninputs = selection.inputs.len();
         let noutputs = selection.outputs.len();
@@ -1963,14 +2048,22 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         );
         out.fill(0.0);
         let cd = &self.cell_data;
+        let ncells = self.cell_reduced_dofs[0].len();
         let input_size = ninputs * cd.ndofs;
         let output_size = noutputs * cd.ndofs;
         let ncols = direction.ncols();
         let action_stride = output_size * ncols;
-        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+        // ponytail: zero-column actions reduce to nothing; avoids 0-stride chunks.
+        if ncols == 0 {
+            return;
+        }
+        // ponytail: preallocated cell-major actions filled in place (no Vec<Vec>).
+        let mut actions = vec![0.0; ncells * action_stride];
+        actions
+            .par_chunks_mut((action_stride * chunk).max(1))
+            .zip(self.cell_reduced_dofs[0].par_chunks(chunk))
             .enumerate()
-            .map_init(
+            .for_each_init(
                 || {
                     (
                         vec![0.0; cd.ndofs * cd.npts],
@@ -1981,13 +2074,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     )
                 },
                 |(basis_grads, field_values, field_grads, local_direction, local_action),
-                 (batch_index, reduced_batch)| {
-                    let mut batch = vec![0.0; reduced_batch.len() * action_stride];
+                 (batch_index, (batch_actions, reduced_batch))| {
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
                         let input_cell_size = ninputs * ndofs;
                         let output_cell_size = noutputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, field_prescribed) =
                             self.restriction.maps_for(cell_index, &selection.inputs);
                         self.populate_cell_grads(
@@ -2023,15 +2115,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                                 &mut local_action[..output_cell_size],
                             );
                             let start = cell_offset * action_stride + column * output_size;
-                            batch[start..start + output_cell_size]
+                            batch_actions[start..start + output_cell_size]
                                 .copy_from_slice(&local_action[..output_cell_size]);
                         }
                     }
-                    batch
                 },
-            )
-            .collect();
-        let actions: Vec<f64> = batches.into_iter().flatten().collect();
+            );
         let reduced = self.restriction.transpose_reduce(
             &actions,
             action_stride,
@@ -2075,100 +2164,257 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let input_size = ninputs * cd.ndofs;
         let output_size = noutputs * cd.ndofs;
         let ncols = direction.ncols();
-        let action_stride = output_size * ncols;
-        let batches: Vec<Vec<f64>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
-            .enumerate()
-            .map_init(
-                || {
-                    (
-                        vec![0.0; input_size],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; ninputs * cd.npts],
-                        vec![0.0; input_size.max(output_size)],
-                        vec![0.0; output_size],
-                    )
-                },
-                |(
-                    state_coefficients,
-                    state_values,
-                    state_grads,
-                    direction_values,
-                    direction_grads,
-                    local_direction,
-                    local_action,
-                ),
-                 (batch_index, reduced_batch)| {
-                    let mut batch = vec![0.0; reduced_batch.len() * action_stride];
-                    for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
-                        let ndofs = reduced_dofs.len();
-                        let input_cell_size = ninputs * ndofs;
-                        let output_cell_size = noutputs * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
-                        self.restriction.gather_state(
-                            cell_index,
-                            &selection.inputs,
-                            &input_offsets,
-                            state,
-                            &mut state_coefficients[..input_cell_size],
-                        );
-                        let state_cell = interpolate_tensor_cell_coefficients(
-                            cd,
-                            1,
-                            ninputs,
-                            &state_coefficients[..input_cell_size],
-                            &mut state_values[..ninputs * cd.npts],
-                            &mut state_grads[..ninputs * cd.npts],
-                            cell_index,
-                        );
-                        let ctx = self.tensor_ctx(time, cell_index);
-                        for column in 0..ncols {
-                            self.restriction.gather_direction_column(
-                                cell_index,
+        if ncols == 0 {
+            return;
+        }
+        // ponytail: column-major global actions scattered in one region per
+        // column; no cell-major buffer, no second reduction pass. The final
+        // copy fully overwrites `out`, so no pre-zeroing is needed.
+        let total = layout.total_size;
+        let mut actions = vec![0.0; total * ncols];
+        {
+            let mut outs = Vec::with_capacity(ncols);
+            for column_actions in actions.chunks_mut(total) {
+                // SAFETY: column slices are disjoint; scatters within one
+                // color are row-disjoint (see `cell_colors`).
+                outs.push(unsafe { DisjointOut::new(column_actions) });
+            }
+            for color_cells in self.restriction.cell_colors() {
+                color_cells
+                    .par_chunks(SIMD_CELL_WIDTH)
+                    .for_each_init(
+                        || {
+                            (
+                                vec![0.0; input_size],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; ninputs * cd.npts],
+                                vec![0.0; input_size.max(output_size)],
+                                vec![0.0; output_size],
+                                TensorLaneScratch::new(
+                                    ninputs,
+                                    noutputs,
+                                    cd.ndofs,
+                                    cd.npts,
+                                    1,
+                                ),
+                                TensorLaneScratch::new(
+                                    ninputs,
+                                    noutputs,
+                                    cd.ndofs,
+                                    cd.npts,
+                                    1,
+                                ),
+                            )
+                        },
+                        |(tail_state_coeffs, tail_state_values, tail_state_grads, tail_dir_values, tail_dir_grads, tail_dir, tail_action, state_lane, dir_lane),
+                         chunk: &[usize]| {
+                            let w = SIMD_CELL_WIDTH;
+                            let uniform = chunk.len() == w
+                                && chunk.iter().all(|&cell| {
+                                    self.cell_reduced_dofs[0][cell].len() == cd.ndofs
+                                });
+                            if !uniform {
+                                for &cell in chunk {
+                                    let (field_maps, _) =
+                                        self.restriction.maps_for(cell, &selection.inputs);
+                                    let ndofs = field_maps[0].len();
+                                    let input_cell_size = ninputs * ndofs;
+                                    let output_cell_size = noutputs * ndofs;
+                                    self.restriction.gather_state(
+                                        cell,
+                                        &selection.inputs,
+                                        &input_offsets,
+                                        state,
+                                        &mut tail_state_coeffs[..input_cell_size],
+                                    );
+                                    let state_cell = interpolate_tensor_cell_coefficients(
+                                        cd,
+                                        1,
+                                        ninputs,
+                                        &tail_state_coeffs[..input_cell_size],
+                                        &mut tail_state_values[..ninputs * cd.npts],
+                                        &mut tail_state_grads[..ninputs * cd.npts],
+                                        cell,
+                                    );
+                                    let ctx = self.tensor_ctx(time, cell);
+                                    for (column, &column_out) in outs.iter().enumerate() {
+                                        self.restriction.gather_direction_column(
+                                            cell,
+                                            &selection.inputs,
+                                            &input_offsets,
+                                            direction,
+                                            column,
+                                            &mut tail_dir[..input_cell_size],
+                                        );
+                                        let direction_cell = interpolate_tensor_cell_coefficients(
+                                            cd,
+                                            1,
+                                            ninputs,
+                                            &tail_dir[..input_cell_size],
+                                            &mut tail_dir_values[..ninputs * cd.npts],
+                                            &mut tail_dir_grads[..ninputs * cd.npts],
+                                            cell,
+                                        );
+                                        apply_tensor_jacobian_1d(
+                                            kernel,
+                                            &ctx,
+                                            &state_cell,
+                                            &direction_cell,
+                                            &mut tail_action[..output_cell_size],
+                                        );
+                                        // SAFETY: same-color cells are row-disjoint.
+                                        unsafe {
+                                            self.restriction.scatter_add_column(
+                                                cell,
+                                                &selection.outputs,
+                                                &tail_action[..output_cell_size],
+                                                column_out,
+                                            )
+                                        };
+                                    }
+                                }
+                                return;
+                            }
+                            // batched state interpolation (once per group)
+                            self.restriction.gather_state_batch(
+                                chunk,
                                 &selection.inputs,
                                 &input_offsets,
-                                direction,
-                                column,
-                                &mut local_direction[..input_cell_size],
+                                state,
+                                &mut state_lane.packed_coeffs,
+                                w,
                             );
-                            let direction_cell = interpolate_tensor_cell_coefficients(
+                            interpolate_batch_1d(
                                 cd,
+                                ninputs,
+                                &state_lane.packed_coeffs,
+                                &mut state_lane.lane_values,
+                                &mut state_lane.lane_grads,
+                                chunk,
+                                w,
+                            );
+                            extract_lanes(
+                                &state_lane.lane_values,
+                                &state_lane.lane_grads,
                                 1,
                                 ninputs,
-                                &local_direction[..input_cell_size],
-                                &mut direction_values[..ninputs * cd.npts],
-                                &mut direction_grads[..ninputs * cd.npts],
-                                cell_index,
+                                cd.npts,
+                                w,
+                                w,
+                                &mut state_lane.scalar_values,
+                                &mut state_lane.scalar_grads,
                             );
-                            apply_tensor_jacobian_1d(
-                                kernel,
-                                &ctx,
-                                &state_cell,
-                                &direction_cell,
-                                &mut local_action[..output_cell_size],
-                            );
-                            let start = cell_offset * action_stride + column * output_size;
-                            batch[start..start + output_cell_size]
-                                .copy_from_slice(&local_action[..output_cell_size]);
-                        }
-                    }
-                    batch
-                },
-            )
-            .collect();
-        let actions: Vec<f64> = batches.into_iter().flatten().collect();
-        let reduced = self.restriction.transpose_reduce(
-            &actions,
-            action_stride,
-            output_size,
-            ncols,
-            &selection.outputs,
-        );
+                            let ctxs: Vec<TensorCtx> =
+                                chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
+                            let states: Vec<CellState> = (0..w)
+                                .map(|l| CellState {
+                                    nfields: ninputs,
+                                    npts: cd.npts,
+                                    gdim: 1,
+                                    values: &state_lane.scalar_values
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    grads: &state_lane.scalar_grads
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    field_indices: &[],
+                                })
+                                .collect();
+                            let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
+                            let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
+                            let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
+                            for (column, &column_out) in outs.iter().enumerate() {
+                                self.restriction.gather_direction_batch(
+                                    chunk,
+                                    &selection.inputs,
+                                    &input_offsets,
+                                    direction,
+                                    column,
+                                    &mut dir_lane.packed_coeffs,
+                                    w,
+                                );
+                                interpolate_batch_1d(
+                                    cd,
+                                    ninputs,
+                                    &dir_lane.packed_coeffs,
+                                    &mut dir_lane.lane_values,
+                                    &mut dir_lane.lane_grads,
+                                    chunk,
+                                    w,
+                                );
+                                extract_lanes(
+                                    &dir_lane.lane_values,
+                                    &dir_lane.lane_grads,
+                                    1,
+                                    ninputs,
+                                    cd.npts,
+                                    w,
+                                    w,
+                                    &mut dir_lane.scalar_values,
+                                    &mut dir_lane.scalar_grads,
+                                );
+                                let dirs: Vec<CellState> = (0..w)
+                                    .map(|l| CellState {
+                                        nfields: ninputs,
+                                        npts: cd.npts,
+                                        gdim: 1,
+                                        values: &dir_lane.scalar_values
+                                            [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                        grads: &dir_lane.scalar_grads
+                                            [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                        field_indices: &[],
+                                    })
+                                    .collect();
+                                for eq in 0..noutputs {
+                                    for q in 0..cd.npts {
+                                        kernel.tensor_jacobian_action_batch(
+                                            &ctxs,
+                                            &states,
+                                            &dirs,
+                                            eq,
+                                            q,
+                                            &mut t0[..w],
+                                            &mut t1x[..w],
+                                            &mut t1y[..w],
+                                        );
+                                        for l in 0..w {
+                                            dir_lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
+                                            dir_lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
+                                        }
+                                    }
+                                }
+                                dir_lane.packed_out.fill(0.0);
+                                integrate_batch_1d(
+                                    cd,
+                                    noutputs,
+                                    &dir_lane.flux0,
+                                    &dir_lane.flux1x,
+                                    &mut dir_lane.packed_out,
+                                    chunk,
+                                    w,
+                                );
+                                for (l, &cell) in chunk.iter().enumerate() {
+                                    for o in 0..output_size {
+                                        dir_lane.cell_local[o] = dir_lane.packed_out[o * w + l];
+                                    }
+                                    // SAFETY: same-color cells are row-disjoint.
+                                    unsafe {
+                                        self.restriction.scatter_add_column(
+                                            cell,
+                                            &selection.outputs,
+                                            &dir_lane.cell_local,
+                                            column_out,
+                                        )
+                                    };
+                                }
+                            }
+                        },
+                    );
+            }
+        }
         for column in 0..ncols {
-            for row in 0..layout.total_size {
-                out[(row, column)] = reduced[row * ncols + column];
+            for row in 0..total {
+                out[(row, column)] = actions[column * total + row];
             }
         }
     }
@@ -2196,6 +2442,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let names = kernel.field_names();
         let selection = self.fields.resolve_selection(
             kernel.nfields(),
@@ -2217,7 +2464,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+            .par_chunks(chunk)
             .enumerate()
             .map_init(
                 || {
@@ -2232,7 +2479,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, _) =
                             self.cell_field_maps_for(cell_index, &selection.inputs);
                         let ctx = self.prepare_cell_ctx(
@@ -2270,6 +2517,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     where
         M: Sync,
     {
+        let chunk = rayon_cell_chunk_size(self.cell_reduced_dofs[0].len());
         let names = kernel.field_names();
         let selection = self.fields.resolve_selection(
             kernel.nfields(),
@@ -2287,7 +2535,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         let cd = &self.cell_data;
         let local_size = nfields * cd.ndofs;
         let batches: Vec<Vec<Triplet<usize, usize, f64>>> = self.cell_reduced_dofs[0]
-            .par_chunks(CELL_BATCH_SIZE)
+            .par_chunks(chunk)
             .enumerate()
             .map_init(
                 || {
@@ -2306,7 +2554,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                     for (cell_offset, reduced_dofs) in reduced_batch.iter().enumerate() {
                         let ndofs = reduced_dofs.len();
                         let cell_size = nfields * ndofs;
-                        let cell_index = batch_index * CELL_BATCH_SIZE + cell_offset;
+                        let cell_index = batch_index * chunk + cell_offset;
                         let (field_maps, _) =
                             self.cell_field_maps_for(cell_index, &selection.inputs);
                         let ctx = self.tensor_ctx(time, cell_index);

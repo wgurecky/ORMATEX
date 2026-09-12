@@ -25,8 +25,9 @@ pub use boundary::{
 };
 pub(crate) use cell::{
     cell_ctx, interpolate_cell_state, interpolate_tensor_cell_coefficients,
-    interpolate_tensor_cell_state, CellData, TensorProductData, CELL_BATCH_SIZE,
+    interpolate_tensor_cell_state, rayon_cell_chunk_size, CellData, TensorProductData,
 };
+pub(crate) mod batch;
 pub use contexts::{CellState, FacetCtx, LocalCtx, ShapeFn, TensorCtx, TensorFacetCtx};
 pub(crate) use reduction::{FieldDofLayout, ReducedDofMap};
-pub(crate) use restriction::ElementRestriction;
+pub(crate) use restriction::{DisjointOut, ElementRestriction};

@@ -3,9 +3,10 @@ use faer::sparse::{SparseColMat, Triplet};
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap, types::ReferenceCellType};
 use ndmesh::{shapes::unit_square, SingleElementMesh};
 use ormatex_sem_nd::{
-    DofReduction2D, FieldRegistry, KernelAdvDiff2D, KernelAdvection2D, KernelDiffusion2D,
-    KernelLinearReaction, ResidualKernelSum, SEM2DProblem, SEM2DResidualExecution,
-    TensorKernelAdvection2D, TensorKernelDiffusion2D, TensorResidualKernelSum,
+    fuse_tensor_kernels, DofReduction2D, FieldRegistry, KernelAdvDiff2D, KernelAdvection2D,
+    KernelDiffusion2D, KernelLinearReaction, ResidualKernelSum, SEM2DProblem,
+    SEM2DResidualExecution, TensorKernelAdvection2D, TensorKernelDiffusion2D,
+    TensorResidualKernelSum,
 };
 use std::time::Instant;
 
@@ -305,5 +306,52 @@ fn residual_kernel_sum_benchmark() {
     println!("jacobian: fused={fused_jacobian:?}, composed={composed_jacobian:?}, separate={separate_jacobian:?}");
     println!(
         "jv: fused={fused_action:?}, composed={composed_action:?}, separate={separate_action:?}"
+    );
+}
+
+#[test]
+fn fuse_tensor_kernels_macro_matches_chained_sum() {
+    let problem = problem();
+    let n = problem.reduced_size();
+    let state = Mat::from_fn(n, 1, |row, _| 0.2 + 0.07 * row as f64);
+    let direction = Mat::from_fn(n, 1, |row, _| (0.31 * row as f64).sin());
+
+    let chained =
+        TensorResidualKernelSum::from_kernel(TensorKernelAdvection2D::new([0.4, -0.2]))
+            .with(TensorKernelDiffusion2D::new(0.13));
+    let macro_fused = fuse_tensor_kernels!(
+        TensorKernelAdvection2D::new([0.4, -0.2]),
+        TensorKernelDiffusion2D::new(0.13),
+    );
+
+    let chained_operator = problem.tensor_residual_operator(&chained);
+    let macro_operator = problem.tensor_residual_operator(&macro_fused);
+    for (a, b) in chained_operator
+        .residual(state.as_ref())
+        .iter()
+        .zip(macro_operator.residual(state.as_ref()))
+    {
+        assert!((a - b).abs() < 1e-12);
+    }
+    assert_matrix_close(
+        &chained_operator.assemble_jacobian(state.as_ref()).to_dense(),
+        &macro_operator.assemble_jacobian(state.as_ref()).to_dense(),
+    );
+    assert_matrix_close(
+        &chained_operator.apply_jacobian(state.as_ref(), direction.as_ref()),
+        &macro_operator.apply_jacobian(state.as_ref(), direction.as_ref()),
+    );
+
+    // Single-kernel form still builds a working operator.
+    let single = fuse_tensor_kernels!(TensorKernelDiffusion2D::new(0.13));
+    let single_residual = problem
+        .tensor_residual_operator(&single)
+        .residual(state.as_ref());
+    let direct_residual = problem
+        .tensor_residual_operator(&TensorKernelDiffusion2D::new(0.13))
+        .residual(state.as_ref());
+    assert_vector_close(
+        &Mat::from_fn(n, 1, |row, _| single_residual[row]),
+        &Mat::from_fn(n, 1, |row, _| direct_residual[row]),
     );
 }

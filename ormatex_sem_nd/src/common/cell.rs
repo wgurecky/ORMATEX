@@ -6,8 +6,26 @@ use crate::simd;
 
 use super::contexts::{CellState, LocalCtx};
 
-// ponytail: fixed batches reuse scratch without creating a task per cell; tune only after profiling.
+// ponytail: max Rayon tile; actual chunk is dynamic (see rayon_cell_chunk_size).
+// Keep 128 as upper bound for scratch reuse; do not reuse as SIMD width.
 pub(crate) const CELL_BATCH_SIZE: usize = 128;
+/// Inner SIMD-over-element width. Separate from Rayon scheduling granularity.
+/// 8 x f64 = 512 bits (AVX-512) / 2x AVX2 registers; tails use scalar fallback.
+pub(crate) const SIMD_CELL_WIDTH: usize = 8;
+
+/// Choose a Rayon chunk size exposing enough tasks without oversplitting.
+///
+/// Target ~4 chunks per worker for load balance; clamp to [1, CELL_BATCH_SIZE].
+/// For 32-64 cell meshes this yields many small chunks instead of one task.
+pub(crate) fn rayon_cell_chunk_size(cell_count: usize) -> usize {
+    if cell_count == 0 {
+        return 1;
+    }
+    let threads = rayon::current_num_threads().max(1);
+    let target_chunks = (4 * threads).max(1);
+    let chunk = cell_count.div_ceil(target_chunks);
+    chunk.clamp(1, CELL_BATCH_SIZE)
+}
 
 /// One-dimensional data needed by a tensor-product evaluator.
 ///

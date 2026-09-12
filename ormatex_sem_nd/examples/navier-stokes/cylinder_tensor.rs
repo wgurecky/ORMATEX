@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::time::Instant;
 
 use faer::prelude::*;
 use ormatex::ode_sys::IntegrateSys;
@@ -34,7 +35,21 @@ fn tensor_split_kernel() -> impl TensorResidualKernel<2> {
 }
 
 fn main() {
-    let directional = std::env::args().any(|arg| arg == "--directional");
+    let args: Vec<String> = std::env::args().collect();
+    let directional = args.iter().any(|arg| arg == "--directional");
+    let steps = parse_usize_flag(&args, "--steps").unwrap_or(100);
+    let threads = parse_usize_flag(&args, "--threads");
+    let benchmark = args.iter().any(|arg| arg == "--benchmark");
+    if let Some(threads) = threads {
+        assert!(threads > 0, "--threads must be positive");
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .expect("failed to configure Rayon thread pool");
+        faer::set_global_parallelism(faer::Par::rayon(threads));
+    }
+
+    let setup_start = Instant::now();
     let case = problem(directional);
     let problem = case.problem;
     let state0 = Mat::<f64>::zeros(problem.system_size(), 1);
@@ -50,17 +65,27 @@ fn main() {
     } else {
         system
     };
+    let setup_time = setup_start.elapsed();
 
+    let integration_start = Instant::now();
     let mut integrator = epi3(state0.as_ref());
     let dt = 0.05;
-    let nsteps = 100;
-    for step in 0..nsteps {
+    for step in 0..steps {
         let result = integrator
             .step(&system, dt)
             .unwrap_or_else(|error| panic!("EDAC step {step} failed: {}", error.msg));
         integrator.accept_step(result);
     }
     let state = integrator.state();
+    let integration_time = integration_start.elapsed();
+
+    println!(
+        "cylinder tensor: steps={steps} dofs={} setup={setup_time:?} integration={integration_time:?} threads={threads:?} directional={directional}",
+        problem.system_size(),
+    );
+    if benchmark {
+        return;
+    }
 
     std::fs::create_dir_all("target").expect("failed to create output directory");
     let probe_u = nearest(
@@ -108,4 +133,14 @@ fn main() {
     println!(
         "tensor cylinder result (directional={directional}): target/navier_stokes_cylinder_tensor.csv"
     );
+}
+
+fn parse_usize_flag(args: &[String], name: &str) -> Option<usize> {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| {
+            window[1]
+                .parse()
+                .expect("invalid numeric command-line flag")
+        })
 }

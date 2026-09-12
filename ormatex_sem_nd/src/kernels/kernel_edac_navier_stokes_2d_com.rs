@@ -72,18 +72,6 @@ impl EdacNavierStokes2DConfig {
         2.0 * viscosity * Self::strain_component(state, q, i, j)
     }
 
-    fn stress_tensor(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        q: usize,
-        i: usize,
-        j: usize,
-    ) -> f64 {
-        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
-        2.0 * viscosity * Self::strain_component(state, q, i, j)
-    }
-
     fn stress_jacobian(
         &self,
         ctx: &LocalCtx,
@@ -112,21 +100,46 @@ impl EdacNavierStokes2DConfig {
         2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
     }
 
-    fn stress_tensor_directional_derivative(
+    /// Both physical components of one viscous-stress row in a single pass.
+    ///
+    /// Pointwise callers need both columns; evaluating them together shares
+    /// one viscosity/dviscosity evaluation instead of recomputing it per
+    /// component (and per equation at the call site).
+    fn stress_tensor_row(
+        &self,
+        ctx: &TensorCtx<'_>,
+        state: &CellState<'_>,
+        q: usize,
+        i: usize,
+    ) -> [f64; 2] {
+        let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
+        [
+            2.0 * viscosity * Self::strain_component(state, q, i, 0),
+            2.0 * viscosity * Self::strain_component(state, q, i, 1),
+        ]
+    }
+
+    /// Both physical components of one directional-derivative stress row.
+    fn stress_tensor_row_directional_derivative(
         &self,
         ctx: &TensorCtx<'_>,
         state: &CellState<'_>,
         direction: &CellState<'_>,
         q: usize,
         i: usize,
-        j: usize,
-    ) -> f64 {
+    ) -> [f64; 2] {
         let viscosity = self.nu + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
         let dviscosity = self
             .smagorinsky
             .eddy_viscosity_directional_derivative(ctx, state, direction, q);
-        let dstrain = 0.5 * (direction.grad(i, q, j) + direction.grad(j, q, i));
-        2.0 * (viscosity * dstrain + dviscosity * Self::strain_component(state, q, i, j))
+        let dstrain = [
+            0.5 * (direction.grad(i, q, 0) + direction.grad(0, q, i)),
+            0.5 * (direction.grad(i, q, 1) + direction.grad(1, q, i)),
+        ];
+        [
+            2.0 * (viscosity * dstrain[0] + dviscosity * Self::strain_component(state, q, i, 0)),
+            2.0 * (viscosity * dstrain[1] + dviscosity * Self::strain_component(state, q, i, 1)),
+        ]
     }
 }
 
@@ -135,7 +148,7 @@ fn field_names() -> Option<Vec<String>> {
 }
 
 macro_rules! tensor_edac_kernel {
-    ($name:ident, $residual:expr, $jacobian:expr) => {
+    ($name:ident, $owns:expr, $residual:expr, $jacobian:expr) => {
         pub struct $name {
             pub config: EdacNavierStokes2DConfig,
         }
@@ -150,6 +163,9 @@ macro_rules! tensor_edac_kernel {
             }
             fn field_names(&self) -> Option<Vec<String>> {
                 field_names()
+            }
+            fn owns_equation(&self, equation: usize) -> bool {
+                ($owns)(equation)
             }
             fn tensor_residual(
                 &self,
@@ -176,6 +192,7 @@ macro_rules! tensor_edac_kernel {
 
 tensor_edac_kernel!(
     TensorKernelEdacMomentumConvection2D,
+    |equation: usize| equation < 2,
     |_: &TensorKernelEdacMomentumConvection2D,
      _: &TensorCtx<'_>,
      state: &CellState<'_>,
@@ -215,6 +232,7 @@ tensor_edac_kernel!(
 );
 tensor_edac_kernel!(
     TensorKernelEdacPressureGradient2D,
+    |equation: usize| equation < 2,
     |kernel: &TensorKernelEdacPressureGradient2D,
      _: &TensorCtx<'_>,
      state: &CellState<'_>,
@@ -237,6 +255,7 @@ tensor_edac_kernel!(
 );
 tensor_edac_kernel!(
     TensorKernelEdacViscousStress2D,
+    |equation: usize| equation < 2,
     |kernel: &TensorKernelEdacViscousStress2D,
      ctx: &TensorCtx<'_>,
      state: &CellState<'_>,
@@ -244,11 +263,8 @@ tensor_edac_kernel!(
      q| if equation >= 2 {
         [0.0; 3]
     } else {
-        [
-            0.0,
-            kernel.config.stress_tensor(ctx, state, q, equation, 0),
-            kernel.config.stress_tensor(ctx, state, q, equation, 1),
-        ]
+        let row = kernel.config.stress_tensor_row(ctx, state, q, equation);
+        [0.0, row[0], row[1]]
     },
     |kernel: &TensorKernelEdacViscousStress2D,
      ctx: &TensorCtx<'_>,
@@ -258,19 +274,15 @@ tensor_edac_kernel!(
      q| if equation >= 2 {
         [0.0; 3]
     } else {
-        [
-            0.0,
-            kernel
-                .config
-                .stress_tensor_directional_derivative(ctx, state, direction, q, equation, 0),
-            kernel
-                .config
-                .stress_tensor_directional_derivative(ctx, state, direction, q, equation, 1),
-        ]
+        let row = kernel
+            .config
+            .stress_tensor_row_directional_derivative(ctx, state, direction, q, equation);
+        [0.0, row[0], row[1]]
     }
 );
 tensor_edac_kernel!(
     TensorKernelEdacPressureDivergence2D,
+    |equation: usize| equation == 2,
     |kernel: &TensorKernelEdacPressureDivergence2D,
      _: &TensorCtx<'_>,
      state: &CellState<'_>,
@@ -307,6 +319,7 @@ tensor_edac_kernel!(
 );
 tensor_edac_kernel!(
     TensorKernelEdacPressureAdvection2D,
+    |equation: usize| equation == 2,
     |_: &TensorKernelEdacPressureAdvection2D,
      _: &TensorCtx<'_>,
      state: &CellState<'_>,
@@ -342,6 +355,7 @@ tensor_edac_kernel!(
 );
 tensor_edac_kernel!(
     TensorKernelEdacPressureDiffusion2D,
+    |equation: usize| equation == 2,
     |kernel: &TensorKernelEdacPressureDiffusion2D,
      ctx: &TensorCtx<'_>,
      state: &CellState<'_>,

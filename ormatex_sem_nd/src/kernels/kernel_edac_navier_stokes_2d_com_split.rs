@@ -32,6 +32,9 @@ impl TensorResidualKernel<2> for TensorKernelEdacMomentumConvectionSplit2D {
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
     }
+    fn owns_equation(&self, equation: usize) -> bool {
+        equation < 2
+    }
     fn tensor_residual(
         &self,
         _: &TensorCtx<'_>,
@@ -71,6 +74,7 @@ impl TensorResidualKernel<2> for TensorKernelEdacMomentumConvectionSplit2D {
             -0.5 * (du[1] * state.value(equation, q) + u[1] * direction.value(equation, q)),
         ]
     }
+
 }
 
 pub struct TensorKernelEdacPressureAdvectionSplit2D {
@@ -87,6 +91,9 @@ impl TensorResidualKernel<2> for TensorKernelEdacPressureAdvectionSplit2D {
     }
     fn field_names(&self) -> Option<Vec<String>> {
         field_names()
+    }
+    fn owns_equation(&self, equation: usize) -> bool {
+        equation == 2
     }
     fn tensor_residual(
         &self,
@@ -130,6 +137,7 @@ impl TensorResidualKernel<2> for TensorKernelEdacPressureAdvectionSplit2D {
             -0.5 * (du[1] * p + u[1] * dp),
         ]
     }
+
 }
 
 /// Split momentum convection contribution for the `u` and `v` equations.

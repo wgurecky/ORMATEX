@@ -285,6 +285,14 @@ pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
     fn output_field_names(&self) -> Option<Vec<String>> {
         self.field_names()
     }
+    /// Whether this kernel contributes to `equation`.
+    ///
+    /// Kernels that own only an equation subset (e.g. momentum-only terms of
+    /// a coupled system) override this so fused sums can skip zero blocks
+    /// without per-point calls. The default keeps existing kernels exact.
+    fn owns_equation(&self, _equation: usize) -> bool {
+        true
+    }
     fn tensor_residual(
         &self,
         ctx: &TensorCtx<'_>,
@@ -300,6 +308,55 @@ pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
         equation: usize,
         q: usize,
     ) -> [f64; 3];
+
+    /// Batched pointwise residual across element lanes (SIMD-over-element hook).
+    ///
+    /// Default loops over lanes calling the scalar path (correct fallback).
+    /// Built-in kernels may override with lane-vectorized physics.
+    /// `ctxs/states` have one entry per lane; outputs are per-lane scalars.
+    fn tensor_residual_batch(
+        &self,
+        ctxs: &[TensorCtx<'_>],
+        states: &[CellState<'_>],
+        equation: usize,
+        q: usize,
+        f0: &mut [f64],
+        f1x: &mut [f64],
+        f1y: &mut [f64],
+    ) {
+        debug_assert_eq!(ctxs.len(), states.len());
+        debug_assert_eq!(f0.len(), ctxs.len());
+        for (i, (ctx, state)) in ctxs.iter().zip(states.iter()).enumerate() {
+            let [a, b, c] = self.tensor_residual(ctx, state, equation, q);
+            f0[i] = a;
+            f1x[i] = b;
+            f1y[i] = c;
+        }
+    }
+
+    /// Batched pointwise Jacobian action across element lanes.
+    fn tensor_jacobian_action_batch(
+        &self,
+        ctxs: &[TensorCtx<'_>],
+        states: &[CellState<'_>],
+        directions: &[CellState<'_>],
+        equation: usize,
+        q: usize,
+        f0: &mut [f64],
+        f1x: &mut [f64],
+        f1y: &mut [f64],
+    ) {
+        debug_assert_eq!(ctxs.len(), states.len());
+        debug_assert_eq!(ctxs.len(), directions.len());
+        for (i, ((ctx, state), dir)) in
+            ctxs.iter().zip(states.iter()).zip(directions.iter()).enumerate()
+        {
+            let [a, b, c] = self.tensor_jacobian_action(ctx, state, dir, equation, q);
+            f0[i] = a;
+            f1x[i] = b;
+            f1y[i] = c;
+        }
+    }
 }
 
 /// Statically dispatched additive composition of tensor residual kernels.
@@ -335,6 +392,10 @@ where
 {
     fn nfields(&self) -> usize {
         self.first.nfields()
+    }
+
+    fn owns_equation(&self, equation: usize) -> bool {
+        self.first.owns_equation(equation)
     }
 
     fn field_names(&self) -> Option<Vec<String>> {
@@ -395,6 +456,10 @@ where
         }
     }
 
+    fn owns_equation(&self, equation: usize) -> bool {
+        self.first.owns_equation(equation) || self.second.owns_equation(equation)
+    }
+
     fn tensor_residual(
         &self,
         ctx: &TensorCtx<'_>,
@@ -402,6 +467,13 @@ where
         equation: usize,
         q: usize,
     ) -> [f64; 3] {
+        // ponytail: skip zero blocks; non-owning leaves return [0; 3] by contract.
+        if !self.second.owns_equation(equation) {
+            return self.first.tensor_residual(ctx, state, equation, q);
+        }
+        if !self.first.owns_equation(equation) {
+            return self.second.tensor_residual(ctx, state, equation, q);
+        }
         let first = self.first.tensor_residual(ctx, state, equation, q);
         let second = self.second.tensor_residual(ctx, state, equation, q);
         [
@@ -419,6 +491,17 @@ where
         equation: usize,
         q: usize,
     ) -> [f64; 3] {
+        // ponytail: skip zero blocks; non-owning leaves return [0; 3] by contract.
+        if !self.second.owns_equation(equation) {
+            return self
+                .first
+                .tensor_jacobian_action(ctx, state, direction, equation, q);
+        }
+        if !self.first.owns_equation(equation) {
+            return self
+                .second
+                .tensor_jacobian_action(ctx, state, direction, equation, q);
+        }
         let first = self
             .first
             .tensor_jacobian_action(ctx, state, direction, equation, q);
@@ -431,6 +514,30 @@ where
             first[2] + second[2],
         ]
     }
+}
+
+/// Fuse tensor kernels into one statically dispatched sum.
+///
+/// `fuse_tensor_kernels!(a, b, c)` expands to the equivalent chained
+/// `TensorResidualKernelSum::from_kernel(a).with(b).with(c)`, so the fused
+/// pointwise evaluation stays statically dispatched and inlinable. Field
+/// count/name checks still apply through the `Sum` implementation.
+///
+/// A proc macro is deliberately not used here: this is pure syntactic sugar
+/// over the existing builder, with no new crate, dependencies, or generated
+/// code to debug.
+#[macro_export]
+macro_rules! fuse_tensor_kernels {
+    () => {
+        compile_error!("fuse_tensor_kernels! requires at least one kernel")
+    };
+    ($first:expr) => {
+        $crate::TensorResidualKernelSum::from_kernel($first)
+    };
+    ($first:expr, $($rest:expr),+ $(,)?) => {
+        $crate::TensorResidualKernelSum::from_kernel($first)
+            $(.with($rest))+
+    };
 }
 
 /// Assemble one 1D tensor-product cell from pointwise weak-form fluxes.
@@ -1529,6 +1636,12 @@ pub struct StateTensorBoundaryTerms<const GDIM: usize> {
 impl<const GDIM: usize> StateTensorBoundaryTerms<GDIM> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether no boundary kernel is configured at all. Hot assembly paths
+    /// use this to skip the facet loop entirely.
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.overrides.is_empty()
     }
 
     pub fn with_default<K>(mut self, kernel: K) -> Self

@@ -78,14 +78,24 @@ pub fn problem() -> SEM2DProblem<QuadMesh> {
 }
 
 pub fn problem_with_resolution(nx: usize, ny: usize) -> SEM2DProblem<QuadMesh> {
+    problem_with_resolution_and_degree(nx, ny, 2)
+}
+
+pub fn problem_with_resolution_and_degree(
+    nx: usize,
+    ny: usize,
+    degree: usize,
+) -> SEM2DProblem<QuadMesh> {
+    assert!(degree >= 1, "polynomial degree must be >= 1");
     let mesh = unit_square(nx, ny, ReferenceCellType::Quadrilateral, 1);
-    let family = LagrangeElementFamily::<f64>::new(2, Continuity::Standard, LagrangeVariant::GLL);
+    let family =
+        LagrangeElementFamily::<f64>::new(degree, Continuity::Standard, LagrangeVariant::GLL);
     let space = FunctionSpaceImpl::new(&mesh, &family);
     let (u_values, v_values, pressure_dof) = boundary_facet_values(&mesh, &space);
 
     SEM2DProblem::new(
         mesh,
-        2,
+        degree,
         FieldRegistry::new(["u", "v", "p"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![

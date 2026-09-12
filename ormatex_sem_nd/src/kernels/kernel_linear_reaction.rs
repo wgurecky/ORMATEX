@@ -205,4 +205,5 @@ impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorKernelLinearReactio
             0.0,
         ]
     }
+
 }

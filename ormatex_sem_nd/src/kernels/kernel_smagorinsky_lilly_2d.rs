@@ -55,13 +55,22 @@ impl SmagorinskyLilly2D {
     }
 
     pub fn eddy_viscosity(&self, ctx: &LocalCtx, state: &CellState, q: usize) -> f64 {
-        let delta = self.filter_width(ctx);
-        (self.cs * delta).powi(2) * self.strain_magnitude(state, q)
+        // ponytail: factor first; cs == 0 (or degenerate cell) skips the strain sqrt.
+        let factor = (self.cs * self.filter_width(ctx)).powi(2);
+        if factor == 0.0 {
+            return 0.0;
+        }
+        factor * self.strain_magnitude(state, q)
     }
 
     /// Evaluate the eddy viscosity using tensor-product cell metadata.
     pub fn eddy_viscosity_tensor(&self, ctx: &TensorCtx, state: &CellState, q: usize) -> f64 {
-        (self.cs * self.filter_width_tensor(ctx)).powi(2) * self.strain_magnitude(state, q)
+        // ponytail: factor first; cs == 0 skips the strain sqrt.
+        let factor = (self.cs * self.filter_width_tensor(ctx)).powi(2);
+        if factor == 0.0 {
+            return 0.0;
+        }
+        factor * self.strain_magnitude(state, q)
     }
 
     /// Return the derivative of eddy viscosity in a complete velocity direction.
@@ -72,6 +81,11 @@ impl SmagorinskyLilly2D {
         direction: &CellState,
         q: usize,
     ) -> f64 {
+        // ponytail: factor first; cs == 0 skips strain, sqrt, and division.
+        let factor = (self.cs * self.filter_width_tensor(ctx)).powi(2);
+        if factor == 0.0 {
+            return 0.0;
+        }
         let components = Self::strain_components(state, q);
         let magnitude = Self::strain_magnitude_from_components(components);
         if magnitude <= f64::EPSILON {
@@ -83,7 +97,7 @@ impl SmagorinskyLilly2D {
         let dsxy = 0.5 * (direction.grad(0, q, 1) + direction.grad(1, q, 0));
         let d_magnitude =
             (4.0 * sxx * dsxx + 4.0 * syy * dsyy + 8.0 * sxy * dsxy) / (2.0 * magnitude);
-        (self.cs * self.filter_width_tensor(ctx)).powi(2) * d_magnitude
+        factor * d_magnitude
     }
 
     pub(crate) fn filter_width_tensor(&self, ctx: &TensorCtx) -> f64 {
@@ -105,6 +119,11 @@ impl SmagorinskyLilly2D {
     ) -> f64 {
         assert!(velocity_field < 2, "velocity field must be 0 or 1");
         assert!(direction < 2, "gradient direction must be 0 or 1");
+        // ponytail: factor first; cs == 0 skips strain, sqrt, and division.
+        let factor = (self.cs * self.filter_width(ctx)).powi(2);
+        if factor == 0.0 {
+            return 0.0;
+        }
         let components = Self::strain_components(state, q);
         let magnitude = Self::strain_magnitude_from_components(components);
         if magnitude <= f64::EPSILON {
@@ -119,6 +138,6 @@ impl SmagorinskyLilly2D {
             (1, 1) => 4.0 * syy,
             _ => unreachable!(),
         };
-        (self.cs * self.filter_width(ctx)).powi(2) * dq / (2.0 * magnitude)
+        factor * dq / (2.0 * magnitude)
     }
 }
