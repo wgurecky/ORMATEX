@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot Navier-Stokes fields stored as x,y,u,v,p CSV files, optionally with T."""
+"""Plot Navier-Stokes fields stored as x,y,u,v,p CSV files, optionally with T and c0/c1/c2."""
 
 from __future__ import annotations
 
@@ -25,23 +25,32 @@ DEFAULT_FILES = (
     "navier_stokes_cylinder_generic.csv",
     "navier_stokes_backward_step_tensor.csv",
     "de_vahl_davis_cavity.csv",
+    "frozen_velocity_species_cylinder.csv",
 )
 
 
-def read_fields(path: Path) -> np.ndarray:
+def read_fields(path: Path) -> tuple[tuple[str, ...], np.ndarray]:
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream)
         columns = set(reader.fieldnames or ())
-        expected = {"x", "y", "u", "v", "p"}
-        if "T" in columns:
-            expected.add("T")
-        if columns != expected:
-            raise ValueError(f"{path} must have columns x,y,u,v,p with optional T")
-        names = ("x", "y", "u", "v", "p", "T") if "T" in columns else ("x", "y", "u", "v", "p")
+        base = {"x", "y", "u", "v", "p"}
+        optional = {"T", "c0", "c1", "c2"}
+        if not base <= columns:
+            raise ValueError(f"{path} must have columns x,y,u,v,p with optional T,c0,c1,c2")
+        if unknown := columns - base - optional:
+            raise ValueError(f"{path} has unexpected columns: {sorted(unknown)}")
+        species = {"c0", "c1", "c2"} & columns
+        if species and species != {"c0", "c1", "c2"}:
+            raise ValueError(f"{path} must have all of c0,c1,c2 together")
+        names = tuple(
+            name
+            for name in ("x", "y", "u", "v", "p", "T", "c0", "c1", "c2")
+            if name in columns
+        )
         rows = [[float(row[name]) for name in names] for row in reader]
     if not rows:
         raise ValueError(f"{path} has no data rows")
-    return np.asarray(rows)
+    return names, np.asarray(rows)
 
 
 def final_time(path: Path) -> float | None:
@@ -82,20 +91,39 @@ def vector_plot(ax, data: np.ndarray, max_vectors: int) -> None:
 
 
 def plot_file(path: Path, output_dir: Path, max_vectors: int) -> Path:
-    data = read_fields(path)
-    if data.shape[1] == 6:
+    names, data = read_fields(path)
+    column = names.index
+    panels = [
+        ("u", "u velocity"),
+        ("v", "v velocity"),
+        ("p", "Pressure"),
+    ]
+    if "T" in names:
+        panels.append(("T", "Temperature"))
+    for species in ("c0", "c1", "c2"):
+        if species in names:
+            panels.append((species, f"{species} concentration"))
+    if "c0" in names:
+        fig, axes = plt.subplots(3, 3, figsize=(15, 13), constrained_layout=True)
+        flat = list(axes.flat)
+        for ax, (key, title) in zip(flat, panels):
+            contour(ax, data, column(key), title)
+        vector_plot(flat[len(panels)], data, max_vectors)
+        for ax in flat[len(panels) + 1 :]:
+            ax.axis("off")
+    elif "T" in names:
         fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
-        contour(axes[0, 0], data, 2, "u velocity")
-        contour(axes[0, 1], data, 3, "v velocity")
-        contour(axes[0, 2], data, 4, "Pressure")
-        contour(axes[1, 0], data, 5, "Temperature")
+        contour(axes[0, 0], data, column("u"), "u velocity")
+        contour(axes[0, 1], data, column("v"), "v velocity")
+        contour(axes[0, 2], data, column("p"), "Pressure")
+        contour(axes[1, 0], data, column("T"), "Temperature")
         vector_plot(axes[1, 1], data, max_vectors)
         axes[1, 2].axis("off")
     else:
         fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-        contour(axes[0, 0], data, 2, "u velocity")
-        contour(axes[0, 1], data, 3, "v velocity")
-        contour(axes[1, 0], data, 4, "Pressure")
+        contour(axes[0, 0], data, column("u"), "u velocity")
+        contour(axes[0, 1], data, column("v"), "v velocity")
+        contour(axes[1, 0], data, column("p"), "Pressure")
         vector_plot(axes[1, 1], data, max_vectors)
     title = path.stem
     if path.name == "navier_stokes_cylinder.csv":

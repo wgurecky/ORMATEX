@@ -27,14 +27,14 @@ pub use edac::{
     TensorKernelEdacViscousStress2D, KernelEdacViscousStress2D,
 };
 pub use basic::{
-    KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
-    KernelBoussinesq2D, KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D,
-    KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass, KernelVolumeSource,
-    NeumannFlux, RobinConvection, TensorKernelAdvDiff, TensorKernelAdvDiff2D,
+    KernelAdvDiff,     KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
+    KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D, KernelConservationLaw1D, KernelDiffusion,
+    KernelDiffusion2D, KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass,
+    KernelVolumeSource, NeumannFlux, RobinConvection, TensorKernelAdvDiff, TensorKernelAdvDiff2D,
     TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D, TensorKernelAdvection2D,
-    TensorKernelBoussinesq2D, TensorKernelConservationLaw1D, TensorKernelDiffusion,
-    TensorKernelDiffusion2D, TensorKernelEnergyAdvectionDiffusion2D, TensorKernelLinearReaction,
-    TensorKernelMass, TensorKernelVolumeSource,
+    TensorKernelAdvectionOutflow2D, TensorKernelBoussinesq2D, TensorKernelConservationLaw1D,
+    TensorKernelDiffusion, TensorKernelDiffusion2D, TensorKernelEnergyAdvectionDiffusion2D,
+    TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource,
 };
 pub use common::{
     BilinearForm, BoundaryIntegrator, FluxKernel1D, LinearForm, ResidualKernel, ResidualKernelSet,

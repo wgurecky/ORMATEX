@@ -37,7 +37,8 @@ pub use jacobian::{
 };
 pub use kernels::{
     BilinearForm, BoundaryIntegrator, EdacNavierStokes2DConfig, FluxKernel1D, KernelAdvDiff,
-    KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D, KernelBoussinesq2D,
+    KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
+    KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D,
     KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D, KernelEdacDirectionalDoNothing2D,
     KernelEdacDongOutflow2D, KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit2D,
     KernelEdacNavierStokes2D, KernelEdacNavierStokesSplit2D, KernelEdacNoSlipWall2D, KernelEdacPressureAdvection2D,
@@ -48,7 +49,8 @@ pub use kernels::{
     ResidualKernelSet, ResidualKernelSum, RobinConvection, SmagorinskyLilly2D,
     StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
     StateTensorBoundaryTerms, TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG,
-    TensorKernelAdvDiffSUPG2D, TensorKernelAdvection2D, TensorKernelBoussinesq2D,
+    TensorKernelAdvDiffSUPG2D, TensorKernelAdvection2D, TensorKernelAdvectionOutflow2D,
+    TensorKernelBoussinesq2D,
     TensorKernelConservationLaw1D, TensorKernelDiffusion, TensorKernelDiffusion2D,
     TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
     TensorKernelEdacMomentumConvection2D, TensorKernelEdacMomentumConvectionSplit2D,
@@ -62,7 +64,8 @@ pub use kernels::{
     TensorResidualKernelSum,
 };
 pub use material::{
-    Coefficient, ConstantCoefficient, MaterialContext, MaterialProperty, RegionCoefficient,
+    Coefficient, ConstantCoefficient, FrozenFacetField, FrozenQuadratureField, FrozenVelocity2D,
+    MaterialContext, MaterialProperty, RegionCoefficient,
 };
 pub use mesh::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
 pub use op::ParCsrJacobian;

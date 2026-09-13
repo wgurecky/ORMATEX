@@ -24,9 +24,15 @@ impl TensorKernelAdvDiff {
     {
         Self(KernelAdvDiff::with_coefficients(nu, vel))
     }
+    pub fn with_field_name(self, name: impl Into<String>) -> Self {
+        Self(self.0.with_field_name(name))
+    }
 }
 
 impl TensorResidualKernel<1> for TensorKernelAdvDiff {
+    fn field_names(&self) -> Option<Vec<String>> {
+        <KernelAdvDiff as crate::kernels::common::ResidualKernel>::field_names(&self.0)
+    }
     fn tensor_residual(
         &self,
         ctx: &TensorCtx<'_>,

@@ -13,12 +13,14 @@ pub use kernel_neumann_flux::NeumannFlux;
 pub use kernel_robin_convection::RobinConvection;
 pub use tensor::{
     TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
-    TensorKernelAdvection2D, TensorKernelBoussinesq2D, TensorKernelConservationLaw1D,
-    TensorKernelDiffusion, TensorKernelDiffusion2D, TensorKernelEnergyAdvectionDiffusion2D,
-    TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource,
+    TensorKernelAdvection2D, TensorKernelAdvectionOutflow2D, TensorKernelBoussinesq2D,
+    TensorKernelConservationLaw1D, TensorKernelDiffusion, TensorKernelDiffusion2D,
+    TensorKernelEnergyAdvectionDiffusion2D, TensorKernelLinearReaction, TensorKernelMass,
+    TensorKernelVolumeSource,
 };
 pub use weak::{
     KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
-    KernelBoussinesq2D, KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D,
-    KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass, KernelVolumeSource,
+    KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D, KernelConservationLaw1D, KernelDiffusion,
+    KernelDiffusion2D, KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass,
+    KernelVolumeSource,
 };

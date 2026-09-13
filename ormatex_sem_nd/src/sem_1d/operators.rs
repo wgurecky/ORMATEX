@@ -23,16 +23,17 @@ where
 }
 
 /// Statically dispatched tensor-product residual operator.
-pub struct SEM1DTensorResidualOperator<'p, 'k, M, K>
+pub struct SEM1DTensorResidualOperator<'p, 'k, 'b, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     problem: &'p SEM1DProblem<M>,
     kernel: &'k K,
     time: f64,
+    terms: Option<&'b StateBoundaryTerms>,
 }
 
-impl<'p, 'k, M, K> SEM1DTensorResidualOperator<'p, 'k, M, K>
+impl<'p, 'k, 'b, M, K> SEM1DTensorResidualOperator<'p, 'k, 'b, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: TensorResidualKernel<1> + Sync,
@@ -44,27 +45,37 @@ where
 /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         let layout = self.problem.field_layout();
-        self.problem
-            .assemble_tensor_residual_with_layout(self.time, self.kernel, state, &layout)
+        let mut residual = self.problem
+            .assemble_tensor_residual_with_layout(self.time, self.kernel, state, &layout);
+        if let Some(terms) = self.terms {
+            let boundary = self
+                .problem
+                .assemble_state_boundary_residual(self.time, state, terms);
+            for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                *volume += boundary;
+            }
+        }
+        residual
     }
 /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
         let layout = self.problem.field_layout();
-        self.problem
-            .assemble_tensor_jacobian_with_layout(self.time, self.kernel, state, &layout)
+        let volume = self.problem
+            .assemble_tensor_jacobian_with_layout(self.time, self.kernel, state, &layout);
+        match self.terms {
+            Some(terms) => {
+                let boundary = self
+                    .problem
+                    .assemble_state_boundary_jacobian(self.time, state, terms);
+                volume.as_ref() + boundary.as_ref()
+            }
+            None => volume,
+        }
     }
 /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
-        let layout = self.problem.field_layout();
-        self.problem.apply_tensor_jacobian_with_layout(
-            self.time,
-            self.kernel,
-            state,
-            direction,
-            &layout,
-            out.as_mut(),
-        );
+        self.apply_jacobian_into(state, direction, out.as_mut());
         out
     }
 
@@ -84,15 +95,33 @@ where
             &layout,
             out.rb_mut(),
         );
+        if let Some(terms) = self.terms {
+            out += self
+                .problem
+                .apply_state_boundary_jacobian(self.time, state, direction, terms);
+        }
     }
 /// Return this operator at a new time.
     pub fn at_time(mut self, time: f64) -> Self {
         self.time = time;
         self
     }
+
+/// Attach state-dependent natural-boundary terms.
+    pub fn with_state_boundary<'terms>(
+        self,
+        terms: &'terms StateBoundaryTerms,
+    ) -> SEM1DTensorResidualOperator<'p, 'k, 'terms, M, K> {
+        SEM1DTensorResidualOperator {
+            problem: self.problem,
+            kernel: self.kernel,
+            time: self.time,
+            terms: Some(terms),
+        }
+    }
 }
 
-impl<M, K> CompleteResidualOperator for SEM1DTensorResidualOperator<'_, '_, M, K>
+impl<M, K> CompleteResidualOperator for SEM1DTensorResidualOperator<'_, '_, '_, M, K>
 where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: TensorResidualKernel<1> + Sync,
@@ -257,7 +286,7 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
 {
     Weak(SEM1DResidualOperator<'p, 'w, 'b, M, W>),
-    Tensor(SEM1DTensorResidualOperator<'p, 't, M, T>),
+    Tensor(SEM1DTensorResidualOperator<'p, 't, 'b, M, T>),
     Mixed(SEM1DMixedResidualOperator<'p, 't, 'w, M, T, W>),
 }
 
@@ -504,7 +533,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     pub fn tensor_residual_operator<'p, 'k, K: TensorResidualKernel<1> + Sync>(
         &'p self,
         kernel: &'k K,
-    ) -> SEM1DTensorResidualOperator<'p, 'k, M, K>
+    ) -> SEM1DTensorResidualOperator<'p, 'k, 'static, M, K>
     where
         M: Sync,
     {
@@ -519,6 +548,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             problem: self,
             kernel,
             time: 0.0,
+            terms: None,
         }
     }
 

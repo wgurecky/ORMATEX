@@ -26,7 +26,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     /// kernel on the trace state and scatters a 1-DOF residual/Jacobian block.
     /// `include_residual` / `include_jacobian` select which outputs are built
     /// so callers pay for one pass only. Applicable to weak-form boundary
-    /// fluxes (Robin/outflow); tensor boundaries live in [`tensor`](super::tensor).
+    /// fluxes (Robin/outflow); the 1D tensor operator reuses these same weak
+    /// endpoint terms via `with_state_boundary`.
     pub(crate) fn assemble_state_boundary_impl(
         &self,
         time: f64,

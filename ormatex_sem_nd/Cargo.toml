@@ -64,3 +64,7 @@ path = "examples/navier-stokes/backward_step_tensor.rs"
 [[example]]
 name = "navier-stokes-de-vahl-davis-cavity"
 path = "examples/navier-stokes/de_vahl_davis_cavity.rs"
+
+[[example]]
+name = "navier-stokes-frozen-velocity-species-cylinder"
+path = "examples/navier-stokes/frozen_velocity_species_cylinder.rs"

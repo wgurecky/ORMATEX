@@ -625,5 +625,114 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             field_grads,
         )
     }
+}
 
+impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
+    /// Number of volume cells.
+    pub fn cell_count(&self) -> usize {
+        self.cell_reduced_dofs[0].len()
+    }
+
+    /// Number of quadrature points per cell (tensor/weak share collocated GLL points).
+    pub fn quadrature_points_per_cell(&self) -> usize {
+        self.cell_data.npts
+    }
+
+    /// Sample one solution field's value at a boundary endpoint.
+    ///
+    /// Reads the owning cell's local DOF for `facet_index` (a `Point` entity
+    /// index), including prescribed Dirichlet values. Use it to freeze
+    /// endpoint data (e.g. outlet velocity) for a downstream problem on the
+    /// same mesh.
+    pub fn sample_endpoint_value(
+        &self,
+        state: MatRef<'_, f64>,
+        field_name: &str,
+        facet_index: usize,
+    ) -> f64 {
+        let field = self
+            .field_id(field_name)
+            .unwrap_or_else(|| panic!("unknown 1D field {field_name}"));
+        assert_eq!(state.nrows(), self.system_size(), "state size mismatch");
+        assert_eq!(state.ncols(), 1, "sampling requires one state column");
+        let space = FunctionSpaceImpl::new(&self.mesh, &self.family);
+        let point = self
+            .mesh
+            .entity(ReferenceCellType::Point, facet_index)
+            .expect("facet index out of range");
+        let topology = point.topology();
+        let mut cells = topology.connected_entity_iter(ReferenceCellType::Interval);
+        let cell_index: usize = cells.next().expect("endpoint must own a cell");
+        assert!(
+            cells.next().is_none(),
+            "sampling requires a boundary endpoint"
+        );
+        let offset = self.field_offset(field);
+        let map = if self.cell_reduced_dofs.len() == 1 {
+            0
+        } else {
+            field
+        };
+        let cell_dofs = space
+            .entity_closure_dofs(ReferenceCellType::Interval, cell_index)
+            .unwrap();
+        let point_dofs = space
+            .entity_closure_dofs(ReferenceCellType::Point, facet_index)
+            .unwrap();
+        assert_eq!(point_dofs.len(), 1, "a scalar endpoint must have one DOF");
+        let cell_dof = cell_dofs
+            .iter()
+            .position(|&dof| dof == point_dofs[0])
+            .expect("point DOF missing from owning interval");
+        let reduced = &self.cell_reduced_dofs[map][cell_index];
+        let prescribed = &self.cell_prescribed_values[map][cell_index];
+        reduced[cell_dof].map_or(prescribed[cell_dof].unwrap_or(0.0), |rr| {
+            state[(offset + rr, 0)]
+        })
+    }
+
+    /// Sample one solution field at all cell quadrature points.
+    ///
+    /// Returns `values[cell * npts + q]` including prescribed Dirichlet DOFs,
+    /// suitable for [`FrozenQuadratureField`](crate::material::FrozenQuadratureField).
+    /// The target problem reusing the snapshot must share cell count and `npts`.
+    pub fn sample_quadrature_field(
+        &self,
+        state: MatRef<'_, f64>,
+        field_name: &str,
+    ) -> crate::material::FrozenQuadratureField {
+        let field = self
+            .field_id(field_name)
+            .unwrap_or_else(|| panic!("unknown 1D field {field_name}"));
+        assert_eq!(state.nrows(), self.system_size(), "state size mismatch");
+        assert_eq!(state.ncols(), 1, "sampling requires one state column");
+        let offset = self.field_offset(field);
+        let map = if self.cell_reduced_dofs.len() == 1 {
+            0
+        } else {
+            field
+        };
+        let npts = self.cell_data.npts;
+        let ncells = self.cell_reduced_dofs[0].len();
+        let q_to_local = &self
+            .cell_data
+            .tensor
+            .as_ref()
+            .expect("1D sampling requires tensor data")
+            .q_to_local;
+        let ndofs = self.cell_data.ndofs;
+        let mut values = vec![0.0; ncells * npts];
+        let mut coeffs = vec![0.0; ndofs];
+        for cell in 0..ncells {
+            let reduced = &self.cell_reduced_dofs[map][cell];
+            let prescribed = &self.cell_prescribed_values[map][cell];
+            for (local, &r) in reduced.iter().enumerate() {
+                coeffs[local] = r.map_or(prescribed[local].unwrap_or(0.0), |rr| state[(offset + rr, 0)]);
+            }
+            for q in 0..npts {
+                values[cell * npts + q] = coeffs[q_to_local[q]];
+            }
+        }
+        crate::material::FrozenQuadratureField::new(npts, values)
+    }
 }

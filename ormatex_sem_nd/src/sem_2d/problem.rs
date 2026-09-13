@@ -857,3 +857,116 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         )
     }
 }
+
+impl<M: ndmesh::traits::Mesh<EntityDescriptor = ndelement::types::ReferenceCellType, T = f64>>
+    SEM2DProblem<M>
+{
+    /// Number of volume cells.
+    pub fn cell_count(&self) -> usize {
+        self.cell_reduced_dofs[0].len()
+    }
+
+    /// Number of mesh facets (boundary and interior).
+    pub fn facet_count(&self) -> usize {
+        self.mesh.entity_count(ReferenceCellType::Interval)
+    }
+
+    /// Number of quadrature points per cell (tensor/weak share collocated GLL points).
+    pub fn quadrature_points_per_cell(&self) -> usize {
+        self.cell_data.npts
+    }
+
+    /// Number of quadrature points per boundary facet.
+    pub fn facet_quadrature_points(&self) -> usize {
+        self.state_boundary_cache.wts.len()
+    }
+
+    /// Sample one solution field at all cell quadrature points.
+    ///
+    /// Returns a [`FrozenQuadratureField`](crate::material::FrozenQuadratureField)
+    /// with `values[cell * npts + q]` including prescribed Dirichlet DOFs.
+    /// The target problem reusing the snapshot must share cell count and `npts`.
+    pub fn sample_quadrature_field(
+        &self,
+        state: MatRef<'_, f64>,
+        field_name: &str,
+    ) -> crate::material::FrozenQuadratureField {
+        let field = self
+            .field_id(field_name)
+            .unwrap_or_else(|| panic!("unknown 2D field {field_name}"));
+        assert_eq!(state.nrows(), self.system_size(), "state size mismatch");
+        assert_eq!(state.ncols(), 1, "sampling requires one state column");
+        let offset = self.field_offset(field);
+        let map = if self.cell_reduced_dofs.len() == 1 {
+            0
+        } else {
+            field
+        };
+        let npts = self.cell_data.npts;
+        let ncells = self.cell_reduced_dofs[0].len();
+        let q_to_local = &self
+            .cell_data
+            .tensor
+            .as_ref()
+            .expect("2D sampling requires tensor data")
+            .q_to_local;
+        let ndofs = self.cell_data.ndofs;
+        let mut values = vec![0.0; ncells * npts];
+        let mut coeffs = vec![0.0; ndofs];
+        for cell in 0..ncells {
+            let reduced = &self.cell_reduced_dofs[map][cell];
+            let prescribed = &self.cell_prescribed_values[map][cell];
+            for (local, &r) in reduced.iter().enumerate() {
+                coeffs[local] =
+                    r.map_or(prescribed[local].unwrap_or(0.0), |rr| state[(offset + rr, 0)]);
+            }
+            for q in 0..npts {
+                values[cell * npts + q] = coeffs[q_to_local[q]];
+            }
+        }
+        crate::material::FrozenQuadratureField::new(npts, values)
+    }
+
+    /// Sample one solution field at all boundary-facet quadrature points.
+    ///
+    /// Returns a [`FrozenFacetField`](crate::material::FrozenFacetField) with
+    /// `values[facet * npts + q]` keyed by mesh-global facet index, using the
+    /// same trace-basis interpolation as boundary assembly (including
+    /// prescribed Dirichlet DOFs). Interior facets read as zero. The target
+    /// problem reusing the snapshot must share facet count and facet `npts`.
+    pub fn sample_facet_quadrature_field(
+        &self,
+        state: MatRef<'_, f64>,
+        field_name: &str,
+    ) -> crate::material::FrozenFacetField {
+        let field = self
+            .field_id(field_name)
+            .unwrap_or_else(|| panic!("unknown 2D field {field_name}"));
+        assert_eq!(state.nrows(), self.system_size(), "state size mismatch");
+        assert_eq!(state.ncols(), 1, "sampling requires one state column");
+        let offset = self.field_offset(field);
+        let map = if self.cell_reduced_dofs.len() == 1 {
+            0
+        } else {
+            field
+        };
+        let npts = self.state_boundary_cache.wts.len();
+        let nfacets = self.facet_count();
+        let mut values = vec![0.0; nfacets * npts];
+        for facet in &self.state_boundary_cache.facets {
+            let reduced = &self.cell_reduced_dofs[map][facet.cell_index];
+            let prescribed = &self.cell_prescribed_values[map][facet.cell_index];
+            for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                let coefficient = reduced[cell_i].map_or(
+                    prescribed[cell_i].unwrap_or(0.0),
+                    |rr| state[(offset + rr, 0)],
+                );
+                for q in 0..npts {
+                    values[facet.facet.local_index * npts + q] +=
+                        coefficient * facet.values[facet_i * npts + q];
+                }
+            }
+        }
+        crate::material::FrozenFacetField::new(npts, nfacets, values)
+    }
+}

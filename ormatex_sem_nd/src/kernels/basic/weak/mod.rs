@@ -4,9 +4,10 @@
 
 pub mod adv_diff_1d;
 pub mod adv_diff_2d;
-pub mod adv_diff_supg_1d;
+pub mod advection_outflow_1d;pub mod adv_diff_supg_1d;
 pub mod adv_diff_supg_2d;
 pub mod advection_2d;
+pub mod advection_outflow_2d;
 pub mod boussinesq_2d;
 pub mod conservation_law_1d;
 pub mod diffusion_1d;
@@ -18,9 +19,11 @@ pub mod volume_source;
 
 pub use adv_diff_1d::KernelAdvDiff;
 pub use adv_diff_2d::KernelAdvDiff2D;
+pub use advection_outflow_1d::KernelAdvectionOutflow1D;
 pub use adv_diff_supg_1d::KernelAdvDiffSUPG;
 pub use adv_diff_supg_2d::KernelAdvDiffSUPG2D;
 pub use advection_2d::KernelAdvection2D;
+pub use advection_outflow_2d::KernelAdvectionOutflow2D;
 pub use boussinesq_2d::KernelBoussinesq2D;
 pub use conservation_law_1d::KernelConservationLaw1D;
 pub use diffusion_1d::KernelDiffusion;

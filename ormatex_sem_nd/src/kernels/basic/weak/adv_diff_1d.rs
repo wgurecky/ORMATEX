@@ -11,6 +11,7 @@ use crate::kernels::common::{BilinearForm, ResidualKernel};
 pub struct KernelAdvDiff {
     pub nu: Box<dyn MaterialProperty<f64>>,
     pub vel: Box<dyn MaterialProperty<f64>>,
+    field_names: Option<Vec<String>>,
 }
 
 impl KernelAdvDiff {
@@ -26,11 +27,23 @@ impl KernelAdvDiff {
         Self {
             nu: Box::new(nu),
             vel: Box::new(vel),
+            field_names: None,
         }
+    }
+
+    /// Attach the single solution-field name so this 1->1 term can join a
+    /// named `ResidualKernelSet` / `TensorResidualKernelSet`
+    /// (e.g. one frozen-velocity transport per species).
+    pub fn with_field_name(mut self, name: impl Into<String>) -> Self {
+        self.field_names = Some(vec![name.into()]);
+        self
     }
 }
 
 impl BilinearForm for KernelAdvDiff {
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
+    }
     fn supports_tensor_bilinear_1d(&self) -> bool {
         true
     }
@@ -73,6 +86,10 @@ impl BilinearForm for KernelAdvDiff {
 }
 
 impl ResidualKernel for KernelAdvDiff {
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

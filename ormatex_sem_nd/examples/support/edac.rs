@@ -9,7 +9,9 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_leja::{LejaEllipseAdapterArnoldiIOM, LejaPhiEval, LejaPoints};
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
+use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     CellState, FieldValues, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
     KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
@@ -402,6 +404,74 @@ pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
     let expmv = Box::new(PadeExpm::new(12));
     let krylov = KrylovExpm::new(expmv, 30, 100, 1e-12, Some(2));
     EpirkIntegrator::new(0.0, state0, "epi3".to_string(), krylov)
+}
+
+/// SDIRK32 (3 stages, order 2, L-stable) implicit stepper for stiff systems.
+pub fn sdirk32(state0: MatRef<'_, f64>) -> DirkIntegrator<'_> {
+    DirkIntegrator::new(0.0, state0, ImplicitBT::sdirk32(), 1e-10, 1e-10)
+}
+
+/// Time-stepper option for the tensor examples: EPI3 exponential by default,
+/// SDIRK32 implicit with `--sdirk32`.
+pub enum TimeStepper<'a> {
+    Epi3(EpirkIntegrator<KrylovExpm>),
+    Sdirk32(DirkIntegrator<'a>),
+}
+
+impl<'a> TimeStepper<'a> {
+    pub fn new(state0: MatRef<'a, f64>) -> Self {
+        if std::env::args().any(|arg| arg == "--sdirk32") {
+            Self::Sdirk32(sdirk32(state0))
+        } else {
+            Self::Epi3(epi3(state0))
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Epi3(_) => "epi3",
+            Self::Sdirk32(_) => "sdirk32",
+        }
+    }
+
+    pub fn run_steps<'b>(
+        &mut self,
+        system: &'b dyn OdeSys<'b>,
+        dt: f64,
+        nsteps: usize,
+        label: &str,
+    ) {
+        for step in 0..nsteps {
+            match self {
+                Self::Epi3(integrator) => {
+                    let result = integrator.step(system, dt).unwrap_or_else(|error| {
+                        panic!("{label} step {step} failed: {}", error.msg)
+                    });
+                    integrator.accept_step(result);
+                }
+                Self::Sdirk32(integrator) => {
+                    let result = integrator.step(system, dt).unwrap_or_else(|error| {
+                        panic!("{label} step {step} failed: {}", error.msg)
+                    });
+                    integrator.accept_step(result);
+                }
+            }
+        }
+    }
+
+    pub fn state(&self) -> Mat<f64> {
+        match self {
+            Self::Epi3(integrator) => integrator.state(),
+            Self::Sdirk32(integrator) => integrator.state(),
+        }
+    }
+
+    pub fn time(&self) -> f64 {
+        match self {
+            Self::Epi3(integrator) => integrator.time(),
+            Self::Sdirk32(integrator) => integrator.time(),
+        }
+    }
 }
 
 pub fn epi3_leja(state0: MatRef<'_, f64>) -> EpirkIntegrator<LejaPhiEval> {
