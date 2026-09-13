@@ -12,6 +12,7 @@ use ormatex_sem_nd::{
 };
 use rayon::ThreadPoolBuilder;
 use std::time::Instant;
+use ormatex_sem_nd::{BilinearOps, WeakResidualOps};
 
 #[path = "../examples/support/linear_system.rs"]
 mod linear_system;

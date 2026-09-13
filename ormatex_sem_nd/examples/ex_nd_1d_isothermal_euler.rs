@@ -11,6 +11,7 @@ use ormatex_sem_nd::{
     DofReduction1D, FieldRegistry, MatrixFreeMinvJacobian, ParallelOwnedMinvJacobian, SEM1DProblem,
     TensorKernelConservationLaw1D,
 };
+use ormatex_sem_nd::{BilinearOps};
 
 #[path = "support/isothermal_euler.rs"]
 mod isothermal_euler;

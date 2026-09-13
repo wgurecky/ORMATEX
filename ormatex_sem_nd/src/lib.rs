@@ -22,6 +22,7 @@ pub mod mesh;
 mod op;
 pub mod sem_1d;
 pub mod sem_2d;
+pub mod sem_traits;
 mod simd;
 
 pub use common::{
@@ -73,3 +74,4 @@ pub use sem_2d::{
     DofReduction2D, SEM2DMixedResidualOperator, SEM2DProblem, SEM2DResidualExecution,
     SEM2DResidualOperator, SEM2DTensorResidualOperator,
 };
+pub use sem_traits::{BilinearOps, TensorResidualOps, WeakResidualOps};

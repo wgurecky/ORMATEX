@@ -8,6 +8,7 @@ use ndmesh::{
 use ormatex_sem_nd::{
     DofReduction1D, DofReduction2D, FieldRegistry, KernelLinearReaction, SEM1DProblem, SEM2DProblem,
 };
+use ormatex_sem_nd::{WeakResidualOps};
 
 #[test]
 fn one_dimensional_fields_can_have_different_reductions() {

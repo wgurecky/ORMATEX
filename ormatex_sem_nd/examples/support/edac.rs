@@ -21,6 +21,7 @@ use ormatex_sem_nd::{
 };
 
 use super::linear_system::lumped_inverse_mass;
+use ormatex_sem_nd::{BilinearOps};
 
 /// Retains only the traditional weak-form kernel interface for comparison.
 /// Example binaries use this as a correctness and performance oracle.

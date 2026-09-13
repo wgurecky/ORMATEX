@@ -22,6 +22,7 @@ use ormatex_sem_nd::{
 };
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+use ormatex_sem_nd::{BilinearOps, WeakResidualOps};
 
 fn unit_square_periodic_pairs(mesh: &QuadMesh) -> Vec<[usize; 2]> {
     const EPS: f64 = 1e-12;

@@ -5,7 +5,7 @@ use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_sys::IntegrateSys;
-use ormatex_sem_nd::{DofReduction1D, FieldRegistry, KernelAdvDiff, SEM1DProblem};
+use ormatex_sem_nd::{BilinearOps, DofReduction1D, FieldRegistry, KernelAdvDiff, SEM1DProblem};
 
 #[path = "../examples/support/linear_system.rs"]
 mod linear_system;

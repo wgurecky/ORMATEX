@@ -9,6 +9,7 @@ use ormatex_sem_nd::{
     DofReduction2D, FieldRegistry, KernelDiffusion2D, KernelVolumeSource, NeumannFlux,
     RobinConvection, SEM2DProblem,
 };
+use ormatex_sem_nd::{BilinearOps};
 
 #[path = "../examples/support/linear_system.rs"]
 mod linear_system;

@@ -13,6 +13,7 @@ use ndmesh::{
 use ormatex_sem_nd::{
     DofReduction2D, FieldRegistry, KernelAdvDiff2D, KernelVolumeSource, SEM2DProblem,
 };
+use ormatex_sem_nd::{BilinearOps};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;

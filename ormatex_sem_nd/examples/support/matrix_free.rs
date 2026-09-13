@@ -10,6 +10,7 @@ use ormatex_sem_nd::{
 };
 
 use super::linear_system::{lumped_inverse_mass, sparse_add};
+use ormatex_sem_nd::{WeakResidualOps};
 
 #[derive(Clone, Copy)]
 pub enum JacobianBackend {

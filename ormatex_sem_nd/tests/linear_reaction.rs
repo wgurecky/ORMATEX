@@ -5,6 +5,7 @@ use ormatex_sem_nd::{
     DofReduction1D, FieldRegistry, KernelLinearReaction, ResidualKernel, SEM1DProblem,
     TensorKernelLinearReaction,
 };
+use ormatex_sem_nd::{BilinearOps, WeakResidualOps};
 
 fn rates() -> [[f64; 3]; 3] {
     [[-0.1, 0.0, 0.0], [0.1, -10.0, 0.0], [0.0, 10.0, -0.01]]

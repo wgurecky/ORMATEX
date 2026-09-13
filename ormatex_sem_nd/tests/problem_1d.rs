@@ -15,6 +15,7 @@ use ormatex_sem_nd::{
     ParallelOwnedMinvJacobian, ResidualKernel, SEM1DProblem, StateBoundaryIntegrator,
     StateBoundaryTerms, TensorKernelAdvDiff,
 };
+use ormatex_sem_nd::{BilinearOps, WeakResidualOps};
 
 #[path = "../examples/support/euler_1d.rs"]
 mod euler_1d;

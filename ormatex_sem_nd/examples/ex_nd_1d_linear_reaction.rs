@@ -13,6 +13,7 @@ use ormatex::ode_sys::IntegrateSys;
 use ormatex_sem_nd::{
     DofReduction1D, FieldRegistry, KernelAdvDiff, KernelLinearReaction, SEM1DProblem,
 };
+use ormatex_sem_nd::{BilinearOps};
 
 #[path = "support/linear_system.rs"]
 mod linear_system;

@@ -11,6 +11,7 @@ use ormatex_sem_nd::{
 };
 
 use super::linear_system::{implicit_euler_final_state, sparse_add, LinearOdeSys};
+use ormatex_sem_nd::{BilinearOps};
 
 pub fn diffusion_neumann_problem<M>(
     mesh: M,

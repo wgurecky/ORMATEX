@@ -18,6 +18,7 @@ use ormatex_sem_nd::{
 
 type IntervalMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+use ormatex_sem_nd::{WeakResidualOps};
 
 struct GenericAdvDiff1D(KernelAdvDiff);
 

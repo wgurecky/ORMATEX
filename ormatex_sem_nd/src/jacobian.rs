@@ -10,6 +10,7 @@ use faer::Par;
 
 use crate::kernels::kernel_common::ResidualKernel;
 use crate::op::ParCsrJacobian;
+use crate::sem_traits::WeakResidualOps;
 use crate::simd;
 use crate::{SEM1DProblem, SEM2DProblem};
 use ndelement::types::ReferenceCellType;
@@ -139,7 +140,7 @@ where
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64> {
-        SEM1DProblem::apply_jacobian(self, time, kernel, state, direction)
+        WeakResidualOps::apply_jacobian(self, time, kernel, state, direction)
     }
 
     fn apply_jacobian_into<K: ResidualKernel + Sync>(
@@ -150,7 +151,7 @@ where
         direction: MatRef<f64>,
         out: MatMut<'_, f64>,
     ) {
-        SEM1DProblem::apply_jacobian_into(self, time, kernel, state, direction, out)
+        WeakResidualOps::apply_jacobian_into(self, time, kernel, state, direction, out)
     }
 }
 
@@ -184,7 +185,7 @@ where
         state: MatRef<f64>,
         direction: MatRef<f64>,
     ) -> Mat<f64> {
-        SEM2DProblem::apply_jacobian(self, time, kernel, state, direction)
+        WeakResidualOps::apply_jacobian(self, time, kernel, state, direction)
     }
 
     fn apply_jacobian_into<K: ResidualKernel + Sync>(
@@ -195,7 +196,7 @@ where
         direction: MatRef<f64>,
         out: MatMut<'_, f64>,
     ) {
-        SEM2DProblem::apply_jacobian_into(self, time, kernel, state, direction, out)
+        WeakResidualOps::apply_jacobian_into(self, time, kernel, state, direction, out)
     }
 }
 

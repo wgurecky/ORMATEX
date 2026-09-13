@@ -11,6 +11,7 @@ use ormatex_sem_nd::{
 use std::time::Instant;
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+use ormatex_sem_nd::{WeakResidualOps};
 
 fn problem() -> SEM2DProblem<QuadMesh> {
     SEM2DProblem::new(

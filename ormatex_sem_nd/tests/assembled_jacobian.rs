@@ -10,6 +10,7 @@ use rayon::ThreadPoolBuilder;
 use std::time::Instant;
 
 type QuadMesh = SingleElementMesh<f64, CiarletElement<f64, IdentityMap, f64>>;
+use ormatex_sem_nd::{WeakResidualOps};
 
 fn build_large_diffusion_case() -> (SEM2DProblem<QuadMesh>, KernelAdvDiff2D, Mat<f64>) {
     let mesh = unit_square(64, 64, ReferenceCellType::Quadrilateral, 1);
