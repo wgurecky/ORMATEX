@@ -4,6 +4,7 @@ use crate::common::{
     FieldDofLayout, LocalCtx, ReducedDofMap, TensorCtx,
     TensorProductData,
 };
+use crate::common::jacobian_pattern::JacobianPatternCache;
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
 use crate::mesh::{MeshMetadata, PhysicalRegion};
@@ -89,6 +90,7 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) field_dof_maps: Vec<ReducedDofMap>,
     pub(crate) dof_x: Vec<f64>,
     pub(crate) metadata: MeshMetadata,
+    pub(crate) jacobian_pattern_cache: JacobianPatternCache,
 }
 
 
@@ -319,6 +321,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             field_dof_maps,
             dof_x,
             metadata,
+            jacobian_pattern_cache: JacobianPatternCache::new(),
         }
     }
 

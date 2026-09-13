@@ -5,6 +5,7 @@ use crate::common::{
     FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap,
     TensorCtx, TensorProductData,
 };
+use crate::common::jacobian_pattern::JacobianPatternCache;
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
 use crate::mesh::MeshMetadata;
@@ -224,6 +225,7 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) dof_xy: Vec<(f64, f64)>,
     pub(crate) metadata: MeshMetadata,
     pub(crate) state_boundary_cache: QuadStateBoundaryCache,
+    pub(crate) jacobian_pattern_cache: JacobianPatternCache,
 }
 
 
@@ -528,6 +530,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             dof_xy,
             metadata,
             state_boundary_cache,
+            jacobian_pattern_cache: JacobianPatternCache::new(),
         }
     }
 

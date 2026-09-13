@@ -415,7 +415,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
                             ninputs,
                             &output_offsets,
                             &input_offsets,
-                            |value| value != 0.0,
+                            // ponytail: keep explicit zeros; stable CSC pattern across states.
+                            |_| true,
                         );
                     }
                     triplets
@@ -424,7 +425,12 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             .collect();
         let triplets: Vec<_> = batches.into_iter().flatten().collect();
         let system_size = layout.total_size;
-        SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap()
+        self.jacobian_pattern_cache.assemble(
+            system_size,
+            &selection.inputs,
+            &selection.outputs,
+            triplets,
+        )
     }
 
     /// Matrix-free tensor Jacobian action with a caller-provided layout.

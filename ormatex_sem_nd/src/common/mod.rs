@@ -28,6 +28,7 @@ pub(crate) use cell::{
     interpolate_tensor_cell_state, rayon_cell_chunk_size, CellData, TensorProductData,
 };
 pub(crate) mod batch;
+pub(crate) mod jacobian_pattern;
 pub use contexts::{CellState, FacetCtx, LocalCtx, ShapeFn, TensorCtx, TensorFacetCtx};
 pub(crate) use reduction::{FieldDofLayout, ReducedDofMap};
 pub(crate) use restriction::{DisjointOut, ElementRestriction};
