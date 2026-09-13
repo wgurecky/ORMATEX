@@ -73,5 +73,4 @@ impl TensorResidualKernel<1> for TensorKernelAdvDiffSUPG {
             0.0,
         ]
     }
-
 }

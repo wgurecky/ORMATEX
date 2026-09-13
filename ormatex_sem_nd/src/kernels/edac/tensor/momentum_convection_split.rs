@@ -7,7 +7,7 @@
 //! [`KernelEdacMomentumConvectionSplit2D`](crate::kernels::edac::weak::momentum_convection_split::KernelEdacMomentumConvectionSplit2D).
 use crate::common::{CellState, TensorCtx};
 use crate::kernels::common::TensorResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, fluid_field_names, velocity};
+use crate::kernels::edac::config::{fluid_field_names, velocity, EdacNavierStokes2DConfig};
 
 /// Tensor split momentum-convection kernel (owns equations 0-1; needs split-flux boundary).
 pub struct TensorKernelEdacMomentumConvectionSplit2D {
@@ -67,5 +67,4 @@ impl TensorResidualKernel<2> for TensorKernelEdacMomentumConvectionSplit2D {
             -0.5 * (du[1] * state.value(equation, q) + u[1] * direction.value(equation, q)),
         ]
     }
-
 }

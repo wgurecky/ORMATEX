@@ -1,6 +1,7 @@
 //! Weak-form (`ResidualKernel`) residual/Jacobian paths (1D).
 use crate::common::{
-    push_rectangular_local_matrix_triplets, CellState, FacetCtx, StateBoundaryContributions, rayon_cell_chunk_size,
+    push_rectangular_local_matrix_triplets, rayon_cell_chunk_size, CellState, FacetCtx,
+    StateBoundaryContributions,
 };
 use crate::kernels::common::{ResidualKernel, StateBoundaryTerms};
 use faer::prelude::*;
@@ -14,7 +15,6 @@ use ndfunctionspace::{traits::FunctionSpace, FunctionSpaceImpl};
 use ndmesh::traits::{Entity, Geometry, Mesh, Point, Topology};
 use rayon::prelude::*;
 use rlst::{rlst_dynamic_array, DynArray};
-
 
 use super::problem::SEM1DProblem;
 use crate::sem_traits::WeakResidualOps;
@@ -422,7 +422,6 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         self.apply_jacobian(time, kernel, state, direction)
             + self.apply_state_boundary_jacobian(time, state, direction, terms)
     }
-
 }
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
@@ -498,14 +497,19 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
                         let ctx =
                             self.cell_ctx(time, cell_index, ndofs, &basis_grads[..ndofs * cd.npts]);
                         kernel.assemble_local_residual(&ctx, &state_cell, &mut local[..cell_size]);
-                        batch_actions[cell_offset * local_stride
-                            ..cell_offset * local_stride + cell_size]
+                        batch_actions
+                            [cell_offset * local_stride..cell_offset * local_stride + cell_size]
                             .copy_from_slice(&local[..cell_size]);
                     }
                 },
             );
-        self.restriction
-            .transpose_reduce(&actions, local_stride, local_stride, 1, &selection.outputs)
+        self.restriction.transpose_reduce(
+            &actions,
+            local_stride,
+            local_stride,
+            1,
+            &selection.outputs,
+        )
     }
 
     fn assemble_residual_jacobian<K: ResidualKernel + Sync>(
@@ -756,5 +760,4 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
             }
         }
     }
-
 }

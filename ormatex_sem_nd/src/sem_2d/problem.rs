@@ -1,11 +1,10 @@
 //! Core `SEM2DProblem` type, construction, and cell helpers.
-use crate::common::{
-    build_quad_state_boundary_cache, cell_ctx,
-    interpolate_cell_state, CellData, CellState, ElementRestriction,
-    FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap,
-    TensorCtx, TensorProductData,
-};
 use crate::common::jacobian_pattern::JacobianPatternCache;
+use crate::common::{
+    build_quad_state_boundary_cache, cell_ctx, interpolate_cell_state, CellData, CellState,
+    ElementRestriction, FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap, TensorCtx,
+    TensorProductData,
+};
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
 use crate::mesh::MeshMetadata;
@@ -227,7 +226,6 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) state_boundary_cache: QuadStateBoundaryCache,
     pub(crate) jacobian_pattern_cache: JacobianPatternCache,
 }
-
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     /// Build a 2D GLL spectral-element problem on a quadrilateral mesh.
@@ -917,8 +915,9 @@ impl<M: ndmesh::traits::Mesh<EntityDescriptor = ndelement::types::ReferenceCellT
             let reduced = &self.cell_reduced_dofs[map][cell];
             let prescribed = &self.cell_prescribed_values[map][cell];
             for (local, &r) in reduced.iter().enumerate() {
-                coeffs[local] =
-                    r.map_or(prescribed[local].unwrap_or(0.0), |rr| state[(offset + rr, 0)]);
+                coeffs[local] = r.map_or(prescribed[local].unwrap_or(0.0), |rr| {
+                    state[(offset + rr, 0)]
+                });
             }
             for q in 0..npts {
                 values[cell * npts + q] = coeffs[q_to_local[q]];
@@ -957,10 +956,9 @@ impl<M: ndmesh::traits::Mesh<EntityDescriptor = ndelement::types::ReferenceCellT
             let reduced = &self.cell_reduced_dofs[map][facet.cell_index];
             let prescribed = &self.cell_prescribed_values[map][facet.cell_index];
             for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let coefficient = reduced[cell_i].map_or(
-                    prescribed[cell_i].unwrap_or(0.0),
-                    |rr| state[(offset + rr, 0)],
-                );
+                let coefficient = reduced[cell_i].map_or(prescribed[cell_i].unwrap_or(0.0), |rr| {
+                    state[(offset + rr, 0)]
+                });
                 for q in 0..npts {
                     values[facet.facet.local_index * npts + q] +=
                         coefficient * facet.values[facet_i * npts + q];

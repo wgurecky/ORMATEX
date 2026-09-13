@@ -5,7 +5,7 @@
 //! [`TensorKernelEdacPressureDivergence2D`](crate::kernels::edac::tensor::pressure_divergence::TensorKernelEdacPressureDivergence2D).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names};
+use crate::kernels::edac::config::{check_weak_cell, fluid_field_names, EdacNavierStokes2DConfig};
 
 /// Artificial-compressibility `rho c0^2 div(u)` for `p` (owns equation 2).
 pub struct KernelEdacPressureDivergence2D {
@@ -65,4 +65,3 @@ impl ResidualKernel for KernelEdacPressureDivergence2D {
             * ctx.test(test_i, 0).v(q)
     }
 }
-

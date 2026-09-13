@@ -16,9 +16,20 @@ impl TensorKernelVolumeSource {
     pub fn new(val: f64) -> Self {
         Self(KernelVolumeSource::new(val))
     }
+
+    pub fn with_field_names<I, S>(val: f64, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(KernelVolumeSource::with_field_names(val, names))
+    }
 }
 
 impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorKernelVolumeSource {
+    fn field_names(&self) -> Option<Vec<String>> {
+        <KernelVolumeSource as crate::kernels::common::ResidualKernel>::field_names(&self.0)
+    }
     fn tensor_residual(
         &self,
         _ctx: &TensorCtx<'_>,

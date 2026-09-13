@@ -17,14 +17,14 @@
 
 use crate::common::{CellState, LocalCtx};
 
-use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{fluid_field_names, EdacNavierStokes2DConfig};
 use super::momentum_convection_split::KernelEdacMomentumConvectionSplit2D;
 use super::pressure_advection_split::KernelEdacPressureAdvectionSplit2D;
 use super::pressure_diffusion::KernelEdacPressureDiffusion2D;
 use super::pressure_divergence::KernelEdacPressureDivergence2D;
 use super::pressure_gradient::KernelEdacPressureGradient2D;
 use super::viscous_stress::KernelEdacViscousStress2D;
+use crate::kernels::common::ResidualKernel;
+use crate::kernels::edac::config::{fluid_field_names, EdacNavierStokes2DConfig};
 
 /// Fused split-form EDAC Navier-Stokes kernel for `[u, v, p]`
 /// (owns all equations; delegates to the part kernels).
@@ -79,18 +79,17 @@ impl ResidualKernel for KernelEdacNavierStokesSplit2D {
         test_i: usize,
         trial_i: usize,
     ) -> f64 {
-        KernelEdacMomentumConvectionSplit2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        ) + KernelEdacPressureGradient2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        ) + KernelEdacViscousStress2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        ) + KernelEdacPressureDivergence2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        ) + KernelEdacPressureAdvectionSplit2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        ) + KernelEdacPressureDiffusion2D::new(self.config).jacobian_integrand(
-            ctx, state, equation, unknown, q, test_i, trial_i,
-        )
+        KernelEdacMomentumConvectionSplit2D::new(self.config)
+            .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            + KernelEdacPressureGradient2D::new(self.config)
+                .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            + KernelEdacViscousStress2D::new(self.config)
+                .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            + KernelEdacPressureDivergence2D::new(self.config)
+                .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            + KernelEdacPressureAdvectionSplit2D::new(self.config)
+                .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
+            + KernelEdacPressureDiffusion2D::new(self.config)
+                .jacobian_integrand(ctx, state, equation, unknown, q, test_i, trial_i)
     }
 }

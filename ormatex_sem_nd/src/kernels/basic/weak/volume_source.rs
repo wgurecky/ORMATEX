@@ -1,4 +1,5 @@
 use crate::common::{CellState, LocalCtx};
+use crate::fields::FieldRegistry;
 
 use crate::kernels::common::{LinearForm, ResidualKernel};
 
@@ -10,11 +11,33 @@ use crate::kernels::common::{LinearForm, ResidualKernel};
 /// [`TensorKernelVolumeSource`](crate::kernels::basic::tensor::volume_source::TensorKernelVolumeSource).
 pub struct KernelVolumeSource {
     pub val: f64,
+    field_names: Option<Vec<String>>,
 }
 
 impl KernelVolumeSource {
     pub fn new(val: f64) -> Self {
-        Self { val }
+        Self {
+            val,
+            field_names: None,
+        }
+    }
+
+    /// Attach the single heated-field name so the source can join a named
+    /// residual set (e.g. volumetric heating of `T` in a coupled solve).
+    pub fn with_field_names<I, S>(val: f64, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut kernel = Self::new(val);
+        let names = FieldRegistry::new(names);
+        assert_eq!(
+            names.len(),
+            1,
+            "volume-source field-name count must match the single heated field"
+        );
+        kernel.field_names = Some(names.names().to_vec());
+        kernel
     }
 }
 
@@ -26,6 +49,10 @@ impl LinearForm for KernelVolumeSource {
 }
 
 impl ResidualKernel for KernelVolumeSource {
+    fn field_names(&self) -> Option<Vec<String>> {
+        self.field_names.clone()
+    }
+
     fn residual_integrand(
         &self,
         ctx: &LocalCtx,

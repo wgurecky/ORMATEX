@@ -1,10 +1,8 @@
 //! State-independent bilinear/linear paths (`BilinearForm`/`LinearForm`, 1D).
 use crate::common::{
-    add_dirichlet_rhs_correction, assemble_lumped_mass,
-    interpolate_tensor_cell_coefficients,
-    push_local_matrix_triplets, scatter_local_vector,
-    BoundaryContributions, FacetCtx,
-    FieldDofLayout, rayon_cell_chunk_size,
+    add_dirichlet_rhs_correction, assemble_lumped_mass, interpolate_tensor_cell_coefficients,
+    push_local_matrix_triplets, rayon_cell_chunk_size, scatter_local_vector, BoundaryContributions,
+    FacetCtx, FieldDofLayout,
 };
 use crate::kernels::common::{
     apply_tensor_bilinear_column_1d, BilinearForm, BoundaryIntegrator, LinearForm,
@@ -20,9 +18,8 @@ use ndmesh::traits::{Entity, Geometry, Mesh, Point, Topology};
 use rayon::prelude::*;
 use rlst::{rlst_dynamic_array, DynArray};
 
-
-use super::problem::SEM1DProblem;
 use super::problem::BoundaryPoint;
+use super::problem::SEM1DProblem;
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     /// Tensor fast path for [`assemble_bilinear`](crate::sem_traits::BilinearOps).
@@ -330,8 +327,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     }
 }
 
-impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
-    crate::sem_traits::BilinearOps for SEM1DProblem<M>
+impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync> crate::sem_traits::BilinearOps
+    for SEM1DProblem<M>
 {
     fn assemble_bilinear<K: BilinearForm + Sync>(
         &self,
@@ -445,12 +442,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
     }
 
     /// Assemble a linear RHS and apply the nonzero Dirichlet correction.
-    fn assemble_linear_with_dirichlet<B, L>(
-        &self,
-        time: f64,
-        bilinear: &B,
-        linear: &L,
-    ) -> Vec<f64>
+    fn assemble_linear_with_dirichlet<B, L>(&self, time: f64, bilinear: &B, linear: &L) -> Vec<f64>
     where
         B: BilinearForm,
         L: LinearForm,
@@ -532,5 +524,4 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
             nfields,
         )
     }
-
 }

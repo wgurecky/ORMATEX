@@ -1,12 +1,13 @@
 //! Sum-factorized tensor-product (`TensorResidualKernel`) paths (1D).
-use crate::common::{
-    interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state, push_rectangular_local_matrix_triplets, CellState, DisjointOut,
-    FieldDofLayout, TensorCtx, rayon_cell_chunk_size,
-};
-use crate::common::batch::{
-    TensorLaneScratch, extract_lanes, integrate_batch_1d, interpolate_batch_1d,
-};
 use crate::common::batch::SIMD_CELL_WIDTH;
+use crate::common::batch::{
+    extract_lanes, integrate_batch_1d, interpolate_batch_1d, TensorLaneScratch,
+};
+use crate::common::{
+    interpolate_tensor_cell_coefficients, interpolate_tensor_cell_state,
+    push_rectangular_local_matrix_triplets, rayon_cell_chunk_size, CellState, DisjointOut,
+    FieldDofLayout, TensorCtx,
+};
 use crate::kernels::common::{
     apply_tensor_jacobian_1d, assemble_tensor_residual_1d, TensorResidualKernel,
 };
@@ -16,7 +17,6 @@ use faer::sparse::{SparseColMat, Triplet};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use rayon::prelude::*;
-
 
 use super::problem::SEM1DProblem;
 
@@ -61,160 +61,151 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         {
             let out = unsafe { DisjointOut::new(&mut residual) };
             for color_cells in self.restriction.cell_colors() {
-                color_cells
-                    .par_chunks(SIMD_CELL_WIDTH)
-                    .for_each_init(
-                        || {
-                            (
-                                vec![0.0; ninputs * cd.ndofs],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; local_stride],
-                                TensorLaneScratch::new(
-                                    ninputs,
-                                    noutputs,
-                                    cd.ndofs,
-                                    cd.npts,
+                color_cells.par_chunks(SIMD_CELL_WIDTH).for_each_init(
+                    || {
+                        (
+                            vec![0.0; ninputs * cd.ndofs],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; local_stride],
+                            TensorLaneScratch::new(ninputs, noutputs, cd.ndofs, cd.npts, 1),
+                        )
+                    },
+                    |(coefficients, field_values, field_grads, local, lane), chunk: &[usize]| {
+                        let w = SIMD_CELL_WIDTH;
+                        let uniform = chunk.len() == w
+                            && chunk
+                                .iter()
+                                .all(|&cell| self.cell_reduced_dofs[0][cell].len() == cd.ndofs);
+                        if !uniform {
+                            // scalar tail / non-uniform fallback
+                            for &cell in chunk {
+                                let (field_maps, field_prescribed) =
+                                    self.restriction.maps_for(cell, &selection.inputs);
+                                let ndofs = field_maps[0].len();
+                                let cell_size = noutputs * ndofs;
+                                let state_cell = interpolate_tensor_cell_state(
+                                    cd,
                                     1,
-                                ),
-                            )
-                        },
-                        |(coefficients, field_values, field_grads, local, lane),
-                         chunk: &[usize]| {
-                            let w = SIMD_CELL_WIDTH;
-                            let uniform = chunk.len() == w
-                                && chunk.iter().all(|&cell| {
-                                    self.cell_reduced_dofs[0][cell].len() == cd.ndofs
-                                });
-                            if !uniform {
-                                // scalar tail / non-uniform fallback
-                                for &cell in chunk {
-                                    let (field_maps, field_prescribed) =
-                                        self.restriction.maps_for(cell, &selection.inputs);
-                                    let ndofs = field_maps[0].len();
-                                    let cell_size = noutputs * ndofs;
-                                    let state_cell = interpolate_tensor_cell_state(
-                                        cd,
-                                        1,
-                                        ninputs,
-                                        &field_maps,
-                                        &field_prescribed,
-                                        &input_offsets,
-                                        state,
-                                        &mut coefficients[..ninputs * cd.ndofs],
-                                        &mut field_values[..ninputs * cd.npts],
-                                        &mut field_grads[..ninputs * cd.npts],
-                                        cell,
-                                    );
-                                    let ctx = self.tensor_ctx(time, cell);
-                                    assemble_tensor_residual_1d(
-                                        kernel,
-                                        &ctx,
-                                        &state_cell,
-                                        &mut local[..cell_size],
-                                    );
-                                    // SAFETY: same-color cells are row-disjoint.
-                                    unsafe {
-                                        self.restriction.scatter_add_column(
-                                            cell,
-                                            &selection.outputs,
-                                            &local[..cell_size],
-                                            out,
-                                        )
-                                    };
-                                }
-                                return;
-                            }
-                            // batched group: lane-contiguous gather, lane tensor ops
-                            self.restriction.gather_state_batch(
-                                chunk,
-                                &selection.inputs,
-                                &input_offsets,
-                                state,
-                                &mut lane.packed_coeffs,
-                                w,
-                            );
-                            interpolate_batch_1d(
-                                cd,
-                                ninputs,
-                                &lane.packed_coeffs,
-                                &mut lane.lane_values,
-                                &mut lane.lane_grads,
-                                chunk,
-                                w,
-                            );
-                            // lane extraction for scalar-fallback physics
-                            extract_lanes(
-                                &lane.lane_values,
-                                &lane.lane_grads,
-                                1,
-                                ninputs,
-                                cd.npts,
-                                w,
-                                w,
-                                &mut lane.scalar_values,
-                                &mut lane.scalar_grads,
-                            );
-                            let ctxs: Vec<TensorCtx> =
-                                chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
-                            let states: Vec<CellState> = (0..w)
-                                .map(|l| CellState {
-                                    nfields: ninputs,
-                                    npts: cd.npts,
-                                    gdim: 1,
-                                    values: &lane.scalar_values
-                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                    grads: &lane.scalar_grads
-                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                    field_indices: &[],
-                                })
-                                .collect();
-                            let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
-                            let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
-                            let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
-                            for eq in 0..noutputs {
-                                for q in 0..cd.npts {
-                                    kernel.tensor_residual_batch(
-                                        &ctxs,
-                                        &states,
-                                        eq,
-                                        q,
-                                        &mut t0[..w],
-                                        &mut t1x[..w],
-                                        &mut t1y[..w],
-                                    );
-                                    for l in 0..w {
-                                        lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
-                                        lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
-                                    }
-                                }
-                            }
-                            lane.packed_out.fill(0.0);
-                            integrate_batch_1d(
-                                cd,
-                                noutputs,
-                                &lane.flux0,
-                                &lane.flux1x,
-                                &mut lane.packed_out,
-                                chunk,
-                                w,
-                            );
-                            for (l, &cell) in chunk.iter().enumerate() {
-                                for o in 0..local_stride {
-                                    lane.cell_local[o] = lane.packed_out[o * w + l];
-                                }
+                                    ninputs,
+                                    &field_maps,
+                                    &field_prescribed,
+                                    &input_offsets,
+                                    state,
+                                    &mut coefficients[..ninputs * cd.ndofs],
+                                    &mut field_values[..ninputs * cd.npts],
+                                    &mut field_grads[..ninputs * cd.npts],
+                                    cell,
+                                );
+                                let ctx = self.tensor_ctx(time, cell);
+                                assemble_tensor_residual_1d(
+                                    kernel,
+                                    &ctx,
+                                    &state_cell,
+                                    &mut local[..cell_size],
+                                );
                                 // SAFETY: same-color cells are row-disjoint.
                                 unsafe {
                                     self.restriction.scatter_add_column(
                                         cell,
                                         &selection.outputs,
-                                        &lane.cell_local,
+                                        &local[..cell_size],
                                         out,
                                     )
                                 };
                             }
-                        },
-                    );
+                            return;
+                        }
+                        // batched group: lane-contiguous gather, lane tensor ops
+                        self.restriction.gather_state_batch(
+                            chunk,
+                            &selection.inputs,
+                            &input_offsets,
+                            state,
+                            &mut lane.packed_coeffs,
+                            w,
+                        );
+                        interpolate_batch_1d(
+                            cd,
+                            ninputs,
+                            &lane.packed_coeffs,
+                            &mut lane.lane_values,
+                            &mut lane.lane_grads,
+                            chunk,
+                            w,
+                        );
+                        // lane extraction for scalar-fallback physics
+                        extract_lanes(
+                            &lane.lane_values,
+                            &lane.lane_grads,
+                            1,
+                            ninputs,
+                            cd.npts,
+                            w,
+                            w,
+                            &mut lane.scalar_values,
+                            &mut lane.scalar_grads,
+                        );
+                        let ctxs: Vec<TensorCtx> =
+                            chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
+                        let states: Vec<CellState> = (0..w)
+                            .map(|l| CellState {
+                                nfields: ninputs,
+                                npts: cd.npts,
+                                gdim: 1,
+                                values: &lane.scalar_values
+                                    [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                grads: &lane.scalar_grads
+                                    [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                field_indices: &[],
+                            })
+                            .collect();
+                        let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
+                        let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
+                        let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
+                        for eq in 0..noutputs {
+                            for q in 0..cd.npts {
+                                kernel.tensor_residual_batch(
+                                    &ctxs,
+                                    &states,
+                                    eq,
+                                    q,
+                                    &mut t0[..w],
+                                    &mut t1x[..w],
+                                    &mut t1y[..w],
+                                );
+                                for l in 0..w {
+                                    lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
+                                    lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
+                                }
+                            }
+                        }
+                        lane.packed_out.fill(0.0);
+                        integrate_batch_1d(
+                            cd,
+                            noutputs,
+                            &lane.flux0,
+                            &lane.flux1x,
+                            &mut lane.packed_out,
+                            chunk,
+                            w,
+                        );
+                        for (l, &cell) in chunk.iter().enumerate() {
+                            for o in 0..local_stride {
+                                lane.cell_local[o] = lane.packed_out[o * w + l];
+                            }
+                            // SAFETY: same-color cells are row-disjoint.
+                            unsafe {
+                                self.restriction.scatter_add_column(
+                                    cell,
+                                    &selection.outputs,
+                                    &lane.cell_local,
+                                    out,
+                                )
+                            };
+                        }
+                    },
+                );
             }
         }
         residual
@@ -416,236 +407,232 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
                 outs.push(unsafe { DisjointOut::new(column_actions) });
             }
             for color_cells in self.restriction.cell_colors() {
-                color_cells
-                    .par_chunks(SIMD_CELL_WIDTH)
-                    .for_each_init(
-                        || {
-                            (
-                                vec![0.0; input_size],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; ninputs * cd.npts],
-                                vec![0.0; input_size.max(output_size)],
-                                vec![0.0; output_size],
-                                TensorLaneScratch::new(
-                                    ninputs,
-                                    noutputs,
-                                    cd.ndofs,
-                                    cd.npts,
+                color_cells.par_chunks(SIMD_CELL_WIDTH).for_each_init(
+                    || {
+                        (
+                            vec![0.0; input_size],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; ninputs * cd.npts],
+                            vec![0.0; input_size.max(output_size)],
+                            vec![0.0; output_size],
+                            TensorLaneScratch::new(ninputs, noutputs, cd.ndofs, cd.npts, 1),
+                            TensorLaneScratch::new(ninputs, noutputs, cd.ndofs, cd.npts, 1),
+                        )
+                    },
+                    |(
+                        tail_state_coeffs,
+                        tail_state_values,
+                        tail_state_grads,
+                        tail_dir_values,
+                        tail_dir_grads,
+                        tail_dir,
+                        tail_action,
+                        state_lane,
+                        dir_lane,
+                    ),
+                     chunk: &[usize]| {
+                        let w = SIMD_CELL_WIDTH;
+                        let uniform = chunk.len() == w
+                            && chunk
+                                .iter()
+                                .all(|&cell| self.cell_reduced_dofs[0][cell].len() == cd.ndofs);
+                        if !uniform {
+                            for &cell in chunk {
+                                let (field_maps, _) =
+                                    self.restriction.maps_for(cell, &selection.inputs);
+                                let ndofs = field_maps[0].len();
+                                let input_cell_size = ninputs * ndofs;
+                                let output_cell_size = noutputs * ndofs;
+                                self.restriction.gather_state(
+                                    cell,
+                                    &selection.inputs,
+                                    &input_offsets,
+                                    state,
+                                    &mut tail_state_coeffs[..input_cell_size],
+                                );
+                                let state_cell = interpolate_tensor_cell_coefficients(
+                                    cd,
                                     1,
-                                ),
-                                TensorLaneScratch::new(
                                     ninputs,
-                                    noutputs,
-                                    cd.ndofs,
-                                    cd.npts,
-                                    1,
-                                ),
-                            )
-                        },
-                        |(tail_state_coeffs, tail_state_values, tail_state_grads, tail_dir_values, tail_dir_grads, tail_dir, tail_action, state_lane, dir_lane),
-                         chunk: &[usize]| {
-                            let w = SIMD_CELL_WIDTH;
-                            let uniform = chunk.len() == w
-                                && chunk.iter().all(|&cell| {
-                                    self.cell_reduced_dofs[0][cell].len() == cd.ndofs
-                                });
-                            if !uniform {
-                                for &cell in chunk {
-                                    let (field_maps, _) =
-                                        self.restriction.maps_for(cell, &selection.inputs);
-                                    let ndofs = field_maps[0].len();
-                                    let input_cell_size = ninputs * ndofs;
-                                    let output_cell_size = noutputs * ndofs;
-                                    self.restriction.gather_state(
+                                    &tail_state_coeffs[..input_cell_size],
+                                    &mut tail_state_values[..ninputs * cd.npts],
+                                    &mut tail_state_grads[..ninputs * cd.npts],
+                                    cell,
+                                );
+                                let ctx = self.tensor_ctx(time, cell);
+                                for (column, &column_out) in outs.iter().enumerate() {
+                                    self.restriction.gather_direction_column(
                                         cell,
                                         &selection.inputs,
                                         &input_offsets,
-                                        state,
-                                        &mut tail_state_coeffs[..input_cell_size],
+                                        direction,
+                                        column,
+                                        &mut tail_dir[..input_cell_size],
                                     );
-                                    let state_cell = interpolate_tensor_cell_coefficients(
+                                    let direction_cell = interpolate_tensor_cell_coefficients(
                                         cd,
                                         1,
                                         ninputs,
-                                        &tail_state_coeffs[..input_cell_size],
-                                        &mut tail_state_values[..ninputs * cd.npts],
-                                        &mut tail_state_grads[..ninputs * cd.npts],
+                                        &tail_dir[..input_cell_size],
+                                        &mut tail_dir_values[..ninputs * cd.npts],
+                                        &mut tail_dir_grads[..ninputs * cd.npts],
                                         cell,
                                     );
-                                    let ctx = self.tensor_ctx(time, cell);
-                                    for (column, &column_out) in outs.iter().enumerate() {
-                                        self.restriction.gather_direction_column(
-                                            cell,
-                                            &selection.inputs,
-                                            &input_offsets,
-                                            direction,
-                                            column,
-                                            &mut tail_dir[..input_cell_size],
-                                        );
-                                        let direction_cell = interpolate_tensor_cell_coefficients(
-                                            cd,
-                                            1,
-                                            ninputs,
-                                            &tail_dir[..input_cell_size],
-                                            &mut tail_dir_values[..ninputs * cd.npts],
-                                            &mut tail_dir_grads[..ninputs * cd.npts],
-                                            cell,
-                                        );
-                                        apply_tensor_jacobian_1d(
-                                            kernel,
-                                            &ctx,
-                                            &state_cell,
-                                            &direction_cell,
-                                            &mut tail_action[..output_cell_size],
-                                        );
-                                        // SAFETY: same-color cells are row-disjoint.
-                                        unsafe {
-                                            self.restriction.scatter_add_column(
-                                                cell,
-                                                &selection.outputs,
-                                                &tail_action[..output_cell_size],
-                                                column_out,
-                                            )
-                                        };
-                                    }
-                                }
-                                return;
-                            }
-                            // batched state interpolation (once per group)
-                            self.restriction.gather_state_batch(
-                                chunk,
-                                &selection.inputs,
-                                &input_offsets,
-                                state,
-                                &mut state_lane.packed_coeffs,
-                                w,
-                            );
-                            interpolate_batch_1d(
-                                cd,
-                                ninputs,
-                                &state_lane.packed_coeffs,
-                                &mut state_lane.lane_values,
-                                &mut state_lane.lane_grads,
-                                chunk,
-                                w,
-                            );
-                            extract_lanes(
-                                &state_lane.lane_values,
-                                &state_lane.lane_grads,
-                                1,
-                                ninputs,
-                                cd.npts,
-                                w,
-                                w,
-                                &mut state_lane.scalar_values,
-                                &mut state_lane.scalar_grads,
-                            );
-                            let ctxs: Vec<TensorCtx> =
-                                chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
-                            let states: Vec<CellState> = (0..w)
-                                .map(|l| CellState {
-                                    nfields: ninputs,
-                                    npts: cd.npts,
-                                    gdim: 1,
-                                    values: &state_lane.scalar_values
-                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                    grads: &state_lane.scalar_grads
-                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                    field_indices: &[],
-                                })
-                                .collect();
-                            let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
-                            let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
-                            let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
-                            for (column, &column_out) in outs.iter().enumerate() {
-                                self.restriction.gather_direction_batch(
-                                    chunk,
-                                    &selection.inputs,
-                                    &input_offsets,
-                                    direction,
-                                    column,
-                                    &mut dir_lane.packed_coeffs,
-                                    w,
-                                );
-                                interpolate_batch_1d(
-                                    cd,
-                                    ninputs,
-                                    &dir_lane.packed_coeffs,
-                                    &mut dir_lane.lane_values,
-                                    &mut dir_lane.lane_grads,
-                                    chunk,
-                                    w,
-                                );
-                                extract_lanes(
-                                    &dir_lane.lane_values,
-                                    &dir_lane.lane_grads,
-                                    1,
-                                    ninputs,
-                                    cd.npts,
-                                    w,
-                                    w,
-                                    &mut dir_lane.scalar_values,
-                                    &mut dir_lane.scalar_grads,
-                                );
-                                let dirs: Vec<CellState> = (0..w)
-                                    .map(|l| CellState {
-                                        nfields: ninputs,
-                                        npts: cd.npts,
-                                        gdim: 1,
-                                        values: &dir_lane.scalar_values
-                                            [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                        grads: &dir_lane.scalar_grads
-                                            [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
-                                        field_indices: &[],
-                                    })
-                                    .collect();
-                                for eq in 0..noutputs {
-                                    for q in 0..cd.npts {
-                                        kernel.tensor_jacobian_action_batch(
-                                            &ctxs,
-                                            &states,
-                                            &dirs,
-                                            eq,
-                                            q,
-                                            &mut t0[..w],
-                                            &mut t1x[..w],
-                                            &mut t1y[..w],
-                                        );
-                                        for l in 0..w {
-                                            dir_lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
-                                            dir_lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
-                                        }
-                                    }
-                                }
-                                dir_lane.packed_out.fill(0.0);
-                                integrate_batch_1d(
-                                    cd,
-                                    noutputs,
-                                    &dir_lane.flux0,
-                                    &dir_lane.flux1x,
-                                    &mut dir_lane.packed_out,
-                                    chunk,
-                                    w,
-                                );
-                                for (l, &cell) in chunk.iter().enumerate() {
-                                    for o in 0..output_size {
-                                        dir_lane.cell_local[o] = dir_lane.packed_out[o * w + l];
-                                    }
+                                    apply_tensor_jacobian_1d(
+                                        kernel,
+                                        &ctx,
+                                        &state_cell,
+                                        &direction_cell,
+                                        &mut tail_action[..output_cell_size],
+                                    );
                                     // SAFETY: same-color cells are row-disjoint.
                                     unsafe {
                                         self.restriction.scatter_add_column(
                                             cell,
                                             &selection.outputs,
-                                            &dir_lane.cell_local,
+                                            &tail_action[..output_cell_size],
                                             column_out,
                                         )
                                     };
                                 }
                             }
-                        },
-                    );
+                            return;
+                        }
+                        // batched state interpolation (once per group)
+                        self.restriction.gather_state_batch(
+                            chunk,
+                            &selection.inputs,
+                            &input_offsets,
+                            state,
+                            &mut state_lane.packed_coeffs,
+                            w,
+                        );
+                        interpolate_batch_1d(
+                            cd,
+                            ninputs,
+                            &state_lane.packed_coeffs,
+                            &mut state_lane.lane_values,
+                            &mut state_lane.lane_grads,
+                            chunk,
+                            w,
+                        );
+                        extract_lanes(
+                            &state_lane.lane_values,
+                            &state_lane.lane_grads,
+                            1,
+                            ninputs,
+                            cd.npts,
+                            w,
+                            w,
+                            &mut state_lane.scalar_values,
+                            &mut state_lane.scalar_grads,
+                        );
+                        let ctxs: Vec<TensorCtx> =
+                            chunk.iter().map(|&c| self.tensor_ctx(time, c)).collect();
+                        let states: Vec<CellState> = (0..w)
+                            .map(|l| CellState {
+                                nfields: ninputs,
+                                npts: cd.npts,
+                                gdim: 1,
+                                values: &state_lane.scalar_values
+                                    [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                grads: &state_lane.scalar_grads
+                                    [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                field_indices: &[],
+                            })
+                            .collect();
+                        let mut t0 = [0.0f64; SIMD_CELL_WIDTH];
+                        let mut t1x = [0.0f64; SIMD_CELL_WIDTH];
+                        let mut t1y = [0.0f64; SIMD_CELL_WIDTH];
+                        for (column, &column_out) in outs.iter().enumerate() {
+                            self.restriction.gather_direction_batch(
+                                chunk,
+                                &selection.inputs,
+                                &input_offsets,
+                                direction,
+                                column,
+                                &mut dir_lane.packed_coeffs,
+                                w,
+                            );
+                            interpolate_batch_1d(
+                                cd,
+                                ninputs,
+                                &dir_lane.packed_coeffs,
+                                &mut dir_lane.lane_values,
+                                &mut dir_lane.lane_grads,
+                                chunk,
+                                w,
+                            );
+                            extract_lanes(
+                                &dir_lane.lane_values,
+                                &dir_lane.lane_grads,
+                                1,
+                                ninputs,
+                                cd.npts,
+                                w,
+                                w,
+                                &mut dir_lane.scalar_values,
+                                &mut dir_lane.scalar_grads,
+                            );
+                            let dirs: Vec<CellState> = (0..w)
+                                .map(|l| CellState {
+                                    nfields: ninputs,
+                                    npts: cd.npts,
+                                    gdim: 1,
+                                    values: &dir_lane.scalar_values
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    grads: &dir_lane.scalar_grads
+                                        [l * ninputs * cd.npts..(l + 1) * ninputs * cd.npts],
+                                    field_indices: &[],
+                                })
+                                .collect();
+                            for eq in 0..noutputs {
+                                for q in 0..cd.npts {
+                                    kernel.tensor_jacobian_action_batch(
+                                        &ctxs,
+                                        &states,
+                                        &dirs,
+                                        eq,
+                                        q,
+                                        &mut t0[..w],
+                                        &mut t1x[..w],
+                                        &mut t1y[..w],
+                                    );
+                                    for l in 0..w {
+                                        dir_lane.flux0[(eq * cd.npts + q) * w + l] = t0[l];
+                                        dir_lane.flux1x[(eq * cd.npts + q) * w + l] = t1x[l];
+                                    }
+                                }
+                            }
+                            dir_lane.packed_out.fill(0.0);
+                            integrate_batch_1d(
+                                cd,
+                                noutputs,
+                                &dir_lane.flux0,
+                                &dir_lane.flux1x,
+                                &mut dir_lane.packed_out,
+                                chunk,
+                                w,
+                            );
+                            for (l, &cell) in chunk.iter().enumerate() {
+                                for o in 0..output_size {
+                                    dir_lane.cell_local[o] = dir_lane.packed_out[o * w + l];
+                                }
+                                // SAFETY: same-color cells are row-disjoint.
+                                unsafe {
+                                    self.restriction.scatter_add_column(
+                                        cell,
+                                        &selection.outputs,
+                                        &dir_lane.cell_local,
+                                        column_out,
+                                    )
+                                };
+                            }
+                        }
+                    },
+                );
             }
         }
         for column in 0..ncols {

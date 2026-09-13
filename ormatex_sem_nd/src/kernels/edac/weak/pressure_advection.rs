@@ -5,7 +5,9 @@
 //! [`TensorKernelEdacPressureAdvection2D`](crate::kernels::edac::tensor::pressure_advection::TensorKernelEdacPressureAdvection2D).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names, velocity};
+use crate::kernels::edac::config::{
+    check_weak_cell, fluid_field_names, velocity, EdacNavierStokes2DConfig,
+};
 
 /// Pressure advection `(u.grad)p` for `p` (owns equation 2).
 pub struct KernelEdacPressureAdvection2D {
@@ -77,4 +79,3 @@ impl ResidualKernel for KernelEdacPressureAdvection2D {
         pressure_advection * ctx.test(test_i, 0).v(q)
     }
 }
-

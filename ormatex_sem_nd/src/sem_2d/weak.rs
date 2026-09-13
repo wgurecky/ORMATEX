@@ -1,18 +1,16 @@
 //! Weak-form (`ResidualKernel`) residual/Jacobian paths (2D).
 use crate::common::{
-    apply_quad_state_boundary_terms_cached,
-    assemble_quad_state_boundary_jacobian, assemble_quad_state_boundary_residual_cached, push_rectangular_local_matrix_triplets, StateBoundaryContributions, rayon_cell_chunk_size,
+    apply_quad_state_boundary_terms_cached, assemble_quad_state_boundary_jacobian,
+    assemble_quad_state_boundary_residual_cached, push_rectangular_local_matrix_triplets,
+    rayon_cell_chunk_size, StateBoundaryContributions,
 };
-use crate::kernels::common::{
-    ResidualKernel, StateBoundaryTerms,
-};
+use crate::kernels::common::{ResidualKernel, StateBoundaryTerms};
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use rayon::prelude::*;
-
 
 use super::problem::SEM2DProblem;
 use crate::sem_traits::WeakResidualOps;
@@ -273,14 +271,19 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
                             &basis_grads[..ndofs * gdim * cd.npts],
                         );
                         kernel.assemble_local_residual(&ctx, &state_cell, &mut local[..cell_size]);
-                        batch_actions[cell_offset * local_stride
-                            ..cell_offset * local_stride + cell_size]
+                        batch_actions
+                            [cell_offset * local_stride..cell_offset * local_stride + cell_size]
                             .copy_from_slice(&local[..cell_size]);
                     }
                 },
             );
-        self.restriction
-            .transpose_reduce(&actions, local_stride, local_stride, 1, &selection.outputs)
+        self.restriction.transpose_reduce(
+            &actions,
+            local_stride,
+            local_stride,
+            1,
+            &selection.outputs,
+        )
     }
 
     fn assemble_residual_jacobian<K: ResidualKernel + Sync>(
@@ -540,5 +543,4 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
             }
         }
     }
-
 }

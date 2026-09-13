@@ -15,14 +15,14 @@
 
 use crate::common::{CellState, TensorCtx};
 
-use crate::kernels::common::TensorResidualKernel;
-use crate::kernels::edac::config::{fluid_field_names, EdacNavierStokes2DConfig};
 use super::momentum_convection_split::TensorKernelEdacMomentumConvectionSplit2D;
 use super::pressure_advection_split::TensorKernelEdacPressureAdvectionSplit2D;
 use super::pressure_diffusion::TensorKernelEdacPressureDiffusion2D;
 use super::pressure_divergence::TensorKernelEdacPressureDivergence2D;
 use super::pressure_gradient::TensorKernelEdacPressureGradient2D;
 use super::viscous_stress::TensorKernelEdacViscousStress2D;
+use crate::kernels::common::TensorResidualKernel;
+use crate::kernels::edac::config::{fluid_field_names, EdacNavierStokes2DConfig};
 
 /// Fused split-form EDAC Navier-Stokes tensor kernel for `[u, v, p]`
 /// (owns all equations; delegates to the part kernels).

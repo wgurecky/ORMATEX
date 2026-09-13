@@ -8,7 +8,7 @@
 //! [`KernelEdacNavierStokes2D`](crate::kernels::edac::weak::navier_stokes::KernelEdacNavierStokes2D).
 use crate::common::{CellState, TensorCtx};
 use crate::kernels::common::TensorResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, fluid_field_names, velocity};
+use crate::kernels::edac::config::{fluid_field_names, velocity, EdacNavierStokes2DConfig};
 use crate::kernels::edac::smagorinsky_lilly::SmagorinskyLilly2D;
 
 /// Tensor fused EDAC Navier-Stokes kernel (sum-factorized counterpart, owns all equations).
@@ -107,8 +107,12 @@ impl TensorResidualKernel<2> for TensorKernelEdacNavierStokes2D {
                     + velocity[0] * direction.grad(equation, q, 0)
                     + velocity[1] * direction.grad(equation, q, 1)
                     + direction.grad(2, q, equation) / self.rho,
-                self.config().stress_tensor_row_directional_derivative(ctx, state, direction, q, equation)[0],
-                self.config().stress_tensor_row_directional_derivative(ctx, state, direction, q, equation)[1],
+                self.config()
+                    .stress_tensor_row_directional_derivative(ctx, state, direction, q, equation)
+                    [0],
+                self.config()
+                    .stress_tensor_row_directional_derivative(ctx, state, direction, q, equation)
+                    [1],
             ],
             2 => {
                 let coefficient = self.config().pressure_diffusivity_tensor(ctx);

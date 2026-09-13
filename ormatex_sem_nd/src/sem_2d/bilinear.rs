@@ -1,9 +1,8 @@
 //! State-independent bilinear/linear paths (`BilinearForm`/`LinearForm`, 2D).
 use crate::common::{
-    add_dirichlet_rhs_correction, assemble_lumped_mass, assemble_quad_boundaries, interpolate_tensor_cell_coefficients,
-    push_local_matrix_triplets, scatter_local_vector,
-    BoundaryContributions, BoundaryFacet,
-    FieldDofLayout, rayon_cell_chunk_size,
+    add_dirichlet_rhs_correction, assemble_lumped_mass, assemble_quad_boundaries,
+    interpolate_tensor_cell_coefficients, push_local_matrix_triplets, rayon_cell_chunk_size,
+    scatter_local_vector, BoundaryContributions, BoundaryFacet, FieldDofLayout,
 };
 use crate::kernels::common::{
     apply_tensor_bilinear_column, BilinearForm, BoundaryIntegrator, LinearForm,
@@ -13,7 +12,6 @@ use faer::sparse::{SparseColMat, Triplet};
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 use rayon::prelude::*;
-
 
 use super::problem::SEM2DProblem;
 
@@ -216,8 +214,8 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     }
 }
 
-impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
-    crate::sem_traits::BilinearOps for SEM2DProblem<M>
+impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync> crate::sem_traits::BilinearOps
+    for SEM2DProblem<M>
 {
     fn assemble_bilinear<K: BilinearForm + Sync>(
         &self,
@@ -340,12 +338,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
     }
 
     /// Assemble a linear RHS and apply the nonzero Dirichlet correction.
-    fn assemble_linear_with_dirichlet<B, L>(
-        &self,
-        time: f64,
-        bilinear: &B,
-        linear: &L,
-    ) -> Vec<f64>
+    fn assemble_linear_with_dirichlet<B, L>(&self, time: f64, bilinear: &B, linear: &L) -> Vec<f64>
     where
         B: BilinearForm,
         L: LinearForm,
@@ -432,5 +425,4 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync>
             nfields,
         )
     }
-
 }

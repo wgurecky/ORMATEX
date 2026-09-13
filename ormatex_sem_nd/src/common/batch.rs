@@ -92,7 +92,8 @@ impl WithSimd for InterpolateBatch1d<'_> {
             // values[q][lane] = coeff[q_to_local[q]][lane]
             for q in 0..npts {
                 let local = tensor.q_to_local[q];
-                let src = &self.coeffs[(f * self.cell_data.ndofs + local) * w..(f * self.cell_data.ndofs + local) * w + self.nlanes];
+                let src = &self.coeffs[(f * self.cell_data.ndofs + local) * w
+                    ..(f * self.cell_data.ndofs + local) * w + self.nlanes];
                 let dst = &mut self.values[(f * npts + q) * w..(f * npts + q) * w + self.nlanes];
                 dst[..self.nlanes].copy_from_slice(&src[..self.nlanes]);
             }
@@ -177,13 +178,17 @@ impl WithSimd for InterpolateBatch2d<'_> {
         for f in 0..self.nfields {
             for q in 0..npts {
                 let local = tensor.q_to_local[q];
-                self.values[(f * npts + q) * w..(f * npts + q) * w + self.nlanes]
-                    .copy_from_slice(&self.coeffs[(f * self.cell_data.ndofs + local) * w..(f * self.cell_data.ndofs + local) * w + self.nlanes]);
+                self.values[(f * npts + q) * w..(f * npts + q) * w + self.nlanes].copy_from_slice(
+                    &self.coeffs[(f * self.cell_data.ndofs + local) * w
+                        ..(f * self.cell_data.ndofs + local) * w + self.nlanes],
+                );
             }
             // Reference grads via axpy over lanes; GLL rows are dense.
             for q in 0..npts {
                 self.grads[(f * 2 * npts + q) * w..(f * 2 * npts + q) * w + self.nlanes].fill(0.0);
-                self.grads[((f * 2 + 1) * npts + q) * w..((f * 2 + 1) * npts + q) * w + self.nlanes].fill(0.0);
+                self.grads
+                    [((f * 2 + 1) * npts + q) * w..((f * 2 + 1) * npts + q) * w + self.nlanes]
+                    .fill(0.0);
             }
             for j in 0..n1d {
                 for i in 0..n1d {
@@ -192,14 +197,16 @@ impl WithSimd for InterpolateBatch2d<'_> {
                     for a in 0..n1d {
                         axpy_lanes(
                             simd,
-                            &mut self.grads[(f * 2 * npts + q) * w..(f * 2 * npts + q) * w + self.nlanes],
+                            &mut self.grads
+                                [(f * 2 * npts + q) * w..(f * 2 * npts + q) * w + self.nlanes],
                             tensor.differentiation[i * n1d + a],
                             &self.values[(f * npts + j * n1d + a) * w
                                 ..(f * npts + j * n1d + a) * w + self.nlanes],
                         );
                         axpy_lanes(
                             simd,
-                            &mut self.grads[((f * 2 + 1) * npts + q) * w..((f * 2 + 1) * npts + q) * w + self.nlanes],
+                            &mut self.grads[((f * 2 + 1) * npts + q) * w
+                                ..((f * 2 + 1) * npts + q) * w + self.nlanes],
                             tensor.differentiation[j * n1d + a],
                             &self.values[(f * npts + a * n1d + i) * w
                                 ..(f * npts + a * n1d + i) * w + self.nlanes],
@@ -212,8 +219,8 @@ impl WithSimd for InterpolateBatch2d<'_> {
                 for lane in 0..self.nlanes {
                     let rx = self.grads[(f * 2 * npts + q) * w + lane];
                     let ry = self.grads[((f * 2 + 1) * npts + q) * w + lane];
-                    let j = &self.cell_data.jinv_cache
-                        [(self.cell_indices[lane] * npts + q) * 4..(self.cell_indices[lane] * npts + q + 1) * 4];
+                    let j = &self.cell_data.jinv_cache[(self.cell_indices[lane] * npts + q) * 4
+                        ..(self.cell_indices[lane] * npts + q + 1) * 4];
                     self.grads[(f * 2 * npts + q) * w + lane] = j[0] * rx + j[2] * ry;
                     self.grads[((f * 2 + 1) * npts + q) * w + lane] = j[1] * rx + j[3] * ry;
                 }
@@ -266,7 +273,11 @@ impl WithSimd for IntegrateBatch1d<'_> {
     #[inline(always)]
     fn with_simd<S: Simd>(self, simd: S) {
         let w = SIMD_CELL_WIDTH;
-        let tensor = self.cell_data.tensor.as_ref().expect("tensor batch needs tensor");
+        let tensor = self
+            .cell_data
+            .tensor
+            .as_ref()
+            .expect("tensor batch needs tensor");
         let n1d = tensor.n1d;
         let npts = self.cell_data.npts;
         for eq in 0..self.noutputs {
@@ -285,7 +296,8 @@ impl WithSimd for IntegrateBatch1d<'_> {
                     let test = tensor.q_to_local[a];
                     axpy_lanes(
                         simd,
-                        &mut self.out[(eq * self.cell_data.ndofs + test) * w..(eq * self.cell_data.ndofs + test) * w + self.nlanes],
+                        &mut self.out[(eq * self.cell_data.ndofs + test) * w
+                            ..(eq * self.cell_data.ndofs + test) * w + self.nlanes],
                         tensor.differentiation[q * n1d + a],
                         &ref_flux[..self.nlanes],
                     );
@@ -342,7 +354,11 @@ impl WithSimd for IntegrateBatch2d<'_> {
     #[inline(always)]
     fn with_simd<S: Simd>(self, simd: S) {
         let w = SIMD_CELL_WIDTH;
-        let tensor = self.cell_data.tensor.as_ref().expect("tensor batch needs tensor");
+        let tensor = self
+            .cell_data
+            .tensor
+            .as_ref()
+            .expect("tensor batch needs tensor");
         let n1d = tensor.n1d;
         let npts = self.cell_data.npts;
         for eq in 0..self.noutputs {
@@ -353,8 +369,9 @@ impl WithSimd for IntegrateBatch2d<'_> {
                     let mut ref_y = [0.0f64; SIMD_CELL_WIDTH];
                     for lane in 0..self.nlanes {
                         let wdet = self.cell_data.wdet_cache[self.cell_indices[lane] * npts + q];
-                        let jinv = &self.cell_data.jinv_cache
-                            [(self.cell_indices[lane] * npts + q) * 4..(self.cell_indices[lane] * npts + q + 1) * 4];
+                        let jinv = &self.cell_data.jinv_cache[(self.cell_indices[lane] * npts + q)
+                            * 4
+                            ..(self.cell_indices[lane] * npts + q + 1) * 4];
                         let f1x = self.fx[(eq * npts + q) * w + lane];
                         let f1y = self.fy[(eq * npts + q) * w + lane];
                         ref_x[lane] = wdet * (jinv[0] * f1x + jinv[1] * f1y);
@@ -367,14 +384,16 @@ impl WithSimd for IntegrateBatch2d<'_> {
                         let xl = tensor.q_to_local[j * n1d + a];
                         axpy_lanes(
                             simd,
-                            &mut self.out[(eq * self.cell_data.ndofs + xl) * w..(eq * self.cell_data.ndofs + xl) * w + self.nlanes],
+                            &mut self.out[(eq * self.cell_data.ndofs + xl) * w
+                                ..(eq * self.cell_data.ndofs + xl) * w + self.nlanes],
                             tensor.differentiation[i * n1d + a],
                             &ref_x[..self.nlanes],
                         );
                         let yl = tensor.q_to_local[a * n1d + i];
                         axpy_lanes(
                             simd,
-                            &mut self.out[(eq * self.cell_data.ndofs + yl) * w..(eq * self.cell_data.ndofs + yl) * w + self.nlanes],
+                            &mut self.out[(eq * self.cell_data.ndofs + yl) * w
+                                ..(eq * self.cell_data.ndofs + yl) * w + self.nlanes],
                             tensor.differentiation[j * n1d + a],
                             &ref_y[..self.nlanes],
                         );
@@ -442,7 +461,13 @@ impl TensorLaneScratch {
     /// `ndofs` locals / `npts` points, `noutputs` residual fields, `gdim`
     /// gradient directions, all at [`SIMD_CELL_WIDTH`] lanes. Reused across
     /// batches by one Rayon worker; never shared between threads.
-    pub(crate) fn new(ninputs: usize, noutputs: usize, ndofs: usize, npts: usize, gdim: usize) -> Self {
+    pub(crate) fn new(
+        ninputs: usize,
+        noutputs: usize,
+        ndofs: usize,
+        npts: usize,
+        gdim: usize,
+    ) -> Self {
         let w = SIMD_CELL_WIDTH;
         Self {
             packed_coeffs: vec![0.0; ninputs * ndofs * w],

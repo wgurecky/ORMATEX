@@ -9,7 +9,6 @@ use faer::sparse::SparseColMat;
 use ndelement::types::ReferenceCellType;
 use ndmesh::traits::Mesh;
 
-
 use super::problem::SEM2DProblem;
 use crate::sem_traits::WeakResidualOps;
 /// Weak-form residual operator coupling a problem, a `ResidualKernel`, and
@@ -40,16 +39,19 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: TensorResidualKernel<2> + Sync,
 {
-/// Retained (reduced) system size, including all fields.
+    /// Retained (reduced) system size, including all fields.
     pub fn system_size(&self) -> usize {
         self.problem.system_size()
     }
-/// Residual at the operator's time, including boundary terms when set.
+    /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         let layout = self.problem.field_layout();
-        let mut residual =
-            self.problem
-                .assemble_tensor_residual_with_layout(self.time, self.kernel, state, &layout);
+        let mut residual = self.problem.assemble_tensor_residual_with_layout(
+            self.time,
+            self.kernel,
+            state,
+            &layout,
+        );
         if let Some(terms) = self.terms {
             let boundary = self
                 .problem
@@ -60,12 +62,15 @@ where
         }
         residual
     }
-/// Assembled Jacobian at `state`, including boundary terms when set.
+    /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
         let layout = self.problem.field_layout();
-        let mut jacobian =
-            self.problem
-                .assemble_tensor_jacobian_with_layout(self.time, self.kernel, state, &layout);
+        let mut jacobian = self.problem.assemble_tensor_jacobian_with_layout(
+            self.time,
+            self.kernel,
+            state,
+            &layout,
+        );
         if let Some(terms) = self.terms {
             let boundary = self
                 .problem
@@ -74,7 +79,7 @@ where
         }
         jacobian
     }
-/// Matrix-free Jacobian action on one or more direction columns.
+    /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
         let layout = self.problem.field_layout();
@@ -93,7 +98,7 @@ where
         }
         out
     }
-/// Matrix-free Jacobian action into caller-provided storage.
+    /// Matrix-free Jacobian action into caller-provided storage.
     pub fn apply_jacobian_into(
         &self,
         state: MatRef<f64>,
@@ -115,13 +120,13 @@ where
                 .apply_state_tensor_boundary_jacobian(self.time, state, direction, terms);
         }
     }
-/// Return this operator at a new time.
+    /// Return this operator at a new time.
     pub fn at_time(mut self, time: f64) -> Self {
         self.time = time;
         self
     }
 
-/// Attach state-dependent natural-boundary terms.
+    /// Attach state-dependent natural-boundary terms.
     pub fn with_state_boundary<'terms>(
         self,
         terms: &'terms StateTensorBoundaryTerms<2>,
@@ -182,12 +187,12 @@ where
     T: TensorResidualKernel<2> + Sync,
     W: ResidualKernel + Sync,
 {
-/// Retained (reduced) system size, including all fields.
+    /// Retained (reduced) system size, including all fields.
     pub fn system_size(&self) -> usize {
         self.problem.system_size()
     }
 
-/// Residual at the operator's time, including boundary terms when set.
+    /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         let layout = self.problem.field_layout();
         let mut residual = self.problem.assemble_tensor_residual_with_layout(
@@ -221,12 +226,15 @@ where
         residual
     }
 
-/// Assembled Jacobian at `state`, including boundary terms when set.
+    /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
         let layout = self.problem.field_layout();
-        let tensor =
-            self.problem
-                .assemble_tensor_jacobian_with_layout(self.time, self.tensor_kernel, state, &layout);
+        let tensor = self.problem.assemble_tensor_jacobian_with_layout(
+            self.time,
+            self.tensor_kernel,
+            state,
+            &layout,
+        );
         let weak = self
             .problem
             .assemble_residual_jacobian(self.time, self.weak_kernel, state);
@@ -246,7 +254,7 @@ where
         jacobian
     }
 
-/// Matrix-free Jacobian action on one or more direction columns.
+    /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         let mut out = Mat::<f64>::zeros(self.system_size(), direction.ncols());
         let layout = self.problem.field_layout();
@@ -274,7 +282,7 @@ where
         out
     }
 
-/// Matrix-free Jacobian action into caller-provided storage.
+    /// Matrix-free Jacobian action into caller-provided storage.
     pub fn apply_jacobian_into(
         &self,
         state: MatRef<f64>,
@@ -305,13 +313,13 @@ where
         }
     }
 
-/// Return this operator at a new time.
+    /// Return this operator at a new time.
     pub fn at_time(mut self, time: f64) -> Self {
         self.time = time;
         self
     }
 
-/// Attach weak-form state-dependent boundary terms.
+    /// Attach weak-form state-dependent boundary terms.
     pub fn with_weak_state_boundary<'terms>(
         self,
         terms: &'terms StateBoundaryTerms,
@@ -326,7 +334,7 @@ where
         }
     }
 
-/// Attach tensor state-dependent boundary terms.
+    /// Attach tensor state-dependent boundary terms.
     pub fn with_tensor_state_boundary<'terms>(
         self,
         terms: &'terms StateTensorBoundaryTerms<2>,
@@ -392,7 +400,7 @@ where
     T: TensorResidualKernel<2> + Sync,
     W: ResidualKernel + Sync,
 {
-/// Retained (reduced) system size, including all fields.
+    /// Retained (reduced) system size, including all fields.
     pub fn system_size(&self) -> usize {
         match self {
             Self::Weak(operator) => operator.system_size(),
@@ -401,7 +409,7 @@ where
         }
     }
 
-/// Residual at the operator's time, including boundary terms when set.
+    /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         match self {
             Self::Weak(operator) => operator.residual(state),
@@ -410,7 +418,7 @@ where
         }
     }
 
-/// Assembled Jacobian at `state`, including boundary terms when set.
+    /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
         match self {
             Self::Weak(operator) => operator.assemble_jacobian(state),
@@ -419,7 +427,7 @@ where
         }
     }
 
-/// Matrix-free Jacobian action on one or more direction columns.
+    /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         match self {
             Self::Weak(operator) => operator.apply_jacobian(state, direction),
@@ -428,7 +436,7 @@ where
         }
     }
 
-/// Matrix-free Jacobian action into caller-provided storage.
+    /// Matrix-free Jacobian action into caller-provided storage.
     pub fn apply_jacobian_into(
         &self,
         state: MatRef<f64>,
@@ -444,7 +452,7 @@ where
         }
     }
 
-/// Return this operator at a new time.
+    /// Return this operator at a new time.
     pub fn at_time(self, time: f64) -> Self {
         match self {
             Self::Weak(operator) => Self::Weak(operator.at_time(time)),
@@ -491,12 +499,12 @@ where
     M: Mesh<EntityDescriptor = ReferenceCellType, T = f64> + Sync,
     K: ResidualKernel + Sync,
 {
-/// Retained (reduced) system size, including all fields.
+    /// Retained (reduced) system size, including all fields.
     pub fn system_size(&self) -> usize {
         self.problem.system_size()
     }
 
-/// Residual at the operator's time, including boundary terms when set.
+    /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         match &self.terms {
             Some(terms) => {
@@ -509,7 +517,7 @@ where
         }
     }
 
-/// Assembled Jacobian at `state`, including boundary terms when set.
+    /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
         match &self.terms {
             Some(terms) => {
@@ -522,7 +530,7 @@ where
         }
     }
 
-/// Matrix-free Jacobian action on one or more direction columns.
+    /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         match &self.terms {
             Some(terms) => self.problem.apply_complete_jacobian(
@@ -538,13 +546,13 @@ where
         }
     }
 
-/// Return this operator at a new time.
+    /// Return this operator at a new time.
     pub fn at_time(mut self, time: f64) -> Self {
         self.time = time;
         self
     }
 
-/// Attach state-dependent natural-boundary terms.
+    /// Attach state-dependent natural-boundary terms.
     pub fn with_state_boundary<'terms>(
         self,
         terms: &'terms StateBoundaryTerms,
@@ -594,7 +602,6 @@ where
         }
     }
 }
-
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
     /// Build a weak-form residual operator for `kernel`.

@@ -213,7 +213,8 @@ impl ElementRestriction {
         &self,
         cell: usize,
         fields: &[usize],
-    ) -> (Vec<&[Option<usize>]>, Vec<&[Option<f64>]>) {        let mut maps = Vec::with_capacity(fields.len());
+    ) -> (Vec<&[Option<usize>]>, Vec<&[Option<f64>]>) {
+        let mut maps = Vec::with_capacity(fields.len());
         let mut prescribed = Vec::with_capacity(fields.len());
         for &field in fields {
             let source = if self.maps.len() == 1 { 0 } else { field };
@@ -336,8 +337,8 @@ impl ElementRestriction {
             for local in 0..self.cell_size {
                 for (lane, &cell) in cells.iter().enumerate() {
                     let reduced = self.maps[source][cell][local];
-                    out[(field_pos * self.cell_size + local) * lane_width + lane] =
-                        reduced.map_or(0.0, |reduced| {
+                    out[(field_pos * self.cell_size + local) * lane_width + lane] = reduced
+                        .map_or(0.0, |reduced| {
                             direction[(offsets[field_pos] + reduced, column)]
                         });
                 }
@@ -452,9 +453,7 @@ mod tests {
             for cells in restriction.cell_colors() {
                 for &cell in cells {
                     // SAFETY: test scatters serially, hence trivially disjoint.
-                    unsafe {
-                        restriction.scatter_add_column(cell, &[0], &[1.0, 1.0], out)
-                    };
+                    unsafe { restriction.scatter_add_column(cell, &[0], &[1.0, 1.0], out) };
                 }
             }
         }

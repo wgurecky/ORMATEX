@@ -6,7 +6,7 @@
 //! [`TensorKernelEdacPressureDiffusion2D`](crate::kernels::edac::tensor::pressure_diffusion::TensorKernelEdacPressureDiffusion2D).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names};
+use crate::kernels::edac::config::{check_weak_cell, fluid_field_names, EdacNavierStokes2DConfig};
 
 /// Weak pressure diffusion `div(k grad(p))` for `p` (owns equation 2).
 pub struct KernelEdacPressureDiffusion2D {
@@ -67,4 +67,3 @@ impl ResidualKernel for KernelEdacPressureDiffusion2D {
         self.config.pressure_diffusivity(ctx) * pressure_gradient
     }
 }
-

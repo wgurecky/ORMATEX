@@ -6,7 +6,9 @@
 //! [`TensorKernelEdacMomentumConvection2D`](crate::kernels::edac::tensor::momentum_convection::TensorKernelEdacMomentumConvection2D).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names, velocity};
+use crate::kernels::edac::config::{
+    check_weak_cell, fluid_field_names, velocity, EdacNavierStokes2DConfig,
+};
 
 /// Momentum convection `(u.grad)u` for `u`/`v` (owns equations 0-1).
 pub struct KernelEdacMomentumConvection2D {
@@ -86,4 +88,3 @@ impl ResidualKernel for KernelEdacMomentumConvection2D {
         convection * test.v(q)
     }
 }
-

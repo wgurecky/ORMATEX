@@ -155,7 +155,11 @@ pub struct FrozenVelocity2D {
 
 impl FrozenVelocity2D {
     pub fn new(x: FrozenQuadratureField, y: FrozenQuadratureField) -> Self {
-        assert_eq!(x.npts(), y.npts(), "frozen velocity components need equal npts");
+        assert_eq!(
+            x.npts(),
+            y.npts(),
+            "frozen velocity components need equal npts"
+        );
         assert_eq!(
             x.cell_count(),
             y.cell_count(),

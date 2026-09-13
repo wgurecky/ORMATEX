@@ -1,5 +1,6 @@
 use faer::prelude::{Mat, MatRef};
-use faer::sparse::{SparseColMat, Triplet};use ndelement::{
+use faer::sparse::{SparseColMat, Triplet};
+use ndelement::{
     ciarlet::{LagrangeElementFamily, LagrangeVariant},
     traits::{ElementFamily, FiniteElement},
     types::{Continuity, ReferenceCellType},
@@ -1422,21 +1423,10 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
             .iter()
             .map(|&field| field_offsets[field])
             .collect();
-        let input_maps = maps_for_cell(
-            field_reduced_dofs,
-            &selection.inputs,
-            facet.cell_index,
-        );
-        let input_prescribed = maps_for_cell(
-            field_prescribed_values,
-            &selection.inputs,
-            facet.cell_index,
-        );
-        let output_maps = maps_for_cell(
-            field_reduced_dofs,
-            &selection.outputs,
-            facet.cell_index,
-        );
+        let input_maps = maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
+        let input_prescribed =
+            maps_for_cell(field_prescribed_values, &selection.inputs, facet.cell_index);
+        let output_maps = maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
         tensor_boundary_state_into(
             facet,
             ninputs,
@@ -1468,8 +1458,7 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
         };
         for equation in 0..noutputs {
             for q in 0..npts {
-                let flux =
-                    kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
+                let flux = kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
                 let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
                 for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
                     if let Some(reduced) = output_maps[equation][cell_i] {
@@ -1510,9 +1499,7 @@ fn tensor_boundary_residual_parallel(
                 |(state_values, state_grads), &cell| {
                     for &facet_index in &cache.cell_facets[cell] {
                         let facet = &cache.facets[facet_index];
-                        let Some(kernel) =
-                            terms.kernel_for(facet.facet.local_index)
-                        else {
+                        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
                             continue;
                         };
                         let selection = fields.resolve_selection(
@@ -1534,21 +1521,15 @@ fn tensor_boundary_residual_parallel(
                             .iter()
                             .map(|&field| field_offsets[field])
                             .collect();
-                        let input_maps = maps_for_cell(
-                            field_reduced_dofs,
-                            &selection.inputs,
-                            facet.cell_index,
-                        );
+                        let input_maps =
+                            maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
                         let input_prescribed = maps_for_cell(
                             field_prescribed_values,
                             &selection.inputs,
                             facet.cell_index,
                         );
-                        let output_maps = maps_for_cell(
-                            field_reduced_dofs,
-                            &selection.outputs,
-                            facet.cell_index,
-                        );
+                        let output_maps =
+                            maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
                         tensor_boundary_state_into(
                             facet,
                             ninputs,
@@ -1852,21 +1833,10 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
             .iter()
             .map(|&field| field_offsets[field])
             .collect();
-        let input_maps = maps_for_cell(
-            field_reduced_dofs,
-            &selection.inputs,
-            facet.cell_index,
-        );
-        let input_prescribed = maps_for_cell(
-            field_prescribed_values,
-            &selection.inputs,
-            facet.cell_index,
-        );
-        let output_maps = maps_for_cell(
-            field_reduced_dofs,
-            &selection.outputs,
-            facet.cell_index,
-        );
+        let input_maps = maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
+        let input_prescribed =
+            maps_for_cell(field_prescribed_values, &selection.inputs, facet.cell_index);
+        let output_maps = maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
         let include_gradients = kernel.tensor_requires_gradients();
         tensor_boundary_state_into(
             facet,
@@ -1983,9 +1953,7 @@ fn tensor_boundary_apply_parallel(
                 |(state_values, state_grads, direction_values, direction_grads), &cell| {
                     for &facet_index in &cache.cell_facets[cell] {
                         let facet = &cache.facets[facet_index];
-                        let Some(kernel) =
-                            terms.kernel_for(facet.facet.local_index)
-                        else {
+                        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
                             continue;
                         };
                         let selection = fields.resolve_selection(
@@ -2007,21 +1975,15 @@ fn tensor_boundary_apply_parallel(
                             .iter()
                             .map(|&field| field_offsets[field])
                             .collect();
-                        let input_maps = maps_for_cell(
-                            field_reduced_dofs,
-                            &selection.inputs,
-                            facet.cell_index,
-                        );
+                        let input_maps =
+                            maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
                         let input_prescribed = maps_for_cell(
                             field_prescribed_values,
                             &selection.inputs,
                             facet.cell_index,
                         );
-                        let output_maps = maps_for_cell(
-                            field_reduced_dofs,
-                            &selection.outputs,
-                            facet.cell_index,
-                        );
+                        let output_maps =
+                            maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
                         let include_gradients = kernel.tensor_requires_gradients();
                         tensor_boundary_state_into(
                             facet,
@@ -2082,10 +2044,8 @@ fn tensor_boundary_apply_parallel(
                                         equation,
                                         q,
                                     );
-                                    let weight =
-                                        cache.wts[q] * facet.jfacet_det[q] * action;
-                                    for (facet_i, &cell_i) in
-                                        facet.cell_indices.iter().enumerate()
+                                    let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate()
                                     {
                                         if let Some(reduced) = output_maps[equation][cell_i] {
                                             // SAFETY: same-color cells are row-disjoint;

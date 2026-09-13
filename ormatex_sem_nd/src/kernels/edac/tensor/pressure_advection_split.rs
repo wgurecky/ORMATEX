@@ -6,7 +6,7 @@
 //! [`KernelEdacPressureAdvectionSplit2D`](crate::kernels::edac::weak::pressure_advection_split::KernelEdacPressureAdvectionSplit2D).
 use crate::common::{CellState, TensorCtx};
 use crate::kernels::common::TensorResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, fluid_field_names, velocity};
+use crate::kernels::edac::config::{fluid_field_names, velocity, EdacNavierStokes2DConfig};
 
 /// Tensor split pressure-advection kernel (owns equation 2; needs split-flux boundary).
 pub struct TensorKernelEdacPressureAdvectionSplit2D {

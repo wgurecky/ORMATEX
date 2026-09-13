@@ -6,7 +6,7 @@
 //! [`TensorKernelEdacViscousStress2D`](crate::kernels::edac::tensor::viscous_stress::TensorKernelEdacViscousStress2D).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names};
+use crate::kernels::edac::config::{check_weak_cell, fluid_field_names, EdacNavierStokes2DConfig};
 
 /// Weak viscous stress `div(tau)` for `u`/`v` (owns equations 0-1).
 pub struct KernelEdacViscousStress2D {
@@ -73,4 +73,3 @@ impl ResidualKernel for KernelEdacViscousStress2D {
             .sum()
     }
 }
-

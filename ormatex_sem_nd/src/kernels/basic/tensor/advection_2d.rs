@@ -63,5 +63,4 @@ impl TensorResidualKernel<2> for TensorKernelAdvection2D {
                 * dv,
         ]
     }
-
 }

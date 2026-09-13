@@ -57,5 +57,4 @@ impl TensorResidualKernel<1> for TensorKernelDiffusion {
             0.0,
         ]
     }
-
 }

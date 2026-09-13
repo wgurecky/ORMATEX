@@ -15,12 +15,12 @@ pub use tensor::{
     TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
     TensorKernelAdvection2D, TensorKernelAdvectionOutflow2D, TensorKernelBoussinesq2D,
     TensorKernelConservationLaw1D, TensorKernelDiffusion, TensorKernelDiffusion2D,
-    TensorKernelEnergyAdvectionDiffusion2D, TensorKernelLinearReaction, TensorKernelMass,
-    TensorKernelVolumeSource,
+    TensorKernelEnergyAdvectionDiffusion1D, TensorKernelEnergyAdvectionDiffusion2D,
+    TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource,
 };
 pub use weak::{
     KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
-    KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D, KernelConservationLaw1D, KernelDiffusion,
-    KernelDiffusion2D, KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass,
-    KernelVolumeSource,
+    KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D,
+    KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D, KernelEnergyAdvectionDiffusion1D,
+    KernelEnergyAdvectionDiffusion2D, KernelLinearReaction, KernelMass, KernelVolumeSource,
 };

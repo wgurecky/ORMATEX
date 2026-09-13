@@ -35,7 +35,6 @@ impl TensorKernelEdacDongOutflow2D {
         self
     }
 
-
     pub(crate) fn as_weak(&self) -> KernelEdacDongOutflow2D {
         KernelEdacDongOutflow2D {
             rho: self.rho,

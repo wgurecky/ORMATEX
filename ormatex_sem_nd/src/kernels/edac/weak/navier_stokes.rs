@@ -8,7 +8,9 @@
 //! boundary (Dong or directional-do-nothing with split flux).
 use crate::common::{CellState, LocalCtx};
 use crate::kernels::common::ResidualKernel;
-use crate::kernels::edac::config::{EdacNavierStokes2DConfig, check_weak_cell, fluid_field_names, velocity};
+use crate::kernels::edac::config::{
+    check_weak_cell, fluid_field_names, velocity, EdacNavierStokes2DConfig,
+};
 use crate::kernels::edac::smagorinsky_lilly::SmagorinskyLilly2D;
 
 /// Fused conservative EDAC Navier-Stokes kernel: strong convection/pressure,
@@ -20,7 +22,6 @@ pub struct KernelEdacNavierStokes2D {
     pub pressure_diffusion_factor: f64,
     pub smagorinsky: SmagorinskyLilly2D,
 }
-
 
 impl KernelEdacNavierStokes2D {
     pub fn new(rho: f64, nu: f64, c0: f64, cs: f64) -> Self {
@@ -151,7 +152,9 @@ impl ResidualKernel for KernelEdacNavierStokes2D {
                 let pressure = (unknown == 2) as usize as f64 * trial.grad(q, i);
                 let viscous = (0..2)
                     .map(|j| {
-                        self.config().stress_jacobian(ctx, state, q, i, j, unknown, &trial) * test.grad(q, j)
+                        self.config()
+                            .stress_jacobian(ctx, state, q, i, j, unknown, &trial)
+                            * test.grad(q, j)
                     })
                     .sum::<f64>();
                 convection * test.v(q) + pressure * test.v(q) / self.rho + viscous

@@ -74,8 +74,15 @@ impl StateBoundaryIntegrator for KernelAdvectionOutflow1D {
         test_i: usize,
     ) -> f64 {
         assert_eq!(ctx.gdim, 1, "KernelAdvectionOutflow1D: 1D only (gdim==1)");
-        assert_eq!(ctx.ncomp, 1, "KernelAdvectionOutflow1D: scalar only (ncomp==1)");
-        assert_eq!(state.nfields, self.nfields(), "kernel/state field count mismatch");
+        assert_eq!(
+            ctx.ncomp, 1,
+            "KernelAdvectionOutflow1D: scalar only (ncomp==1)"
+        );
+        assert_eq!(
+            state.nfields,
+            self.nfields(),
+            "kernel/state field count mismatch"
+        );
         let normal_velocity = self.normal_velocity(ctx.normal);
         outflow_flux_1d(normal_velocity, state.value(equation, q)) * ctx.test(test_i, 0).v(q)
     }
@@ -90,7 +97,11 @@ impl StateBoundaryIntegrator for KernelAdvectionOutflow1D {
         test_i: usize,
         trial_i: usize,
     ) -> f64 {
-        assert_eq!(state.nfields, self.nfields(), "kernel/state field count mismatch");
+        assert_eq!(
+            state.nfields,
+            self.nfields(),
+            "kernel/state field count mismatch"
+        );
         if unknown != equation {
             return 0.0;
         }

@@ -54,5 +54,4 @@ impl TensorResidualKernel<2> for TensorKernelDiffusion2D {
             nu * direction.grad(0, q, 1) + dnu * du * state.grad(0, q, 1),
         ]
     }
-
 }

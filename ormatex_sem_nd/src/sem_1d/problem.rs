@@ -1,10 +1,9 @@
 //! Core `SEM1DProblem` type, construction, and cell helpers.
-use crate::common::{
-    cell_ctx, interpolate_cell_state, CellData, CellState, ElementRestriction,
-    FieldDofLayout, LocalCtx, ReducedDofMap, TensorCtx,
-    TensorProductData,
-};
 use crate::common::jacobian_pattern::JacobianPatternCache;
+use crate::common::{
+    cell_ctx, interpolate_cell_state, CellData, CellState, ElementRestriction, FieldDofLayout,
+    LocalCtx, ReducedDofMap, TensorCtx, TensorProductData,
+};
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
 use crate::mesh::{MeshMetadata, PhysicalRegion};
@@ -92,7 +91,6 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) metadata: MeshMetadata,
     pub(crate) jacobian_pattern_cache: JacobianPatternCache,
 }
-
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
     /// Build a 1D GLL spectral-element problem on an interval mesh.
@@ -727,7 +725,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             let reduced = &self.cell_reduced_dofs[map][cell];
             let prescribed = &self.cell_prescribed_values[map][cell];
             for (local, &r) in reduced.iter().enumerate() {
-                coeffs[local] = r.map_or(prescribed[local].unwrap_or(0.0), |rr| state[(offset + rr, 0)]);
+                coeffs[local] = r.map_or(prescribed[local].unwrap_or(0.0), |rr| {
+                    state[(offset + rr, 0)]
+                });
             }
             for q in 0..npts {
                 values[cell * npts + q] = coeffs[q_to_local[q]];

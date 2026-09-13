@@ -82,5 +82,4 @@ impl TensorResidualKernel<2> for TensorKernelEnergyAdvectionDiffusion2D {
             self.0.thermal_diffusivity * direction.grad(2, q, 1),
         ]
     }
-
 }

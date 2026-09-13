@@ -77,9 +77,11 @@ impl StateBoundaryIntegrator for KernelAdvectionOutflow2D {
         test_i: usize,
     ) -> f64 {
         assert_eq!(ctx.gdim, 2, "KernelAdvectionOutflow2D: 2D only (gdim==2)");
-        assert_eq!(ctx.ncomp, 1, "KernelAdvectionOutflow2D: scalar only (ncomp==1)");
-        let normal_velocity =
-            self.normal_velocity(ctx.facet.local_index, ctx.normal, q);
+        assert_eq!(
+            ctx.ncomp, 1,
+            "KernelAdvectionOutflow2D: scalar only (ncomp==1)"
+        );
+        let normal_velocity = self.normal_velocity(ctx.facet.local_index, ctx.normal, q);
         outflow_flux(normal_velocity, state.value(equation, q)) * ctx.test(test_i, 0).v(q)
     }
 
@@ -93,13 +95,15 @@ impl StateBoundaryIntegrator for KernelAdvectionOutflow2D {
         test_i: usize,
         trial_i: usize,
     ) -> f64 {
-        assert_eq!(state.nfields, self.nfields(), "kernel/state field count mismatch");
+        assert_eq!(
+            state.nfields,
+            self.nfields(),
+            "kernel/state field count mismatch"
+        );
         if unknown != equation {
             return 0.0;
         }
-        let normal_velocity =
-            self.normal_velocity(ctx.facet.local_index, ctx.normal, q);
-        outflow_flux_action(normal_velocity, ctx.trial(trial_i, 0).v(q))
-            * ctx.test(test_i, 0).v(q)
+        let normal_velocity = self.normal_velocity(ctx.facet.local_index, ctx.normal, q);
+        outflow_flux_action(normal_velocity, ctx.trial(trial_i, 0).v(q)) * ctx.test(test_i, 0).v(q)
     }
 }

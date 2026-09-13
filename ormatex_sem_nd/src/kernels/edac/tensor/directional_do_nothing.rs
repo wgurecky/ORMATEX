@@ -7,8 +7,10 @@
 //! with split-form volume kernels (default SplitBoundaryFlux elsewhere).
 use crate::common::{CellState, TensorFacetCtx};
 use crate::kernels::common::StateTensorBoundaryIntegrator;
-use crate::kernels::edac::weak::directional_do_nothing::{directional_field_names, directional_jacobian_action, directional_residual};
 use crate::kernels::edac::weak::directional_do_nothing::KernelEdacDirectionalDoNothing2D;
+use crate::kernels::edac::weak::directional_do_nothing::{
+    directional_field_names, directional_jacobian_action, directional_residual,
+};
 
 /// Tensor-product directional do-nothing boundary kernel for monolithic EDAC.
 pub struct TensorKernelEdacDirectionalDoNothing2D {
