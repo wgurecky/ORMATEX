@@ -5,7 +5,7 @@ use crate::common::{
     BoundaryContributions, BoundaryFacet,
     FieldDofLayout, rayon_cell_chunk_size,
 };
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     apply_tensor_bilinear_column, BilinearForm, BoundaryIntegrator, LinearForm,
 };
 use faer::sparse::{SparseColMat, Triplet};

@@ -7,7 +7,7 @@ use crate::common::batch::{
     TensorLaneScratch, extract_lanes, integrate_batch_1d, interpolate_batch_1d,
 };
 use crate::common::batch::SIMD_CELL_WIDTH;
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     apply_tensor_jacobian_1d, assemble_tensor_residual_1d, TensorResidualKernel,
 };
 use faer::prelude::*;

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::fields::FieldRegistry;
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryTerms,
 };
 use crate::mesh::{FacetMeta, MeshMetadata, PhysicalRegion};

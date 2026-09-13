@@ -10,7 +10,7 @@ use crate::common::batch::{
     TensorLaneScratch, extract_lanes, integrate_batch_2d, interpolate_batch_2d,
 };
 use crate::common::batch::SIMD_CELL_WIDTH;
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     apply_tensor_jacobian, assemble_tensor_residual, StateTensorBoundaryTerms,
     TensorResidualKernel,
 };

@@ -8,7 +8,7 @@ use faer::prelude::*;
 use faer::sparse::{SparseColMat, SparseColMatRef};
 use faer::Par;
 
-use crate::kernels::kernel_common::ResidualKernel;
+use crate::kernels::common::ResidualKernel;
 use crate::op::ParCsrJacobian;
 use crate::sem_traits::WeakResidualOps;
 use crate::simd;

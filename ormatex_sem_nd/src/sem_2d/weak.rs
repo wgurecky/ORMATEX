@@ -3,7 +3,7 @@ use crate::common::{
     apply_quad_state_boundary_terms_cached,
     assemble_quad_state_boundary_jacobian, assemble_quad_state_boundary_residual_cached, push_rectangular_local_matrix_triplets, StateBoundaryContributions, rayon_cell_chunk_size,
 };
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     ResidualKernel, StateBoundaryTerms,
 };
 use faer::prelude::*;

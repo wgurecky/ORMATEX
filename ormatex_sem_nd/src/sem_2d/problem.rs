@@ -6,7 +6,7 @@ use crate::common::{
     TensorCtx, TensorProductData,
 };
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
-use crate::kernels::kernel_common::ResidualKernel;
+use crate::kernels::common::ResidualKernel;
 use crate::mesh::MeshMetadata;
 use faer::prelude::*;
 

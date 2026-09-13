@@ -2,7 +2,7 @@
 use crate::common::{
     push_rectangular_local_matrix_triplets, CellState, FacetCtx, StateBoundaryContributions, rayon_cell_chunk_size,
 };
-use crate::kernels::kernel_common::{ResidualKernel, StateBoundaryTerms};
+use crate::kernels::common::{ResidualKernel, StateBoundaryTerms};
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 

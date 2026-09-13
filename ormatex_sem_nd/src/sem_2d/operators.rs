@@ -1,6 +1,6 @@
 //! Weak / tensor / mixed residual operators for 2D problems.
 use crate::jacobian::CompleteResidualOperator;
-use crate::kernels::kernel_common::{
+use crate::kernels::common::{
     ResidualKernel, StateBoundaryTerms, StateTensorBoundaryTerms, TensorResidualKernel,
 };
 use faer::prelude::*;
