@@ -6,7 +6,6 @@
 use super::traits::TensorResidualKernel;
 use crate::common::{CellState, TensorCtx};
 
-
 /// Statically dispatched additive composition of tensor residual kernels.
 ///
 /// Calling [`Self::with`] nests another concrete kernel in the type, so the
