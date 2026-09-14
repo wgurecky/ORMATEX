@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use faer::matrix_free::LinOp;
@@ -13,7 +10,7 @@ use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
-    CellState, FieldValues, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
+    CellState, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
     KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
     MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian, QuadMesh, ResidualKernel,
     SEM2DProblem, StateBoundaryTerms, StateTensorBoundaryTerms,
@@ -94,49 +91,54 @@ impl JacobianBackend {
     }
 }
 
-pub fn write_spatial_csv(path: impl AsRef<Path>, fields: [(&str, FieldValues<(f64, f64)>); 3]) {
-    let mut rows = Vec::new();
-    let mut row_indices = HashMap::new();
-    for (field, field_values) in fields {
-        let column = match field {
-            "u" => 2,
-            "v" => 3,
-            "p" => 4,
-            _ => panic!("unsupported Navier-Stokes field: {field}"),
-        };
-        assert_eq!(
-            field_values.positions.len(),
-            field_values.values.len(),
-            "field {field} positions and values have different lengths"
-        );
-        for (&(x, y), &value) in field_values.positions.iter().zip(&field_values.values) {
-            assert!(
-                x.is_finite() && y.is_finite() && value.is_finite(),
-                "non-finite {field} spatial output"
-            );
-            let key = (x.to_bits(), y.to_bits());
-            let index = if let Some(&index) = row_indices.get(&key) {
-                index
-            } else {
-                let index = rows.len();
-                row_indices.insert(key, index);
-                rows.push([x, y, f64::NAN, f64::NAN, f64::NAN]);
-                index
-            };
-            assert!(
-                rows[index][column].is_nan(),
-                "duplicate {field} value at ({x}, {y})"
-            );
-            rows[index][column] = value;
-        }
-    }
+/// Write one 2D solved state as standardized `x,y,field_0,...` CSV.
+pub fn write_solution_csv(
+    problem: &SEM2DProblem<QuadMesh>,
+    state: MatRef<'_, f64>,
+    path: impl AsRef<Path>,
+) {
+    ormatex_sem_nd::io::write_csv(path, &ormatex_sem_nd::io::export_2d(problem, state));
+}
 
-    let mut output = BufWriter::new(
-        File::create(path).expect("failed to create Navier-Stokes spatial output csv"),
-    );
-    writeln!(output, "x,y,u,v,p").unwrap();
-    for [x, y, u, v, p] in rows {
-        writeln!(output, "{x:.9},{y:.9},{u:.9e},{v:.9e},{p:.9e}").unwrap();
+/// Write the `.vtu` solution when `--vtk` was passed; no-op otherwise.
+/// Panics with a build hint when the `vtk` feature is off.
+pub fn maybe_write_vtk(
+    problem: &SEM2DProblem<QuadMesh>,
+    state: MatRef<'_, f64>,
+    default_vtu: &str,
+) {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(path) = ormatex_sem_nd::io::vtk_output_path(&args, default_vtu) else {
+        return;
+    };
+    #[cfg(feature = "vtk")]
+    {
+        ormatex_sem_nd::io::write_sem2d_vtu(problem, state, &path);
+        println!("vtk solution: {path}");
+    }
+    #[cfg(not(feature = "vtk"))]
+    {
+        let _ = (problem, state);
+        panic!("--vtk ({path}) requires building with `--features vtk`");
+    }
+}
+
+/// `--vtk` export for a pre-built export mesh (multi-problem outputs like the
+/// frozen-velocity species example); no-op without the flag.
+pub fn maybe_write_vtk_mesh(mesh: &ormatex_sem_nd::io::ExportMesh, default_vtu: &str) {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(path) = ormatex_sem_nd::io::vtk_output_path(&args, default_vtu) else {
+        return;
+    };
+    #[cfg(feature = "vtk")]
+    {
+        ormatex_sem_nd::io::write_vtu(&path, mesh);
+        println!("vtk solution: {path}");
+    }
+    #[cfg(not(feature = "vtk"))]
+    {
+        let _ = mesh;
+        panic!("--vtk ({path}) requires building with `--features vtk`");
     }
 }
 
@@ -537,45 +539,3 @@ pub fn advance_tensor_leja(
     integrator.state()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn spatial_csv_joins_fields_by_position() {
-        let path =
-            std::env::temp_dir().join(format!("ormatex-navier-stokes-{}.csv", std::process::id()));
-        write_spatial_csv(
-            &path,
-            [
-                (
-                    "u",
-                    FieldValues {
-                        positions: vec![(0.0, 0.0), (1.0, 0.0)],
-                        values: vec![1.0, 2.0],
-                    },
-                ),
-                (
-                    "v",
-                    FieldValues {
-                        positions: vec![(1.0, 0.0), (0.0, 0.0)],
-                        values: vec![3.0, 4.0],
-                    },
-                ),
-                (
-                    "p",
-                    FieldValues {
-                        positions: vec![(0.0, 0.0)],
-                        values: vec![5.0],
-                    },
-                ),
-            ],
-        );
-        let output = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            output,
-            "x,y,u,v,p\n0.000000000,0.000000000,1.000000000e0,4.000000000e0,5.000000000e0\n1.000000000,0.000000000,2.000000000e0,3.000000000e0,NaN\n"
-        );
-        std::fs::remove_file(path).unwrap();
-    }
-}

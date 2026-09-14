@@ -8,9 +8,6 @@
 //! `--assembled-jacobian` / `--matrix-free` flags); EPI3 exponential
 //! stepping by default (`--sdirk32` opts into SDIRK32 implicit).
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
@@ -30,7 +27,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{TimeStepper, TensorFluidSystem};
+use edac::{TimeStepper, TensorFluidSystem, maybe_write_vtk_mesh};
 
 const P: usize = 2;
 
@@ -108,46 +105,20 @@ fn parse_f64_flag(args: &[String], name: &str) -> Option<f64> {
         .map(|w| w[1].parse().expect("invalid numeric flag"))
 }
 
-fn write_output(
-    path: &str,
-    fields: Vec<(&str, ormatex_sem_nd::FieldValues<(f64, f64)>)>,
-) {
-    let mut rows: Vec<[f64; 9]> = Vec::new();
-    let mut row_indices = HashMap::new();
-    for (field, values) in fields {
-        let column = match field {
-            "u" => 2,
-            "v" => 3,
-            "p" => 4,
-            "c0" => 5,
-            "c1" => 6,
-            "c2" => 7,
-            _ => panic!("unsupported field {field}"),
-        };
-        // ponytail: x,y stored once; NaN marks missing columns.
-        for (&(x, y), &value) in values.positions.iter().zip(&values.values) {
-            let key = (x.to_bits(), y.to_bits());
-            let index = if let Some(&index) = row_indices.get(&key) {
-                index
-            } else {
-                let index = rows.len();
-                row_indices.insert(key, index);
-                rows.push([x, y, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0]);
-                index
-            };
-            rows[index][column] = value;
-        }
-    }
-    let mut output =
-        BufWriter::new(File::create(path).expect("failed to create output csv"));
-    writeln!(output, "x,y,u,v,p,c0,c1,c2").unwrap();
-    for [x, y, u, v, p, c0, c1, c2, _] in rows {
-        writeln!(
-            output,
-            "{x:.9},{y:.9},{u:.9e},{v:.9e},{p:.9e},{c0:.9e},{c1:.9e},{c2:.9e}"
-        )
-        .unwrap();
-    }
+/// Join fluid `[u, v, p]` and species `[c0, c1, c2]` exports (one shared mesh)
+/// into a single standardized `x,y,u,v,p,c0,c1,c2` table.
+fn joined_export(
+    fluid_problem: &SEM2DProblem<QuadMesh>,
+    fluid_state: MatRef<'_, f64>,
+    species_problem: &SEM2DProblem<QuadMesh>,
+    species_state: MatRef<'_, f64>,
+) -> ormatex_sem_nd::io::ExportMesh {
+    let mut mesh = ormatex_sem_nd::io::export_2d(fluid_problem, fluid_state);
+    mesh.append_fields(&ormatex_sem_nd::io::export_2d(
+        species_problem,
+        species_state,
+    ));
+    mesh
 }
 
 fn main() {
@@ -338,15 +309,12 @@ fn main() {
         return;
     }
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    write_output(
-        "target/frozen_velocity_species_cylinder.csv",
-        vec![
-            ("u", fluid_problem.field_values("u", fluid_state.as_ref()).unwrap()),
-            ("v", fluid_problem.field_values("v", fluid_state.as_ref()).unwrap()),
-            ("p", fluid_problem.field_values("p", fluid_state.as_ref()).unwrap()),
-            ("c0", species_problem.field_values("c0", species_state.as_ref()).unwrap()),
-            ("c1", species_problem.field_values("c1", species_state.as_ref()).unwrap()),
-            ("c2", species_problem.field_values("c2", species_state.as_ref()).unwrap()),
-        ],
+    let mesh = joined_export(
+        &fluid_problem,
+        fluid_state.as_ref(),
+        &species_problem,
+        species_state.as_ref(),
     );
+    ormatex_sem_nd::io::write_csv("target/frozen_velocity_species_cylinder.csv", &mesh);
+    maybe_write_vtk_mesh(&mesh, "target/frozen_velocity_species_cylinder.vtu");
 }

@@ -7,7 +7,7 @@ use ormatex_sem_nd::KernelEdacNavierStokes2D;
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, write_spatial_csv, FluidSystem};
+use edac::{advance, maybe_write_vtk, write_solution_csv, FluidSystem};
 
 fn main() {
     let problem = cavity_setup::problem();
@@ -37,9 +37,15 @@ fn main() {
     for &value in &p.values {
         assert!(value.is_finite(), "non-finite cavity state");
     }
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_lid_driven_cavity.csv",
-        [("u", u), ("v", v), ("p", p)],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_lid_driven_cavity.vtu",
     );
     assert!(
         min_u < -1e-3,

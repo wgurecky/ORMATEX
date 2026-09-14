@@ -22,7 +22,7 @@ mod edac;
 mod linear_system;
 
 use cylinder_setup::{nearest, problem};
-use edac::{epi3, write_spatial_csv, TensorFluidSystem};
+use edac::{epi3, maybe_write_vtk, write_solution_csv, TensorFluidSystem};
 
 fn tensor_split_kernel() -> impl TensorResidualKernel<2> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -122,13 +122,15 @@ fn main() {
         state[(problem.field_offset(2) + probe_p, 0)],
     )
     .unwrap();
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_cylinder_tensor.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_cylinder_tensor.vtu",
     );
     println!(
         "tensor cylinder result (directional={directional}): target/navier_stokes_cylinder_tensor.csv"

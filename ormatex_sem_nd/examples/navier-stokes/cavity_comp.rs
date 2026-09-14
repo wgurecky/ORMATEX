@@ -14,7 +14,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, write_spatial_csv, FluidSystem};
+use edac::{advance, maybe_write_vtk, write_solution_csv, FluidSystem};
 
 const STEPS: usize = 300;
 
@@ -48,12 +48,15 @@ fn max_state_difference(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> f64 {
 
 fn write_state(problem: &SEM2DProblem<QuadMesh>, state: MatRef<'_, f64>) {
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    let u = problem.field_values("u", state).unwrap();
-    let v = problem.field_values("v", state).unwrap();
-    let p = problem.field_values("p", state).unwrap();
-    write_spatial_csv(
+    write_solution_csv(
+        problem,
+        state,
         "target/navier_stokes_lid_driven_cavity_comp.csv",
-        [("u", u), ("v", v), ("p", p)],
+    );
+    maybe_write_vtk(
+        problem,
+        state,
+        "target/navier_stokes_lid_driven_cavity_comp.vtu",
     );
 }
 

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 faer = { version = "0.23", features = ["unstable"] }
+vtkio = { version = "0.7.0-rc2", optional = true, default-features = false, features = ["xml"] }
 ndelement = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
 ndmesh = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
 ndfunctionspace = { git = "https://codeberg.org/nd-project/nd.git" , rev = "2ab949a76f"}
@@ -12,6 +13,9 @@ rlst = "0.6"
 quadraturerules = "0.12.0"
 rayon = "1"
 pulp = "0.21.5"
+
+[features]
+vtk = ["dep:vtkio"]
 
 [dev-dependencies]
 ormatex = { path = "..", default-features = false }

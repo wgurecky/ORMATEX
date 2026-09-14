@@ -17,7 +17,7 @@ mod edac;
 mod linear_system;
 
 use cylinder_setup::problem;
-use edac::{epi3, write_spatial_csv, FluidSystem, GenericResidual};
+use edac::{epi3, maybe_write_vtk, write_solution_csv, FluidSystem, GenericResidual};
 
 fn split_kernel() -> ResidualKernelSum<'static> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -59,13 +59,15 @@ fn main() {
     let state = integrator.state();
 
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_cylinder_generic.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_cylinder_generic.vtu",
     );
     println!(
         "generic cylinder result (directional={directional}): target/navier_stokes_cylinder_generic.csv"

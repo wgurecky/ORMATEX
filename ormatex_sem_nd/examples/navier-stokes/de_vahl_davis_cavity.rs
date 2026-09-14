@@ -5,8 +5,6 @@
 //! composed with separate Boussinesq and state-coupled energy terms.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 use faer::prelude::*;
 use ormatex_sem_nd::{
@@ -23,7 +21,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{advance_tensor, TensorFluidSystem};
+use edac::{advance_tensor, maybe_write_vtk, write_solution_csv, TensorFluidSystem};
 
 const P: usize = 2;
 const CELLS: usize = 20;
@@ -136,39 +134,10 @@ fn value_at(map: &HashMap<(u64, u64), ((f64, f64), f64)>, x: f64, y: f64) -> f64
         .expect("requested diagnostic point is not a GLL node")
 }
 
-fn write_output(path: &str, fields: [(&str, FieldValues<(f64, f64)>); 4]) -> (f64, f64, f64, f64) {
+/// Nusselt and centerline diagnostics from full GLL nodal values.
+/// File output uses the shared vertex-only exporters instead.
+fn diagnostics(fields: [(&str, FieldValues<(f64, f64)>); 4]) -> (f64, f64, f64, f64) {
     let maps = fields.clone().map(|(_, values)| field_map(values));
-    let mut rows = HashMap::<(u64, u64), [f64; 6]>::new();
-    for (field, values) in fields {
-        let index = match field {
-            "u" => 2,
-            "v" => 3,
-            "p" => 4,
-            "T" => 5,
-            _ => unreachable!(),
-        };
-        for (position, value) in values.positions.into_iter().zip(values.values) {
-            rows.entry((position.0.to_bits(), position.1.to_bits()))
-                .or_insert([
-                    position.0,
-                    position.1,
-                    f64::NAN,
-                    f64::NAN,
-                    f64::NAN,
-                    f64::NAN,
-                ])[index] = value;
-        }
-    }
-    let mut output = BufWriter::new(File::create(path).expect("failed to create cavity output"));
-    writeln!(output, "x,y,u,v,p,T").unwrap();
-    for [x, y, u, v, p, temperature] in rows.values() {
-        writeln!(
-            output,
-            "{x:.9},{y:.9},{u:.9e},{v:.9e},{p:.9e},{temperature:.9e}"
-        )
-        .unwrap();
-    }
-
     let t_map = &maps[3];
     let u_map = &maps[0];
     let v_map = &maps[1];
@@ -210,15 +179,14 @@ fn main() {
         TensorFluidSystem::new(&problem, tensor_kernel()).with_wall_boundaries(walls, Vec::new());
     let state = advance_tensor(&system, state0.as_ref(), DT, STEPS);
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    let diagnostics = write_output(
-        "target/de_vahl_davis_cavity.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-            ("T", problem.field_values("T", state.as_ref()).unwrap()),
-        ],
-    );
+    let diagnostics = diagnostics([
+        ("u", problem.field_values("u", state.as_ref()).unwrap()),
+        ("v", problem.field_values("v", state.as_ref()).unwrap()),
+        ("p", problem.field_values("p", state.as_ref()).unwrap()),
+        ("T", problem.field_values("T", state.as_ref()).unwrap()),
+    ]);
+    write_solution_csv(&problem, state.as_ref(), "target/de_vahl_davis_cavity.csv");
+    maybe_write_vtk(&problem, state.as_ref(), "target/de_vahl_davis_cavity.vtu");
     println!(
         "de Vahl Davis Ra={RA:.0}: Nu_hot={:.6} (reference ~1.118), T_center={:.6}, umax_mid={:.6}, vmax_mid={:.6}",
         diagnostics.0, diagnostics.1, diagnostics.2, diagnostics.3

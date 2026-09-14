@@ -15,6 +15,7 @@ extern crate openblas_src;
 pub mod common;
 pub mod fields;
 pub mod gmsh;
+pub mod io;
 pub mod jacobian;
 pub mod kernels;
 pub mod material;

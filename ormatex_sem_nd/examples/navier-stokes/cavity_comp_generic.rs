@@ -14,7 +14,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{advance, write_spatial_csv, FluidSystem, GenericResidual};
+use edac::{advance, maybe_write_vtk, write_solution_csv, FluidSystem, GenericResidual};
 
 const STEPS: usize = 300;
 
@@ -35,13 +35,15 @@ fn main() {
     let state = advance(&system, state0.as_ref(), 0.01, STEPS);
 
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_lid_driven_cavity_comp_generic.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_lid_driven_cavity_comp_generic.vtu",
     );
     println!("generic cavity result: target/navier_stokes_lid_driven_cavity_comp_generic.csv");
 }

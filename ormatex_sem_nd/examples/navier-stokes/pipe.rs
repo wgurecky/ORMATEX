@@ -14,7 +14,7 @@ use ormatex_sem_nd::{
 mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
-use edac::{advance, write_spatial_csv, FluidSystem};
+use edac::{advance, maybe_write_vtk, write_solution_csv, FluidSystem};
 
 const EPS: f64 = 1e-12;
 
@@ -146,9 +146,7 @@ fn main() {
         max_error < 2e-2,
         "pipe profile error too large: {max_error}"
     );
-    write_spatial_csv(
-        "target/navier_stokes_pipe.csv",
-        [("u", u), ("v", v), ("p", p)],
-    );
+    write_solution_csv(&problem, state.as_ref(), "target/navier_stokes_pipe.csv");
+    maybe_write_vtk(&problem, state.as_ref(), "target/navier_stokes_pipe.vtu");
     println!("pipe validation: max profile error={max_error:.3e}, max |v|={max_v:.3e}");
 }

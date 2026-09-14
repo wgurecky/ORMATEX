@@ -17,7 +17,7 @@ mod edac;
 mod linear_system;
 
 use backward_step_setup::problem;
-use edac::{advance_tensor, write_spatial_csv, TensorFluidSystem};
+use edac::{advance_tensor, maybe_write_vtk, write_solution_csv, TensorFluidSystem};
 
 fn tensor_split_kernel() -> impl TensorResidualKernel<2> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -43,13 +43,15 @@ fn main() {
     let state = advance_tensor(&system, state0.as_ref(), 0.05, 100);
 
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_backward_step_tensor.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_backward_step_tensor.vtu",
     );
     println!("tensor backward-step result: target/navier_stokes_backward_step_tensor.csv");
 }

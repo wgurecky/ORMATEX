@@ -20,7 +20,7 @@ mod edac;
 mod linear_system;
 
 use cylinder_setup::{nearest, problem};
-use edac::{epi3, write_spatial_csv, FluidSystem};
+use edac::{epi3, maybe_write_vtk, write_solution_csv, FluidSystem};
 
 fn split_kernel() -> ResidualKernelSum<'static> {
     let config = EdacNavierStokes2DConfig::new(1.0, 1.0 / 200.0, 4.0, 0.1);
@@ -103,13 +103,7 @@ fn main() {
     let state = integrator.state();
     let final_time = integrator.time();
 
-    write_spatial_csv(
-        "target/navier_stokes_cylinder.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
-    );
+    write_solution_csv(&problem, state.as_ref(), "target/navier_stokes_cylinder.csv");
+    maybe_write_vtk(&problem, state.as_ref(), "target/navier_stokes_cylinder.vtu");
     println!("cylinder final state (t={final_time:.6}): target/navier_stokes_cylinder.csv");
 }

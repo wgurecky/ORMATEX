@@ -17,7 +17,7 @@ mod edac;
 #[path = "../support/linear_system.rs"]
 mod linear_system;
 
-use edac::{advance_tensor, advance_tensor_leja, write_spatial_csv, TensorFluidSystem};
+use edac::{advance_tensor, advance_tensor_leja, maybe_write_vtk, write_solution_csv, TensorFluidSystem};
 
 const DT: f64 = 0.0025;
 const DEFAULT_STEPS: usize = 1200;
@@ -80,13 +80,15 @@ fn main() {
     }
 
     std::fs::create_dir_all("target").expect("failed to create output directory");
-    write_spatial_csv(
+    write_solution_csv(
+        &problem,
+        state.as_ref(),
         "target/navier_stokes_lid_driven_cavity_comp_tensor.csv",
-        [
-            ("u", problem.field_values("u", state.as_ref()).unwrap()),
-            ("v", problem.field_values("v", state.as_ref()).unwrap()),
-            ("p", problem.field_values("p", state.as_ref()).unwrap()),
-        ],
+    );
+    maybe_write_vtk(
+        &problem,
+        state.as_ref(),
+        "target/navier_stokes_lid_driven_cavity_comp_tensor.vtu",
     );
     println!("tensor cavity result: target/navier_stokes_lid_driven_cavity_comp_tensor.csv");
 }
