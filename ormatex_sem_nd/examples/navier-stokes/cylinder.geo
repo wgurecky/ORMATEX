@@ -1,5 +1,6 @@
 // All-quad channel with a circular obstacle.
 Mesh.MshFileVersion = 2.2;
+Mesh.Binary = 1;
 SetFactory("OpenCASCADE");
 
 L = 15;
@@ -19,9 +20,9 @@ Mesh.Smoothing = 10;
 Mesh.CharacteristicLengthMin = 0.08;
 Mesh.CharacteristicLengthMax = 0.24;
 
-Physical Curve("inlet", 1) = Curve In BoundingBox {-5.0001, -2.0001, -0.0001, -4.9999, 2.0001, 0.0001};
-Physical Curve("outlet", 2) = Curve In BoundingBox {9.9999, -2.0001, -0.0001, 10.0001, 2.0001, 0.0001};
-Physical Curve("bottom", 3) = Curve In BoundingBox {-5.0001, -2.0001, -0.0001, 10.0001, -1.9999, 0.0001};
-Physical Curve("top", 4) = Curve In BoundingBox {-5.0001, 1.9999, -0.0001, 10.0001, 2.0001, 0.0001};
+Physical Curve("inlet", 1) = Curve In BoundingBox {-5.0001, -H/2-0.0001, -0.0001, -4.9999, H/2+0.0001, 0.0001};
+Physical Curve("outlet", 2) = Curve In BoundingBox {9.9999, -H/2-0.0001, -0.0001, 10.0001, H/2+0.0001, 0.0001};
+Physical Curve("bottom", 3) = Curve In BoundingBox {-5.0001, -H/2-0.0001, -0.0001, 10.0001, -H/2+0.0001, 0.0001};
+Physical Curve("top", 4) = Curve In BoundingBox {-5.0001, H/2-0.0001, -0.0001, 10.0001, H/2+0.0001, 0.0001};
 Physical Curve("cylinder", 5) = Curve In BoundingBox {-1.0001, -1.0001, -0.0001, 1.0001, 1.0001, 0.0001};
 Physical Surface("domain", 10) = {1};

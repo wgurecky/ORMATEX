@@ -1,7 +1,7 @@
 use faer::prelude::MatRef;
 use rlst::DynArray;
 
-use crate::mesh::MeshMetadata;
+use crate::regions::MeshMetadata;
 use crate::simd;
 
 use super::contexts::{CellState, LocalCtx};

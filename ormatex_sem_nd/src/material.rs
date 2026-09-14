@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::common::CellState;
 
 // Keep the old module paths available while mesh metadata has its own home.
-pub use crate::mesh::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion};
+pub use crate::regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion};
 
 /// All information available while evaluating a coefficient at one point.
 ///

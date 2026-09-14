@@ -29,7 +29,7 @@ mod linear_system;
 
 use edac::{TimeStepper, TensorFluidSystem, maybe_write_vtk_mesh};
 
-const P: usize = 2;
+const P: usize = 3;
 
 // Same rates as `ex_nd_1d_linear_reaction`.
 const RATES: [(usize, usize, f64); 5] = [

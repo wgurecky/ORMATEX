@@ -1,5 +1,5 @@
 use crate::material::MaterialContext;
-use crate::mesh::{CellMeta, FacetMeta};
+use crate::regions::{CellMeta, FacetMeta};
 
 /// Per-cell context passed to volume kernels.
 ///

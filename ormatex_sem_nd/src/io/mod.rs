@@ -1,4 +1,5 @@
-//! Solution export: a shared [`ExportMesh`] intermediate plus CSV and VTK writers.
+//! Mesh import ([`gmsh`]) plus solution export: a shared [`ExportMesh`]
+//! intermediate plus CSV and VTK writers.
 //!
 //! `export_1d` / `export_2d` sample every registered field from a solved state
 //! into an [`ExportMesh`]; the CSV writer is always available while the VTK
@@ -12,6 +13,7 @@
 //! GLL nodes and geometry is exact for straight-sided elements.)
 
 pub mod csv;
+pub mod gmsh;
 pub mod mesh;
 #[cfg(feature = "vtk")]
 pub mod vtk;

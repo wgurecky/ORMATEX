@@ -6,7 +6,7 @@ use crate::common::{
 };
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
-use crate::mesh::{MeshMetadata, PhysicalRegion};
+use crate::regions::{MeshMetadata, PhysicalRegion};
 use faer::prelude::*;
 
 use ndelement::{

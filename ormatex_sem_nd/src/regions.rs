@@ -1,4 +1,6 @@
-//! Mesh metadata and physical-region selection.
+//! Physical-region tagging for meshes: Gmsh physical-curve (dim 1) labels for
+//! boundary-condition assignment and physical-surface (dim 2) labels for
+//! material regions, plus the per-cell/per-facet metadata that carries them.
 
 use std::collections::HashMap;
 

@@ -14,12 +14,11 @@ extern crate openblas_src;
 
 pub mod common;
 pub mod fields;
-pub mod gmsh;
 pub mod io;
 pub mod jacobian;
 pub mod kernels;
 pub mod material;
-pub mod mesh;
+pub mod regions;
 mod op;
 pub mod sem_1d;
 pub mod sem_2d;
@@ -31,7 +30,7 @@ pub use common::{
     LocalCtx, ShapeFn, StateBoundaryContributions, TensorCtx, TensorFacetCtx,
 };
 pub use fields::{FieldRegistry, FieldValues};
-pub use gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
+pub use io::gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{
     CompleteResidualOperator, MatrixFreeJacobianProblem, MatrixFreeJacobianSource,
     MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian,
@@ -74,7 +73,7 @@ pub use material::{
     Coefficient, ConstantCoefficient, FrozenFacetField, FrozenQuadratureField, FrozenVelocity2D,
     MaterialContext, MaterialProperty, RegionCoefficient,
 };
-pub use mesh::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
+pub use regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
 pub use op::ParCsrJacobian;
 pub use sem_1d::{
     BoundaryPoint, DofReduction1D, SEM1DMixedResidualOperator, SEM1DProblem,

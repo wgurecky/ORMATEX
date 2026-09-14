@@ -17,7 +17,7 @@ use crate::fields::FieldRegistry;
 use crate::kernels::common::{
     BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryTerms,
 };
-use crate::mesh::{FacetMeta, MeshMetadata, PhysicalRegion};
+use crate::regions::{FacetMeta, MeshMetadata, PhysicalRegion};
 
 use super::contexts::{CellState, FacetCtx, TensorFacetCtx};
 use super::restriction::{DisjointOut, ElementRestriction};
