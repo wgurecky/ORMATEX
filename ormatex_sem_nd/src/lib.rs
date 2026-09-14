@@ -18,8 +18,8 @@ pub mod io;
 pub mod jacobian;
 pub mod kernels;
 pub mod material;
-pub mod regions;
 mod op;
+pub mod regions;
 pub mod sem_1d;
 pub mod sem_2d;
 pub mod sem_traits;
@@ -36,8 +36,9 @@ pub use jacobian::{
     MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian,
 };
 pub use kernels::{
-    BilinearForm, BoundaryIntegrator, EdacNavierStokes1DConfig, EdacNavierStokes2DConfig,
-    FluxKernel1D, KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D,
+    BilinearForm, BoundaryIntegrator, DistributionParameter, DriftFlux1DConfig, DriftFlux2DConfig,
+    DriftOutflow1D, EdacNavierStokes1DConfig, EdacNavierStokes2DConfig, FluxKernel1D,
+    IshiiZuberParams, KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D,
     KernelAdvection2D, KernelAdvectionOutflow1D, KernelAdvectionOutflow2D, KernelBoussinesq2D,
     KernelConservationLaw1D, KernelDiffusion, KernelDiffusion2D, KernelEdacDirectionalDoNothing2D,
     KernelEdacDongOutflow2D, KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit1D,
@@ -51,10 +52,19 @@ pub use kernels::{
     KernelLinearReaction, KernelMass, KernelVolumeSource, LinearForm, NeumannFlux, ResidualKernel,
     ResidualKernelSet, ResidualKernelSum, RobinConvection, SmagorinskyLilly2D,
     StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
-    StateTensorBoundaryTerms, TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG,
-    TensorKernelAdvDiffSUPG2D, TensorKernelAdvection2D, TensorKernelAdvectionOutflow2D,
-    TensorKernelBoussinesq2D, TensorKernelConservationLaw1D, TensorKernelDiffusion,
-    TensorKernelDiffusion2D, TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
+    StateTensorBoundaryTerms, TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,
+    TensorDriftFlux2D, TensorDriftGravity1D, TensorDriftGravity2D,
+    TensorDriftMomentumConvectionSplit1D, TensorDriftMomentumConvectionSplit2D,
+    TensorDriftPressureAdvectionSplit1D, TensorDriftPressureAdvectionSplit2D,
+    TensorDriftPressureDiffusion1D, TensorDriftPressureDiffusion2D,
+    TensorDriftPressureDivergence1D, TensorDriftPressureDivergence2D,
+    TensorDriftPressureGradient1D, TensorDriftPressureGradient2D, TensorDriftSplitBoundaryFlux2D,
+    TensorDriftTurbulentDispersion1D, TensorDriftTurbulentDispersion2D, TensorDriftViscousStress1D,
+    TensorDriftViscousStress2D, TensorDriftVoidAdvectionSplit1D, TensorDriftVoidAdvectionSplit2D,
+    TensorKernelAdvDiff, TensorKernelAdvDiff2D, TensorKernelAdvDiffSUPG, TensorKernelAdvDiffSUPG2D,
+    TensorKernelAdvection2D, TensorKernelAdvectionOutflow2D, TensorKernelBoussinesq2D,
+    TensorKernelConservationLaw1D, TensorKernelDiffusion, TensorKernelDiffusion2D,
+    TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
     TensorKernelEdacMomentumConvection2D, TensorKernelEdacMomentumConvectionSplit1D,
     TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacNavierStokes2D,
     TensorKernelEdacNavierStokesSplit1D, TensorKernelEdacNavierStokesSplit2D,
@@ -67,14 +77,14 @@ pub use kernels::{
     TensorKernelEdacViscousStress1D, TensorKernelEdacViscousStress2D,
     TensorKernelEnergyAdvectionDiffusion1D, TensorKernelEnergyAdvectionDiffusion2D,
     TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource, TensorResidualKernel,
-    TensorResidualKernelSet, TensorResidualKernelSum,
+    TensorResidualKernelSet, TensorResidualKernelSum, ALPHA_1D, ALPHA_2D,
 };
 pub use material::{
     Coefficient, ConstantCoefficient, FrozenFacetField, FrozenQuadratureField, FrozenVelocity2D,
     MaterialContext, MaterialProperty, RegionCoefficient,
 };
-pub use regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
 pub use op::ParCsrJacobian;
+pub use regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion, PhysicalSelector};
 pub use sem_1d::{
     BoundaryPoint, DofReduction1D, SEM1DMixedResidualOperator, SEM1DProblem,
     SEM1DResidualExecution, SEM1DResidualOperator, SEM1DTensorResidualOperator,

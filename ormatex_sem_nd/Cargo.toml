@@ -72,3 +72,11 @@ path = "examples/navier-stokes/de_vahl_davis_cavity.rs"
 [[example]]
 name = "navier-stokes-frozen-velocity-species-cylinder"
 path = "examples/navier-stokes/frozen_velocity_species_cylinder.rs"
+
+[[example]]
+name = "navier-stokes-drift-flux-pipe-1d"
+path = "examples/navier-stokes/drift_flux_pipe_1d.rs"
+
+[[example]]
+name = "navier-stokes-drift-flux-cylinder-tensor"
+path = "examples/navier-stokes/drift_flux_cylinder_tensor.rs"

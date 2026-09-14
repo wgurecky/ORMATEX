@@ -9,6 +9,7 @@
 pub mod basic;
 pub mod common;
 pub mod edac;
+pub mod edac_multiphase_drift_flux;
 
 pub use basic::{
     KernelAdvDiff, KernelAdvDiff2D, KernelAdvDiffSUPG, KernelAdvDiffSUPG2D, KernelAdvection2D,
@@ -49,4 +50,17 @@ pub use edac::{
     TensorKernelEdacPressureGradient2D, TensorKernelEdacSlipWall2D,
     TensorKernelEdacSplitBoundaryFlux2D, TensorKernelEdacViscousStress1D,
     TensorKernelEdacViscousStress2D,
+};
+pub use edac_multiphase_drift_flux::{
+    DistributionParameter, DriftFlux1DConfig, DriftFlux2DConfig, DriftOutflow1D, IshiiZuberParams,
+    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D, TensorDriftFlux2D, TensorDriftGravity1D,
+    TensorDriftGravity2D, TensorDriftMomentumConvectionSplit1D,
+    TensorDriftMomentumConvectionSplit2D, TensorDriftPressureAdvectionSplit1D,
+    TensorDriftPressureAdvectionSplit2D, TensorDriftPressureDiffusion1D,
+    TensorDriftPressureDiffusion2D, TensorDriftPressureDivergence1D,
+    TensorDriftPressureDivergence2D, TensorDriftPressureGradient1D, TensorDriftPressureGradient2D,
+    TensorDriftSplitBoundaryFlux2D, TensorDriftTurbulentDispersion1D,
+    TensorDriftTurbulentDispersion2D, TensorDriftViscousStress1D, TensorDriftViscousStress2D,
+    TensorDriftVoidAdvectionSplit1D, TensorDriftVoidAdvectionSplit2D, ALPHA_1D, ALPHA_2D,
+    MIN_LIQUID_FRACTION,
 };
