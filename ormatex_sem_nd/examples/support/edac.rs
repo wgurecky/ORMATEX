@@ -10,17 +10,16 @@ use ormatex::ode_implicit::DirkIntegrator;
 use ormatex::ode_sys::{IntegrateSys, OdeSys};
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
-    CellState, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D,
-    KernelEdacNoSlipWall2D, KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx,
-    MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian, QuadMesh, ResidualKernel,
-    SEM2DProblem, StateBoundaryTerms, StateTensorBoundaryTerms,
-    TensorKernelEdacDirectionalDoNothing2D, TensorKernelEdacDongOutflow2D,
-    TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D, TensorKernelEdacSplitBoundaryFlux2D,
-    TensorResidualKernel,
+    CellState, KernelEdacDirectionalDoNothing2D, KernelEdacDongOutflow2D, KernelEdacNoSlipWall2D,
+    KernelEdacSlipWall2D, KernelEdacSplitBoundaryFlux2D, LocalCtx, MatrixFreeMinvJacobian,
+    OwnedMinvJacobian, ParallelOwnedMinvJacobian, QuadMesh, ResidualKernel, SEM2DProblem,
+    StateBoundaryTerms, StateTensorBoundaryTerms, TensorKernelEdacDirectionalDoNothing2D,
+    TensorKernelEdacDongOutflow2D, TensorKernelEdacNoSlipWall2D, TensorKernelEdacSlipWall2D,
+    TensorKernelEdacSplitBoundaryFlux2D, TensorResidualKernel,
 };
 
 use super::linear_system::lumped_inverse_mass;
-use ormatex_sem_nd::{BilinearOps};
+use ormatex_sem_nd::BilinearOps;
 
 /// Retains only the traditional weak-form kernel interface for comparison.
 /// Example binaries use this as a correctness and performance oracle.
@@ -538,4 +537,3 @@ pub fn advance_tensor_leja(
     }
     integrator.state()
 }
-

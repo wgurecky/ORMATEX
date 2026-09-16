@@ -53,7 +53,7 @@ pub use kernels::{
     ResidualKernelSet, ResidualKernelSum, RobinConvection, SmagorinskyLilly2D,
     StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
     StateTensorBoundaryTerms, TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,
-    TensorDriftFlux2D, TensorDriftGravity1D, TensorDriftGravity2D,
+    TensorDriftFlux2D, TensorDriftFreeSurface2D, TensorDriftGravity1D, TensorDriftGravity2D,
     TensorDriftMomentumConvectionSplit1D, TensorDriftMomentumConvectionSplit2D,
     TensorDriftPressureAdvectionSplit1D, TensorDriftPressureAdvectionSplit2D,
     TensorDriftPressureDiffusion1D, TensorDriftPressureDiffusion2D,

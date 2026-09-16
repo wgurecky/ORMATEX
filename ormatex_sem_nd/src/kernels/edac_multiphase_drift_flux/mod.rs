@@ -33,7 +33,7 @@ pub use closures::{DistributionParameter, IshiiZuberParams, MIN_LIQUID_FRACTION}
 pub use config::{DriftFlux2DConfig, ALPHA_2D};
 pub use config_1d::{DriftFlux1DConfig, ALPHA_1D};
 pub use tensor::{
-    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D, TensorDriftFlux2D, TensorDriftGravity1D,
+    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,     TensorDriftFlux2D, TensorDriftFreeSurface2D, TensorDriftGravity1D,
     TensorDriftGravity2D, TensorDriftMomentumConvectionSplit1D,
     TensorDriftMomentumConvectionSplit2D, TensorDriftPressureAdvectionSplit1D,
     TensorDriftPressureAdvectionSplit2D, TensorDriftPressureDiffusion1D,

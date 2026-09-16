@@ -80,3 +80,7 @@ path = "examples/navier-stokes/drift_flux_pipe_1d.rs"
 [[example]]
 name = "navier-stokes-drift-flux-cylinder-tensor"
 path = "examples/navier-stokes/drift_flux_cylinder_tensor.rs"
+
+[[example]]
+name = "navier-stokes-drift-flux-bubble-plume-tensor"
+path = "examples/navier-stokes/drift_flux_bubble_plume_tensor.rs"

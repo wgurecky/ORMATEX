@@ -53,7 +53,7 @@ pub use edac::{
 };
 pub use edac_multiphase_drift_flux::{
     DistributionParameter, DriftFlux1DConfig, DriftFlux2DConfig, DriftOutflow1D, IshiiZuberParams,
-    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D, TensorDriftFlux2D, TensorDriftGravity1D,
+    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,     TensorDriftFlux2D, TensorDriftFreeSurface2D, TensorDriftGravity1D,
     TensorDriftGravity2D, TensorDriftMomentumConvectionSplit1D,
     TensorDriftMomentumConvectionSplit2D, TensorDriftPressureAdvectionSplit1D,
     TensorDriftPressureAdvectionSplit2D, TensorDriftPressureDiffusion1D,
