@@ -21,7 +21,7 @@ use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
-use ormatex::ode_implicit::DirkIntegrator;
+use ormatex::ode_implicit::{DirkIntegrator, BdfIntegrator};
 use ormatex::ode_sys::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
@@ -217,6 +217,7 @@ fn nearest(positions: &[(f64, f64)], target: (f64, f64)) -> usize {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let steps = parse_usize_flag(&args, "--steps").unwrap_or(400);
+    let bdf_order = parse_usize_flag(&args, "--bdf_order").unwrap_or(2);
     let dt = parse_f64_flag(&args, "--dt").unwrap_or(5.0e-4);
     let threads = parse_usize_flag(&args, "--threads");
     let benchmark = args.iter().any(|arg| arg == "--benchmark");
@@ -253,7 +254,7 @@ fn main() {
         );
         let system = TensorFluidSystem::new(&problem, drift_kernel()).with_state_boundary(terms);
         let mut integrator =
-            DirkIntegrator::new(t, state.as_ref(), ImplicitBT::sdirk32(), 1e-8, 1e-8);
+            BdfIntegrator::new(t, state.as_ref(), bdf_order, 1e-8, 1e-8);
         for _ in 0..stage_steps {
             // ponytail: small steps while each ramped jet turns around
             // (t < 0.01), full dt once the plume is established.

@@ -123,7 +123,7 @@ fn joined_export(
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let directional = args.iter().any(|a| a == "--directional");
+    let directional = true;
     let benchmark = args.iter().any(|a| a == "--benchmark");
     let outer = parse_usize_flag(&args, "--outer").unwrap_or(20);
     let fluid_sub = parse_usize_flag(&args, "--fluid-steps").unwrap_or(5);
