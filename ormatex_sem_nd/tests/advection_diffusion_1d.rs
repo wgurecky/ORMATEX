@@ -4,7 +4,7 @@ use ndmesh::{shapes::unit_interval, SingleElementMesh};
 use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{BilinearOps, DofReduction1D, FieldRegistry, KernelAdvDiff, SEM1DProblem};
 
 #[path = "../examples/support/linear_system.rs"]

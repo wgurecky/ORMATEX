@@ -5,7 +5,7 @@ use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{
     EdacNavierStokes2DConfig, TensorKernelEdacDirectionalDoNothing2D,
     TensorKernelEdacMomentumConvectionSplit2D, TensorKernelEdacPressureAdvectionSplit2D,

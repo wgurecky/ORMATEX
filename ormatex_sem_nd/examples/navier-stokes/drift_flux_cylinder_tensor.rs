@@ -12,7 +12,7 @@ use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{
     DofReduction2D, DriftFlux2DConfig, FieldRegistry, SEM2DProblem, StateTensorBoundaryTerms,
     TensorDriftDirectionalDoNothing2D, TensorDriftFlux2D, TensorDriftGravity2D,

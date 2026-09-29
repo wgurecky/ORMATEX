@@ -17,7 +17,8 @@ use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 use ndmesh::shapes::unit_interval;
 use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::ode_sys::OdeSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     BilinearOps, ConstantCoefficient, DofReduction1D, FieldRegistry, KernelAdvectionOutflow1D,

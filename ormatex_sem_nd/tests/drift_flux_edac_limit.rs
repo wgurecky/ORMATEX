@@ -15,7 +15,8 @@ use faer::prelude::*;
 use ndelement::types::ReferenceCellType;
 use ndmesh::shapes::{unit_interval, unit_square};
 use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::ode_sys::OdeSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     BilinearOps, CellState, ConstantCoefficient, DofReduction1D, DofReduction2D, DriftFlux1DConfig,

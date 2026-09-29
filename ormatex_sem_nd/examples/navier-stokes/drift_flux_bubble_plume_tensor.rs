@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use faer::prelude::*;
 use ormatex::ode_implicit::{DirkIntegrator, BdfIntegrator};
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     dirichlet_values_with_precedence, DofReduction2D, DriftFlux2DConfig, FieldRegistry, QuadMesh,

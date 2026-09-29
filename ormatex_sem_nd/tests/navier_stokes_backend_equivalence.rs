@@ -1,5 +1,6 @@
 use faer::prelude::*;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::ode_sys::OdeSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{
     EdacNavierStokes2DConfig, KernelEdacMomentumConvection2D, KernelEdacMomentumConvectionSplit2D,
     KernelEdacPressureAdvection2D, KernelEdacPressureAdvectionSplit2D,

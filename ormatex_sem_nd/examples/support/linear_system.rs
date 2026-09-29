@@ -4,7 +4,8 @@ use faer::prelude::*;
 use faer::sparse::{SparseColMat, SparseColMatRef, Triplet};
 use faer::Par;
 use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::{IntegrateSys, OdeSys};
+use ormatex::ode_sys::OdeSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 
 pub fn lumped_inverse_mass(mass: SparseColMatRef<'_, usize, f64>) -> Vec<f64> {

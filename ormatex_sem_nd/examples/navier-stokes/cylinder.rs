@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use faer::prelude::*;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{
     EdacNavierStokes2DConfig, KernelEdacDirectionalDoNothing2D,
     KernelEdacMomentumConvectionSplit2D, KernelEdacPressureAdvectionSplit2D,

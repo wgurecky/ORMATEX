@@ -7,7 +7,7 @@ use faer::prelude::*;
 use ndelement::{ciarlet::CiarletElement, map::IdentityMap};
 use ndmesh::{shapes::unit_interval, SingleElementMesh};
 use ormatex::ode_implicit::DirkIntegrator;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     DofReduction1D, FieldRegistry, KernelAdvDiff, KernelAdvDiffSUPG, KernelVolumeSource,

@@ -9,7 +9,7 @@ use ndmesh::shapes::unit_interval;
 use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_pade::PadeExpm;
 use ormatex::ode_epirk::EpirkIntegrator;
-use ormatex::ode_sys::IntegrateSys;
+use ormatex::ode_traits::IntegrateSys;
 use ormatex_sem_nd::{
     DofReduction1D, FieldRegistry, KernelAdvDiff, KernelLinearReaction, SEM1DProblem,
 };
