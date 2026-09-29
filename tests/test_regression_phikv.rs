@@ -2,7 +2,7 @@ use faer::prelude::*;
 use ormatex::mat_utils::mat_mat_approx_eq;
 use ormatex::matexp_krylov::KrylovExpm;
 use ormatex::matexp_leja::*;
-use ormatex::matexp_pade::{matexp, PadeExpm};
+use ormatex::matexp_pade::PadeExpm;
 use ormatex::matexp_traits::{DensePhikvEvaluator, LinOpPhikvEvaluator};
 use ormatex::ode_sys::DynRefExtendedLinOp;
 use std::fs::File;
@@ -90,7 +90,7 @@ fn _case_s3_phikv(krylov_reuse: bool, k: usize) {
 
     // Compute reference solution using Pade method
     let expmv = Box::new(PadeExpm::new(12));
-    let pade_phikv = expmv.phik_apply(jac_dense.as_ref(), dt, y_vec.as_ref(), k);
+    let pade_phikv = expmv.apply_phi_k(jac_dense.as_ref(), dt, y_vec.as_ref(), k);
 
     // Compute using Leja evaluator
     let lp = LejaPoints::new_from_fn("leja_circle").slice(0, 400);

@@ -44,6 +44,16 @@ decay_lib_1 = {
     'cs_135': ('none', np.log(2.) / (1.33e6*365*24*3600) ),
 }
 
+
+def to_scalar(val):
+    """
+    Helper method to convert a python array with len==1 to a float
+    """
+    tmp_arr = np.asarray(val)
+    assert tmp_arr.size <= 1
+    return tmp_arr.item()
+
+
 def gen_bateman_matrix(keymap: list, bateman_lib: dict) -> jax.Array:
     r"""
     Represents nuclear decay chain reactions of the form:
@@ -76,7 +86,7 @@ def gen_bateman_matrix(keymap: list, bateman_lib: dict) -> jax.Array:
         if isinstance(bateman_lib[key][0], tuple):
             for child_lambda_pair in bateman_lib[key]:
                 child_species = child_lambda_pair[0]
-                decay_const = child_lambda_pair[1]
+                decay_const = to_scalar(child_lambda_pair[1])
                 if child_species == 'none':
                     dest = i
                 else:
@@ -87,7 +97,7 @@ def gen_bateman_matrix(keymap: list, bateman_lib: dict) -> jax.Array:
         else:
             # lambda = ln(2)/T_1/2 where T_1/2 if the half life in s
             child_species = bateman_lib[key][0]
-            decay_const = bateman_lib[key][1]
+            decay_const = to_scalar(bateman_lib[key][1])
             if child_species == 'none':
                 dest = i
             else:
@@ -178,7 +188,7 @@ def analytic_bateman_single_parent(t, batmat, n0):
     return np.asarray(N, dtype=np.float64)
 
 
-def analytic_bateman_s3(method="epi2", do_plot=True, dt=10.0, tf=1000., pfd_method="cram_16"):
+def analytic_bateman_s3(method="epi2", phi_method="krylov", do_plot=True, dt=10.0, tf=1000., pfd_method="cram_16"):
     jax.config.update("jax_enable_x64", True)
     keymap = ["c_0", "c_1", "c_2"]
     decay_lib_sp = {
@@ -204,8 +214,9 @@ def analytic_bateman_s3(method="epi2", do_plot=True, dt=10.0, tf=1000., pfd_meth
     nsteps = int((tf - t0) / dt)
     res = integrate_wrapper.integrate(
             test_ode_sys, y0, t0, dt, nsteps, method,
+            phi_method=phi_method,
             max_krylov_dim=100, iom=12, pfd_method=pfd_method,
-            phikv_method="taylor", tol=1e-15)
+            tol=1e-15)
     t_res, y_res = res.t_res, res.y_res
     t_res = np.asarray(t_res)
     y_res = np.asarray(y_res)
@@ -340,7 +351,7 @@ if __name__ == "__main__":
     nsteps = int((tf - t0) / dt)
     res = integrate_wrapper.integrate(
             test_ode_sys, y0, t0, dt, nsteps, method, max_krylov_dim=280, iom=12,
-            phikv_method="leja",
+            phi_method="krylov",
             tol=1e-10, spec_iter=28, spec_method="arnoldi",
             krylov_reuse=False, osteps=1, **kwargs
             )
