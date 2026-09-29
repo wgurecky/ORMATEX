@@ -20,10 +20,28 @@
 //!   in Eulerian multi-phase flows," 2004 — Fickian turbulent-dispersion flux
 //!   `-D_td * grad(alpha)`; here with the simplest constant `D_td`.
 
+use crate::common::{Lanes, LANES};
+
 /// Clamp a void fraction to the physical range for closure evaluation.
 #[inline(always)]
 pub fn clamp_alpha(alpha: f64) -> f64 {
     alpha.clamp(0.0, 1.0)
+}
+
+/// Lane-packed void-fraction clamps matching [`clamp_alpha`].
+///
+/// # Arguments
+/// * `alphas` - per-lane void fractions.
+///
+/// # Returns
+/// Per-lane `clamp_alpha(alphas[l])`, bit-identical to the scalar path lane-by-lane.
+#[inline]
+pub fn clamp_alpha_lanes(alphas: &Lanes) -> Lanes {
+    let mut out = [0.0; LANES];
+    for l in 0..LANES {
+        out[l] = clamp_alpha(alphas[l]);
+    }
+    out
 }
 
 /// Ishii-Zuber bubble-regime drift-speed parameters.
@@ -103,6 +121,69 @@ impl IshiiZuberParams {
         }
         let v = self.drift_speed(alpha, rho_l, rho_g, g_mag);
         v * (1.0 - 1.75 * alpha / (1.0 - alpha))
+    }
+
+    /// Lane-packed drift speeds matching [`drift_speed`](Self::drift_speed).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    /// * `rho_l` - liquid density shared by all lanes.
+    /// * `rho_g` - gas density shared by all lanes.
+    /// * `g_mag` - gravity magnitude shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane drift speed, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub fn drift_speed_lanes(&self, alphas: &Lanes, rho_l: f64, rho_g: f64, g_mag: f64) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.drift_speed(alphas[l], rho_l, rho_g, g_mag);
+        }
+        out
+    }
+
+    /// Lane-packed drift fluxes matching [`drift_flux`](Self::drift_flux).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    /// * `rho_l` - liquid density shared by all lanes.
+    /// * `rho_g` - gas density shared by all lanes.
+    /// * `g_mag` - gravity magnitude shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane drift flux, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub fn drift_flux_lanes(&self, alphas: &Lanes, rho_l: f64, rho_g: f64, g_mag: f64) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.drift_flux(alphas[l], rho_l, rho_g, g_mag);
+        }
+        out
+    }
+
+    /// Lane-packed drift-flux derivatives matching [`drift_flux_derivative`](Self::drift_flux_derivative).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    /// * `rho_l` - liquid density shared by all lanes.
+    /// * `rho_g` - gas density shared by all lanes.
+    /// * `g_mag` - gravity magnitude shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane `dF/da`, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub fn drift_flux_derivative_lanes(
+        &self,
+        alphas: &Lanes,
+        rho_l: f64,
+        rho_g: f64,
+        g_mag: f64,
+    ) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.drift_flux_derivative(alphas[l], rho_l, rho_g, g_mag);
+        }
+        out
     }
 }
 

@@ -8,6 +8,13 @@ pub struct KernelConservationLaw1D<F> {
 }
 
 impl<F> KernelConservationLaw1D<F> {
+    /// Build the weak kernel from a pointwise 1D flux.
+    ///
+    /// # Arguments
+    /// * `flux` - flux implementation shared with the tensor kernel.
+    ///
+    /// # Returns
+    /// Weak kernel wrapping `flux`.
     pub fn new(flux: F) -> Self {
         Self { flux }
     }
@@ -31,7 +38,10 @@ impl<F: FluxKernel1D> ResidualKernel for KernelConservationLaw1D<F> {
         test_i: usize,
     ) -> f64 {
         assert_eq!(ctx.gdim, 1, "KernelConservationLaw1D requires gdim == 1");
-        -self.flux.flux(ctx, state, equation, q) * ctx.test(test_i, 0).grad(q, 0)
+        // Bridge the weak context to the pointwise flux interface: the flux
+        // contract only reads time/cell/points, which the bridge preserves.
+        let flux_ctx = ctx.flux_tensor_ctx();
+        -self.flux.flux(&flux_ctx, state.view(), equation, q) * ctx.test(test_i, 0).grad(q, 0)
     }
 
     fn jacobian_integrand(
@@ -45,7 +55,10 @@ impl<F: FluxKernel1D> ResidualKernel for KernelConservationLaw1D<F> {
         trial_i: usize,
     ) -> f64 {
         assert_eq!(ctx.gdim, 1, "KernelConservationLaw1D requires gdim == 1");
-        -self.flux.flux_jacobian(ctx, state, equation, unknown, q)
+        let flux_ctx = ctx.flux_tensor_ctx();
+        -self
+            .flux
+            .flux_jacobian(&flux_ctx, state.view(), equation, unknown, q)
             * ctx.trial(trial_i, 0).v(q)
             * ctx.test(test_i, 0).grad(q, 0)
     }

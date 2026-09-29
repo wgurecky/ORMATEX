@@ -4,7 +4,7 @@
 //! `1/2 (u dp/dx, -u p, 0)` with the matching action; owns equation 1.
 //! Weak counterpart:
 //! [`KernelEdacPressureAdvectionSplit1D`](crate::kernels::edac::weak::pressure_advection_split_1d::KernelEdacPressureAdvectionSplit1D).
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::kernels::common::TensorResidualKernel;
 use crate::kernels::edac::config_1d::{fluid_field_names_1d, EdacNavierStokes1DConfig};
 
@@ -18,48 +18,93 @@ impl TensorKernelEdacPressureAdvectionSplit1D {
     }
 }
 impl TensorResidualKernel<1> for TensorKernelEdacPressureAdvectionSplit1D {
+    #[inline]
     fn nfields(&self) -> usize {
         2
     }
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         fluid_field_names_1d()
     }
+    #[inline]
     fn owns_equation(&self, equation: usize) -> bool {
         equation == 1
     }
+
+    /// Lane-packed split-form residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed solution.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        _: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
         let u = state.value(0, q);
         let p = state.value(1, q);
-        [0.5 * u * state.grad(1, q, 0), -0.5 * u * p, 0.0]
+        let g = state.grad(1, q, 0);
+        for l in 0..LANES {
+            f0[l] = 0.5 * u[l] * g[l];
+            f1x[l] = -0.5 * u[l] * p[l];
+            f1y[l] = 0.0;
+        }
     }
+
+    /// Lane-packed split-form Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        _: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
         let u = state.value(0, q);
+        let g = state.grad(1, q, 0);
         let du = direction.value(0, q);
         let p = state.value(1, q);
         let dp = direction.value(1, q);
-        [
-            0.5 * (du * state.grad(1, q, 0) + u * direction.grad(1, q, 0)),
-            -0.5 * (du * p + u * dp),
-            0.0,
-        ]
+        let dg = direction.grad(1, q, 0);
+        for l in 0..LANES {
+            f0[l] = 0.5 * (du[l] * g[l] + u[l] * dg[l]);
+            f1x[l] = -0.5 * (du[l] * p[l] + u[l] * dp[l]);
+            f1y[l] = 0.0;
+        }
     }
 }

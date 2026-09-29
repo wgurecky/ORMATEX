@@ -1,9 +1,10 @@
 //! Core `SEM2DProblem` type, construction, and cell helpers.
 use crate::common::jacobian_pattern::JacobianPatternCache;
+use crate::common::SortedRowScatter;
 use crate::common::{
     build_quad_state_boundary_cache, cell_ctx, interpolate_cell_state, CellData, CellState,
-    ElementRestriction, FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap, TensorCtx,
-    TensorProductData,
+    ElementRestriction, FieldDofLayout, LocalCtx, QuadStateBoundaryCache, ReducedDofMap,
+    TensorBatchPlan, TensorCtx, TensorProductData,
 };
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
@@ -225,6 +226,13 @@ pub struct SEM2DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) metadata: MeshMetadata,
     pub(crate) state_boundary_cache: QuadStateBoundaryCache,
     pub(crate) jacobian_pattern_cache: JacobianPatternCache,
+    pub(crate) tensor_batch_plan: TensorBatchPlan,
+    /// Reusable E-vector scratch pool (one `nslots * ncols` row-sorted buffer
+    /// per in-flight tensor pass; hundreds of KB, so reused, not allocated).
+    pub(crate) evec_pool: std::sync::Mutex<Vec<Vec<f64>>>,
+    /// Lazily built row-sorted scatter tables, one per distinct output selection.
+    pub(crate) sorted_scatter_cache:
+        std::sync::RwLock<Vec<(Vec<usize>, std::sync::Arc<SortedRowScatter>)>>,
 }
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
@@ -514,6 +522,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
         let restriction =
             ElementRestriction::new(&cell_reduced_dofs, &cell_prescribed_values, &field_sizes);
         let state_boundary_cache = build_quad_state_boundary_cache(&mesh, &family, p, &metadata);
+        let tensor_batch_plan = TensorBatchPlan::build(&cell_data, &restriction);
         Self {
             mesh,
             fields,
@@ -529,6 +538,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM2DProblem<M> {
             metadata,
             state_boundary_cache,
             jacobian_pattern_cache: JacobianPatternCache::new(),
+            tensor_batch_plan,
+            evec_pool: std::sync::Mutex::new(Vec::new()),
+            sorted_scatter_cache: std::sync::RwLock::new(Vec::new()),
         }
     }
 

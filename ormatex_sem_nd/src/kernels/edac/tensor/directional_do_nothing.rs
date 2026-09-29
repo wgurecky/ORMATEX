@@ -5,7 +5,7 @@
 //! the outflow-side derivative. With `split_flux`, also supplies the
 //! conservative-half fluxes for split momentum/pressure advection, pairing
 //! with split-form volume kernels (default SplitBoundaryFlux elsewhere).
-use crate::common::{CellState, TensorFacetCtx};
+use crate::common::{LaneState, Lanes, TensorFacetCtx, LANES};
 use crate::kernels::common::StateTensorBoundaryIntegrator;
 use crate::kernels::edac::weak::directional_do_nothing::KernelEdacDirectionalDoNothing2D;
 use crate::kernels::edac::weak::directional_do_nothing::{
@@ -34,51 +34,93 @@ impl TensorKernelEdacDirectionalDoNothing2D {
 }
 
 impl StateTensorBoundaryIntegrator<2> for TensorKernelEdacDirectionalDoNothing2D {
+    #[inline]
     fn nfields(&self) -> usize {
         3
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         directional_field_names()
     }
 
+    /// Lane-packed directional do-nothing residual for all lanes.
+    ///
+    /// Per lane `l` computes exactly the scalar expression with
+    /// `&ctxs[l]` (same operations in the same order, including the
+    /// `min(u.n, 0)` backflow select).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed facet solution.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
-        let velocity = [state.value(0, q), state.value(1, q)];
-        directional_residual(
-            ctx.normal,
-            velocity,
-            state.value(2, q),
-            self.rho,
-            self.split_flux,
-            equation,
-        )
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
+        let p = state.value(2, q);
+        for l in 0..LANES {
+            out[l] = directional_residual(
+                ctxs[l].normal,
+                [u0[l], u1[l]],
+                p[l],
+                self.rho,
+                self.split_flux,
+                equation,
+            );
+        }
     }
 
+    /// Lane-packed directional do-nothing Jacobian action for all lanes.
+    ///
+    /// Per lane `l` computes exactly the scalar expression with
+    /// `&ctxs[l]` (same operations in the same order).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane linearized trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
-        let velocity = [state.value(0, q), state.value(1, q)];
-        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
-        directional_jacobian_action(
-            ctx.normal,
-            velocity,
-            direction_velocity,
-            state.value(2, q),
-            direction.value(2, q),
-            self.rho,
-            self.split_flux,
-            equation,
-        )
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
+        let p = state.value(2, q);
+        let du0 = direction.value(0, q);
+        let du1 = direction.value(1, q);
+        let dp = direction.value(2, q);
+        for l in 0..LANES {
+            out[l] = directional_jacobian_action(
+                ctxs[l].normal,
+                [u0[l], u1[l]],
+                [du0[l], du1[l]],
+                p[l],
+                dp[l],
+                self.rho,
+                self.split_flux,
+                equation,
+            );
+        }
     }
 }

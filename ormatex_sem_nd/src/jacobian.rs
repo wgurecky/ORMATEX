@@ -35,6 +35,55 @@ pub trait CompleteResidualOperator: Sync {
         let action = self.apply_jacobian(state, direction);
         out.copy_from(action.as_ref());
     }
+
+    /// Cache a linearization point for repeated Jacobian actions.
+    ///
+    /// Default is a no-op; tensor operators override to precompute lane-packed
+    /// states. Must be bit-identical with and without the cache.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    fn prepare_linearization(&mut self, _state: MatRef<f64>) {}
+
+    /// Apply the Jacobian at the `prepare_linearization` state, fused with an
+    /// optional row epilogue (see [`RowEpilogue`]).
+    ///
+    /// Default returns `false` (no prepared state). Tensor operators override
+    /// to apply from the cache's owned state copy with no per-apply state
+    /// comparison. Callers fall back to `apply_jacobian_into` on `false`.
+    /// Must be bit-identical to the unprepared path at the prepared state.
+    ///
+    /// # Arguments
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    /// * `epilogue` - per-row post-processing fused into the reduction.
+    ///
+    /// # Returns
+    /// `true` if the prepared apply ran, `false` to fall back.
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        let _ = (direction, out, epilogue);
+        false
+    }
+}
+
+/// Optional per-row epilogue fused into the tensor phase-2 reduction.
+///
+/// `None` writes the reduced volume (+ boundary, when present) directly.
+/// `NegScale(m_inv)` writes `-(v * m_inv[r])` per row — the SIMD order of
+/// `simd::scale_negate_in_place` (`neg(mul(v, f))`; the scalar
+/// tail `(-v) * f` is bit-identical since negation is exact and IEEE
+/// multiplication is sign-symmetric).
+#[derive(Clone, Copy)]
+pub enum RowEpilogue<'a> {
+    /// No post-processing.
+    None,
+    /// Negated lumped-mass scaling with the inverse-mass diagonal.
+    NegScale(&'a [f64]),
 }
 
 /// Source of a residual Jacobian action for a matrix-free linear operator.
@@ -58,6 +107,37 @@ pub trait MatrixFreeJacobianSource: Sync {
         let action = self.apply_jacobian(state, direction);
         out.copy_from(action.as_ref());
     }
+
+    /// Cache a linearization point for repeated Jacobian actions.
+    ///
+    /// Default is a no-op; forwarded from [`CompleteResidualOperator`] by the
+    /// blanket impl. See that trait for semantics.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    fn prepare_linearization(&mut self, _state: MatRef<f64>) {}
+
+    /// Apply the Jacobian at the prepared state with a fused row epilogue.
+    ///
+    /// Default returns `false`; forwarded from [`CompleteResidualOperator`] by
+    /// the blanket impl. See that trait for semantics.
+    ///
+    /// # Arguments
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    /// * `epilogue` - per-row post-processing fused into the reduction.
+    ///
+    /// # Returns
+    /// `true` if the prepared apply ran, `false` to fall back.
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        let _ = (direction, out, epilogue);
+        false
+    }
 }
 
 impl<O: CompleteResidualOperator> MatrixFreeJacobianSource for O {
@@ -76,6 +156,19 @@ impl<O: CompleteResidualOperator> MatrixFreeJacobianSource for O {
         out: MatMut<'_, f64>,
     ) {
         CompleteResidualOperator::apply_jacobian_into(self, state, direction, out)
+    }
+
+    fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        CompleteResidualOperator::prepare_linearization(self, state)
+    }
+
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        CompleteResidualOperator::apply_prepared_jacobian_into(self, direction, out, epilogue)
     }
 }
 
@@ -413,7 +506,16 @@ pub struct MatrixFreeMinvJacobian<'a> {
 
 impl<'a> MatrixFreeMinvJacobian<'a> {
     /// Build an operator from a complete residual Jacobian source.
-    pub fn new<S>(source: S, state: Mat<f64>, m_inv: &'a [f64]) -> Self
+    ///
+    /// Calls `source.prepare_linearization(state)` once before boxing so
+    /// Krylov's ~30 `apply` calls with the same state reuse the cached
+    /// lane-packed linearization.
+    ///
+    /// # Arguments
+    /// * `source` - residual Jacobian source (moved in).
+    /// * `state` - linearization point (`N×1`, moved in).
+    /// * `m_inv` - inverse lumped mass diagonal.
+    pub fn new<S>(mut source: S, state: Mat<f64>, m_inv: &'a [f64]) -> Self
     where
         S: MatrixFreeJacobianSource + 'a,
     {
@@ -432,6 +534,7 @@ impl<'a> MatrixFreeMinvJacobian<'a> {
             source.system_size(),
             "mass/operator size mismatch"
         );
+        source.prepare_linearization(state.as_ref());
         Self {
             source: Box::new(source),
             state,
@@ -516,6 +619,21 @@ impl LinOp<f64> for MatrixFreeMinvJacobian<'_> {
         _par: Par,
         _stack: &mut MemStack,
     ) {
+        // Prepared path applies the Jacobian at the owned `prepare` state and
+        // fuses `-M^{-1}` scaling into the row reduction, skipping the serial
+        // scaling pass below. `MatrixFreeMinvJacobian` owns both the source
+        // and the state immutably after `new` (which calls
+        // `prepare_linearization`), so the prepared state cannot diverge from
+        // `self.state`; the prepared operator reads only its owned state copy
+        // and never the passed state. Falls back to the state-checked path if
+        // the source has no prepared state (weak-only).
+        if self.source.apply_prepared_jacobian_into(
+            rhs,
+            out.rb_mut(),
+            RowEpilogue::NegScale(self.m_inv),
+        ) {
+            return;
+        }
         self.source
             .apply_jacobian_into(self.state.as_ref(), rhs, out.rb_mut());
         let ncols = out.ncols();

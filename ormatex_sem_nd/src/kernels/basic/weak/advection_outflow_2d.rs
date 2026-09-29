@@ -43,18 +43,21 @@ impl KernelAdvectionOutflow2D {
         kernel
     }
 
+    #[inline]
     fn normal_velocity(&self, facet: usize, normal: &[f64], q: usize) -> f64 {
         normal[0] * self.ux.value(facet, q) + normal[1] * self.uy.value(facet, q)
     }
 }
 
 /// Advective outflow flux with zero backflow concentration.
+#[inline]
 pub(crate) fn outflow_flux(normal_velocity: f64, c: f64) -> f64 {
     normal_velocity.max(0.0) * c
 }
 
 /// Gateaux derivative of [`outflow_flux`] w.r.t. the transported value.
 /// The frozen velocity contributes nothing; at `u.n = 0` both sides agree.
+#[inline]
 pub(crate) fn outflow_flux_action(normal_velocity: f64, dc: f64) -> f64 {
     normal_velocity.max(0.0) * dc
 }

@@ -5,7 +5,7 @@
 //! Weak counterpart:
 //! [`KernelEdacPressureDivergence1D`](crate::kernels::edac::weak::pressure_divergence_1d::KernelEdacPressureDivergence1D).
 
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 use crate::kernels::common::TensorResidualKernel;
 use crate::kernels::edac::config_1d::{fluid_field_names_1d, EdacNavierStokes1DConfig};
@@ -22,48 +22,86 @@ impl TensorKernelEdacPressureDivergence1D {
 }
 
 impl TensorResidualKernel<1> for TensorKernelEdacPressureDivergence1D {
+    #[inline]
     fn nfields(&self) -> usize {
         2
     }
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         fluid_field_names_1d()
     }
+    #[inline]
     fn owns_equation(&self, equation: usize) -> bool {
         equation == 1
     }
+
+    /// Lane-packed divergence residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed solution.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        _: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            [0.0; 3]
-        } else {
-            [
-                self.config.rho * self.config.c0 * self.config.c0 * state.grad(0, q, 0),
-                0.0,
-                0.0,
-            ]
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
+        }
+        let g = state.grad(0, q, 0);
+        for l in 0..LANES {
+            f0[l] = self.config.rho * self.config.c0 * self.config.c0 * g[l];
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
         }
     }
+
+    /// Lane-packed divergence Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed linearization point (unused).
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        _: &TensorCtx<'_>,
-        _: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        _state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            [0.0; 3]
-        } else {
-            [
-                self.config.rho * self.config.c0 * self.config.c0 * direction.grad(0, q, 0),
-                0.0,
-                0.0,
-            ]
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
+        }
+        let dg = direction.grad(0, q, 0);
+        for l in 0..LANES {
+            f0[l] = self.config.rho * self.config.c0 * self.config.c0 * dg[l];
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
         }
     }
 }

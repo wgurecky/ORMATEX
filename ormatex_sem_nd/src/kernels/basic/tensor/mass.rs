@@ -1,4 +1,4 @@
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 use crate::kernels::common::TensorResidualKernel;
 
@@ -19,23 +19,61 @@ impl TensorKernelMass {
 }
 
 impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorKernelMass {
+    /// Lane-packed mass residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed solution.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        _ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        [state.value(0, q), 0.0, 0.0]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let v = state.value(0, q);
+        for l in 0..LANES {
+            f0[l] = v[l];
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
+        }
     }
+
+    /// Lane-packed mass Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed linearization point (unused).
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        _ctx: &TensorCtx<'_>,
-        _state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        _state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        [direction.value(0, q), 0.0, 0.0]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let dv = direction.value(0, q);
+        for l in 0..LANES {
+            f0[l] = dv[l];
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
+        }
     }
 }

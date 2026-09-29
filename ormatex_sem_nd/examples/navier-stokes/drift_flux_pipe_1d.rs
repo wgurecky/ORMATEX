@@ -129,7 +129,7 @@ fn main() {
     // Outflow pairing fluxes (split momentum/pressure/void + axial drift)
     // on the right endpoint; the inlet is fully Dirichlet-prescribed.
     let terms =
-        StateBoundaryTerms::new().with_entities([nx], DriftOutflow1D::new(config, FRAC_PI_2.sin()));
+        StateBoundaryTerms::new().with_entities([nx], DriftOutflow1D::new(config, FRAC_PI_2));
     let system = DriftPipeSystem {
         problem: &problem,
         kernel: drift_kernel(config),

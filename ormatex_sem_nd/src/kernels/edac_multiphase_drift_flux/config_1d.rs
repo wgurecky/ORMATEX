@@ -5,7 +5,7 @@
 //! angle `theta(x)` supplied per-kernel as a `MaterialProperty`; the config
 //! only stores `|g|`.
 
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 use super::closures::{clamp_alpha, DistributionParameter, IshiiZuberParams};
 
@@ -124,25 +124,40 @@ impl DriftFlux1DConfig {
         self.distribution.value(self.rho_l, self.rho_g)
     }
 
-    /// Axial drift speed `V*sin(theta)` (positive up-pipe).
-    pub fn axial_drift_speed(&self, alpha: f64, theta: f64) -> f64 {
+    /// Um-referenced axial slip speed `V_um*sin(theta)` (positive up-pipe).
+    ///
+    /// Same `rho_l/rho_m` re-referencing as
+    /// [`DriftFlux2DConfig::slip_speed`](super::config::DriftFlux2DConfig::slip_speed).
+    pub fn slip_speed_1d(&self, alpha: f64) -> f64 {
         self.ishii_zuber
             .drift_speed(alpha, self.rho_l, self.rho_g, self.gravity)
-            * theta.sin()
+            * self.rho_l
+            / self.mixture_density(alpha)
     }
 
-    /// Axial hindered drift flux `F(a)*sin(theta)` (positive up-pipe).
+    /// Axial drift speed `V_um*sin(theta)` (positive up-pipe).
+    pub fn axial_drift_speed(&self, alpha: f64, theta: f64) -> f64 {
+        self.slip_speed_1d(alpha) * theta.sin()
+    }
+
+    /// Axial hindered drift flux `F_um(a)*sin(theta)` (positive up-pipe).
     pub fn axial_drift_flux(&self, alpha: f64, theta: f64) -> f64 {
-        self.ishii_zuber
-            .drift_flux(alpha, self.rho_l, self.rho_g, self.gravity)
-            * theta.sin()
+        clamp_alpha(alpha) * self.slip_speed_1d(alpha) * theta.sin()
     }
 
-    /// Exact axial drift-flux derivative `dF/da*sin(theta)`.
+    /// Exact axial drift-flux derivative `dF_um/da*sin(theta)`.
     pub fn axial_drift_flux_derivative(&self, alpha: f64, theta: f64) -> f64 {
-        self.ishii_zuber
-            .drift_flux_derivative(alpha, self.rho_l, self.rho_g, self.gravity)
-            * theta.sin()
+        if alpha <= 0.0 || alpha >= 1.0 {
+            return 0.0;
+        }
+        let rho = self.mixture_density(alpha);
+        let f = self
+            .ishii_zuber
+            .drift_flux(alpha, self.rho_l, self.rho_g, self.gravity);
+        let df =
+            self.ishii_zuber
+                .drift_flux_derivative(alpha, self.rho_l, self.rho_g, self.gravity);
+        self.rho_l * (df * rho - f * self.mixture_density_derivative()) / (rho * rho) * theta.sin()
     }
 
     /// Vapor-phase velocity from the slip relation `u_g = C0*u + V_axial`.
@@ -173,27 +188,105 @@ impl DriftFlux1DConfig {
         -self.gravity * theta.sin()
     }
 
-    pub(crate) fn pressure_diffusivity_tensor(&self, ctx: &TensorCtx<'_>) -> f64 {
-        self.pressure_diffusion_factor * self.c0 * ctx.cell_size
+    /// Lane-packed axial drift fluxes matching [`axial_drift_flux`](Self::axial_drift_flux).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    /// * `thetas` - per-lane pipe angles in radians from horizontal.
+    ///
+    /// # Returns
+    /// Per-lane axial hindered drift flux, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub(crate) fn axial_drift_flux_lanes(&self, alphas: &Lanes, thetas: &Lanes) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.axial_drift_flux(alphas[l], thetas[l]);
+        }
+        out
     }
 
-    /// Laminar viscous stress `tau = 2 nu_m(alpha) du/dx`.
-    pub(crate) fn stress_tensor(&self, state: &CellState<'_>, q: usize) -> f64 {
-        2.0 * self.mixture_nu(state.value(ALPHA_1D, q)) * state.grad(0, q, 0)
-    }
-
-    pub(crate) fn stress_tensor_directional_derivative(
+    /// Lane-packed axial drift-flux derivatives matching [`axial_drift_flux_derivative`](Self::axial_drift_flux_derivative).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    /// * `thetas` - per-lane pipe angles in radians from horizontal.
+    ///
+    /// # Returns
+    /// Per-lane `dF_um/da*sin(theta)`, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub(crate) fn axial_drift_flux_derivative_lanes(
         &self,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        q: usize,
-    ) -> f64 {
+        alphas: &Lanes,
+        thetas: &Lanes,
+    ) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.axial_drift_flux_derivative(alphas[l], thetas[l]);
+        }
+        out
+    }
+
+    /// Lane-packed pressure diffusivities in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    ///
+    /// # Returns
+    /// Per-lane `(factor * c0) * cell_size[l]` with scalar operation order.
+    #[inline]
+    pub(crate) fn pressure_diffusivities_tensor_lanes(&self, ctxs: &[TensorCtx<'_>]) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.pressure_diffusion_factor * self.c0 * ctxs[l].cell_size;
+        }
+        out
+    }
+
+    /// Lane-packed laminar viscous stresses in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `state` - lane-packed solution.
+    /// * `q` - quadrature-point index shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane `2*nu_m*du/dx`, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub(crate) fn stress_tensor_lanes(&self, state: &LaneState<'_>, q: usize) -> Lanes {
         let alpha = state.value(ALPHA_1D, q);
-        2.0 * self.mixture_nu(alpha) * direction.grad(0, q, 0)
-            + 2.0
-                * self.mixture_nu_derivative(alpha)
-                * direction.value(ALPHA_1D, q)
-                * state.grad(0, q, 0)
+        let grad = state.grad(0, q, 0);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = 2.0 * self.mixture_nu(alpha[l]) * grad[l];
+        }
+        out
+    }
+
+    /// Lane-packed viscous-stress directional derivatives in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `q` - quadrature-point index shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane `2*nu_m*ddu/dx + 2*dnu_m/da*da*du/dx` in scalar operation order.
+    #[inline]
+    pub(crate) fn stress_tensor_directional_derivative_lanes(
+        &self,
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
+        q: usize,
+    ) -> Lanes {
+        let alpha = state.value(ALPHA_1D, q);
+        let grad = state.grad(0, q, 0);
+        let dalpha = direction.value(ALPHA_1D, q);
+        let dgrad = direction.grad(0, q, 0);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = 2.0 * self.mixture_nu(alpha[l]) * dgrad[l]
+                + 2.0 * self.mixture_nu_derivative(alpha[l]) * dalpha[l] * grad[l];
+        }
+        out
     }
 }
 

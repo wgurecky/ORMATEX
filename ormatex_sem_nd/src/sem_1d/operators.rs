@@ -1,6 +1,9 @@
 //! Weak / tensor / mixed residual operators for 1D problems.
-use crate::jacobian::CompleteResidualOperator;
+use crate::common::batch::tensor_state_cache_limit_bytes;
+use crate::common::TensorStateCache;
+use crate::jacobian::{CompleteResidualOperator, RowEpilogue};
 use crate::kernels::common::{ResidualKernel, StateBoundaryTerms, TensorResidualKernel};
+use crate::common::tensor_pass::{reduce_sorted_evec_into_out, TensorPhase1Ctx};
 use faer::prelude::*;
 use faer::sparse::SparseColMat;
 
@@ -30,6 +33,7 @@ where
     kernel: &'k K,
     time: f64,
     terms: Option<&'b StateBoundaryTerms>,
+    state_cache: Option<TensorStateCache>,
 }
 
 impl<'p, 'k, 'b, M, K> SEM1DTensorResidualOperator<'p, 'k, 'b, M, K>
@@ -44,21 +48,47 @@ where
     /// Residual at the operator's time, including boundary terms when set.
     pub fn residual(&self, state: MatRef<f64>) -> Vec<f64> {
         let layout = self.problem.field_layout();
-        let mut residual = self.problem.assemble_tensor_residual_with_layout(
-            self.time,
-            self.kernel,
-            state,
-            &layout,
-        );
-        if let Some(terms) = self.terms {
-            let boundary = self
-                .problem
-                .assemble_state_boundary_residual(self.time, state, terms);
-            for (volume, boundary) in residual.iter_mut().zip(boundary) {
-                *volume += boundary;
+        match self.terms {
+            // ponytail: overlap the serial boundary assembly with the parallel
+            // volume assembly; the final add runs in the same order as before.
+            Some(terms) if rayon::current_num_threads() > 1 => {
+                let (mut residual, boundary) = rayon::join(
+                    || {
+                        self.problem.assemble_tensor_residual_with_layout(
+                            self.time,
+                            self.kernel,
+                            state,
+                            &layout,
+                        )
+                    },
+                    || {
+                        self.problem
+                            .assemble_state_boundary_residual(self.time, state, terms)
+                    },
+                );
+                for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                    *volume += boundary;
+                }
+                residual
+            }
+            _ => {
+                let mut residual = self.problem.assemble_tensor_residual_with_layout(
+                    self.time,
+                    self.kernel,
+                    state,
+                    &layout,
+                );
+                if let Some(terms) = self.terms {
+                    let boundary = self
+                        .problem
+                        .assemble_state_boundary_residual(self.time, state, terms);
+                    for (volume, boundary) in residual.iter_mut().zip(boundary) {
+                        *volume += boundary;
+                    }
+                }
+                residual
             }
         }
-        residual
     }
     /// Assembled Jacobian at `state`, including boundary terms when set.
     pub fn assemble_jacobian(&self, state: MatRef<f64>) -> SparseColMat<usize, f64> {
@@ -81,9 +111,51 @@ where
     }
     /// Matrix-free Jacobian action on one or more direction columns.
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
-        let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
-        self.apply_jacobian_into(state, direction, out.as_mut());
-        out
+        let layout = self.problem.field_layout();
+        match self.terms {
+            // ponytail: overlap the serial boundary action with the parallel
+            // volume action; the final add runs in the same order as before.
+            Some(terms) if rayon::current_num_threads() > 1 => {
+                let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
+                let ((), boundary) = rayon::join(
+                    || {
+                        self.problem.apply_tensor_jacobian_with_layout_cached(
+                            self.time,
+                            self.kernel,
+                            state,
+                            direction,
+                            &layout,
+                            out.as_mut(),
+                            self.state_cache.as_ref(),
+                        )
+                    },
+                    || {
+                        self.problem
+                            .apply_state_boundary_jacobian(self.time, state, direction, terms)
+                    },
+                );
+                out += boundary;
+                out
+            }
+            _ => {
+                let mut out = Mat::<f64>::zeros(self.problem.system_size(), direction.ncols());
+                self.problem.apply_tensor_jacobian_with_layout_cached(
+                    self.time,
+                    self.kernel,
+                    state,
+                    direction,
+                    &layout,
+                    out.as_mut(),
+                    self.state_cache.as_ref(),
+                );
+                if let Some(terms) = self.terms {
+                    out += self
+                        .problem
+                        .apply_state_boundary_jacobian(self.time, state, direction, terms);
+                }
+                out
+            }
+        }
     }
 
     /// Matrix-free Jacobian action into caller-provided storage.
@@ -94,18 +166,45 @@ where
         mut out: MatMut<'_, f64>,
     ) {
         let layout = self.problem.field_layout();
-        self.problem.apply_tensor_jacobian_with_layout(
-            self.time,
-            self.kernel,
-            state,
-            direction,
-            &layout,
-            out.rb_mut(),
-        );
-        if let Some(terms) = self.terms {
-            out += self
-                .problem
-                .apply_state_boundary_jacobian(self.time, state, direction, terms);
+        match self.terms {
+            // ponytail: overlap the serial boundary action with the parallel
+            // volume action; the final add runs in the same order as before.
+            Some(terms) if rayon::current_num_threads() > 1 => {
+                let ((), boundary) = rayon::join(
+                    || {
+                        self.problem.apply_tensor_jacobian_with_layout_cached(
+                            self.time,
+                            self.kernel,
+                            state,
+                            direction,
+                            &layout,
+                            out.rb_mut(),
+                            self.state_cache.as_ref(),
+                        )
+                    },
+                    || {
+                        self.problem
+                            .apply_state_boundary_jacobian(self.time, state, direction, terms)
+                    },
+                );
+                out += boundary;
+            }
+            _ => {
+                self.problem.apply_tensor_jacobian_with_layout_cached(
+                    self.time,
+                    self.kernel,
+                    state,
+                    direction,
+                    &layout,
+                    out.rb_mut(),
+                    self.state_cache.as_ref(),
+                );
+                if let Some(terms) = self.terms {
+                    out += self
+                        .problem
+                        .apply_state_boundary_jacobian(self.time, state, direction, terms);
+                }
+            }
         }
     }
     /// Return this operator at a new time.
@@ -124,7 +223,188 @@ where
             kernel: self.kernel,
             time: self.time,
             terms: Some(terms),
+            state_cache: None,
         }
+    }
+
+    /// Cache the linearization state for repeated Jacobian actions.
+    ///
+    /// Always stores an owned copy of `state` (needed by the prepared path,
+    /// boundary terms, and to skip per-apply comparisons). The interpolated
+    /// per-batch lane-packed values+grads are only built when their footprint
+    /// fits a size budget: by default 8 MiB, overridable via the
+    /// `ORMATEX_TENSOR_STATE_CACHE_MB` environment variable (`0` disables the
+    /// interpolated cache). Above the budget the cache holds only the owned
+    /// copy and the prepared apply path re-interpolates from it (fresh
+    /// gather+interpolate phase-1 mode, still no state comparison, still
+    /// fused boundary/epilogue). Later `apply_jacobian` calls reuse the
+    /// interpolated states only on full bitwise equality of the state and the
+    /// input field ids (and only when they were built); otherwise they
+    /// compute fresh. Results are bit-identical with and without the
+    /// interpolated cache. `residual` never uses the cache.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    pub fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        self.prepare_linearization_with_limit(state, tensor_state_cache_limit_bytes());
+    }
+
+    /// Cache the linearization state with an explicit interpolated-state budget.
+    ///
+    /// Same as [`prepare_linearization`](Self::prepare_linearization) but with
+    /// the budget passed directly instead of read from the environment.
+    /// Crate-internal so tests can force the threshold (e.g. `0`) without
+    /// touching the process-wide env-var cache.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    /// * `limit_bytes` - interpolated-state budget in bytes; `0` keeps only
+    ///   the owned state copy.
+    pub(crate) fn prepare_linearization_with_limit(
+        &mut self,
+        state: MatRef<f64>,
+        limit_bytes: u64,
+    ) {
+        self.state_cache = Some(self.problem.build_tensor_state_cache_with_limit(
+            self.kernel,
+            state,
+            limit_bytes,
+        ));
+    }
+
+    /// Prepared Jacobian action from the owned linearization cache.
+    ///
+    /// Uses the cache's owned state copy for everything needing the state
+    /// (volume via cached interpolation when built, else by fresh
+    /// gather+interpolate from the owned copy; boundary via the owned copy)
+    /// with no state comparison. Returns `false` when no cache is prepared.
+    /// Bit-identical to `apply_jacobian_into` at the prepared state; the
+    /// boundary add and `epilogue` fuse into the row-sorted phase-2 reduction.
+    ///
+    /// # Arguments
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    /// * `epilogue` - per-row post-processing fused into the reduction.
+    ///
+    /// # Returns
+    /// `true` if the prepared apply ran, `false` to fall back.
+    pub fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        let cache = match self.state_cache.as_ref() {
+            Some(cache) => cache,
+            None => return false,
+        };
+        let layout = self.problem.field_layout();
+        let selection = self.problem.fields.resolve_selection(
+            self.kernel.input_nfields(),
+            self.kernel.input_field_names(),
+            self.kernel.output_nfields(),
+            self.kernel.output_field_names(),
+            "tensor residual kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        assert_eq!(
+            direction.nrows(),
+            layout.total_size,
+            "direction size mismatch"
+        );
+        assert_eq!(out.nrows(), layout.total_size, "output size mismatch");
+        assert_eq!(
+            out.ncols(),
+            direction.ncols(),
+            "output column count mismatch"
+        );
+        let ncols = direction.ncols();
+        if ncols == 0 {
+            return true;
+        }
+        let input_offsets: Vec<usize> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let sources: Vec<usize> = selection
+            .inputs
+            .iter()
+            .map(|&g| self.problem.restriction.field_map_source(g))
+            .collect();
+        let scatter = self.problem.sorted_scatter_for(&selection.outputs);
+        let mut evec_sorted = self.problem.acquire_evec(scatter.nslots * ncols);
+        // Owned linearization state; `ncols == 1` by construction of the cache.
+        let owned_state =
+            faer::MatRef::from_column_major_slice(&cache.state_copy, cache.nrows, cache.ncols);
+        let time = self.time;
+        let problem = self.problem;
+        let kernel = self.kernel;
+        // Interpolated states when built; otherwise fresh gather+interpolate
+        // from the owned copy (same arithmetic, still no state comparison).
+        let (fresh_state, cache_ref) = if cache.has_batch_states() {
+            (None, Some(cache))
+        } else {
+            (Some(owned_state), None)
+        };
+        let ctx = TensorPhase1Ctx {
+            time,
+            ninputs,
+            noutputs,
+            sources: &sources,
+            input_offsets: &input_offsets,
+            fresh_state,
+            cache: cache_ref,
+            direction: Some(direction),
+            scatter: &scatter,
+            evec_sorted: &mut evec_sorted,
+        };
+        if let Some(terms) = self.terms {
+            if rayon::current_num_threads() > 1 {
+                let ((), boundary) = rayon::join(
+                    || {
+                        problem.phase1_fill_sorted_dispatch(kernel, ctx);
+                    },
+                    || problem.apply_state_boundary_jacobian(time, owned_state, direction, terms),
+                );
+                reduce_sorted_evec_into_out(
+                    &scatter,
+                    &evec_sorted,
+                    ncols,
+                    Some(boundary.as_ref()),
+                    epilogue,
+                    &self.problem.evec_pool,
+                    out,
+                );
+            } else {
+                problem.phase1_fill_sorted_dispatch(kernel, ctx);
+                let boundary =
+                    problem.apply_state_boundary_jacobian(time, owned_state, direction, terms);
+                reduce_sorted_evec_into_out(
+                    &scatter,
+                    &evec_sorted,
+                    ncols,
+                    Some(boundary.as_ref()),
+                    epilogue,
+                    &self.problem.evec_pool,
+                    out,
+                );
+            }
+        } else {
+            problem.phase1_fill_sorted_dispatch(kernel, ctx);
+            reduce_sorted_evec_into_out(
+                &scatter,
+                &evec_sorted,
+                ncols,
+                None,
+                epilogue,
+                &self.problem.evec_pool,
+                out,
+            );
+        }
+        self.problem.release_evec(evec_sorted);
+        true
     }
 }
 
@@ -153,6 +433,17 @@ where
     ) {
         SEM1DTensorResidualOperator::apply_jacobian_into(self, state, direction, out);
     }
+    fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        SEM1DTensorResidualOperator::prepare_linearization(self, state)
+    }
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        SEM1DTensorResidualOperator::apply_prepared_jacobian_into(self, direction, out, epilogue)
+    }
 }
 
 /// Residual operator that combines one statically dispatched tensor kernel
@@ -165,6 +456,7 @@ where
     tensor_kernel: &'t T,
     weak_kernel: &'w W,
     time: f64,
+    state_cache: Option<TensorStateCache>,
 }
 
 impl<'p, 't, 'w, M, T, W> SEM1DMixedResidualOperator<'p, 't, 'w, M, T, W>
@@ -215,13 +507,14 @@ where
     pub fn apply_jacobian(&self, state: MatRef<f64>, direction: MatRef<f64>) -> Mat<f64> {
         let mut out = Mat::<f64>::zeros(self.system_size(), direction.ncols());
         let layout = self.problem.field_layout();
-        self.problem.apply_tensor_jacobian_with_layout(
+        self.problem.apply_tensor_jacobian_with_layout_cached(
             self.time,
             self.tensor_kernel,
             state,
             direction,
             &layout,
             out.as_mut(),
+            self.state_cache.as_ref(),
         );
         out += self
             .problem
@@ -237,13 +530,14 @@ where
         mut out: MatMut<'_, f64>,
     ) {
         let layout = self.problem.field_layout();
-        self.problem.apply_tensor_jacobian_with_layout(
+        self.problem.apply_tensor_jacobian_with_layout_cached(
             self.time,
             self.tensor_kernel,
             state,
             direction,
             &layout,
             out.rb_mut(),
+            self.state_cache.as_ref(),
         );
         out += self
             .problem
@@ -254,6 +548,187 @@ where
     pub fn at_time(mut self, time: f64) -> Self {
         self.time = time;
         self
+    }
+
+    /// Cache the tensor linearization state for repeated Jacobian actions.
+    ///
+    /// Same semantics as [`SEM1DTensorResidualOperator::prepare_linearization`],
+    /// covering only the tensor volume term; the weak term always recomputes.
+    /// The interpolated per-batch states are subject to the same size budget
+    /// (default 8 MiB, `ORMATEX_TENSOR_STATE_CACHE_MB`); above it the prepared
+    /// path re-interpolates the tensor volume from the owned copy.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    pub fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        self.prepare_linearization_with_limit(state, tensor_state_cache_limit_bytes());
+    }
+
+    /// Cache the tensor linearization state with an explicit budget.
+    ///
+    /// Same as [`prepare_linearization`](Self::prepare_linearization) but with
+    /// the interpolated-state budget passed directly. Crate-internal so tests
+    /// can force the threshold without touching the process-wide env-var cache.
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    /// * `limit_bytes` - interpolated-state budget in bytes; `0` keeps only
+    ///   the owned state copy.
+    pub(crate) fn prepare_linearization_with_limit(
+        &mut self,
+        state: MatRef<f64>,
+        limit_bytes: u64,
+    ) {
+        self.state_cache = Some(self.problem.build_tensor_state_cache_with_limit(
+            self.tensor_kernel,
+            state,
+            limit_bytes,
+        ));
+    }
+
+    /// Cached tensor-volume fill into `out` (row-sorted reduction, no epilogue).
+    ///
+    /// Runs phase 1 from the owned linearization cache with no state
+    /// comparison (cached interpolation when built, else fresh
+    /// gather+interpolate from the owned copy), then reduces the row-sorted
+    /// E-vector into `out` with [`RowEpilogue::None`]. Shared by the serial
+    /// and overlapped branches of
+    /// [`apply_prepared_jacobian_into`](Self::apply_prepared_jacobian_into).
+    ///
+    /// # Arguments
+    /// * `cache` - owned linearization cache from `prepare_linearization`.
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    fn fill_cached_tensor_volume(
+        &self,
+        cache: &TensorStateCache,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+    ) {
+        let layout = self.problem.field_layout();
+        let selection = self.problem.fields.resolve_selection(
+            self.tensor_kernel.input_nfields(),
+            self.tensor_kernel.input_field_names(),
+            self.tensor_kernel.output_nfields(),
+            self.tensor_kernel.output_field_names(),
+            "tensor residual kernel",
+        );
+        let ninputs = selection.inputs.len();
+        let noutputs = selection.outputs.len();
+        let input_offsets: Vec<usize> = selection
+            .inputs
+            .iter()
+            .map(|&field| layout.offsets[field])
+            .collect();
+        let sources: Vec<usize> = selection
+            .inputs
+            .iter()
+            .map(|&g| self.problem.restriction.field_map_source(g))
+            .collect();
+        let scatter = self.problem.sorted_scatter_for(&selection.outputs);
+        let mut evec_sorted = self
+            .problem
+            .acquire_evec(scatter.nslots * direction.ncols());
+        // Owned linearization state; the interpolated states are reused when
+        // built, else phase 1 re-interpolates from this copy (bit-identical).
+        let owned_state =
+            faer::MatRef::from_column_major_slice(&cache.state_copy, cache.nrows, cache.ncols);
+        let (fresh_state, cache_ref) = if cache.has_batch_states() {
+            (None, Some(cache))
+        } else {
+            (Some(owned_state), None)
+        };
+        let ctx = TensorPhase1Ctx {
+            time: self.time,
+            ninputs,
+            noutputs,
+            sources: &sources,
+            input_offsets: &input_offsets,
+            fresh_state,
+            cache: cache_ref,
+            direction: Some(direction),
+            scatter: &scatter,
+            evec_sorted: &mut evec_sorted,
+        };
+        self.problem
+            .phase1_fill_sorted_dispatch(self.tensor_kernel, ctx);
+        reduce_sorted_evec_into_out(
+            &scatter,
+            &evec_sorted,
+            direction.ncols(),
+            None,
+            RowEpilogue::None,
+            &self.problem.evec_pool,
+            out,
+        );
+        self.problem.release_evec(evec_sorted);
+    }
+
+    /// Prepared Jacobian action from the owned tensor cache.
+    ///
+    /// Tensor volume uses cached interpolation when built, else fresh
+    /// gather+interpolate from the owned state copy; the weak volume
+    /// recomputes from the owned state copy (no state comparison). Returns
+    /// `false` when no cache is prepared. Bit-identical to
+    /// `apply_jacobian_into` at the prepared state: tensor volume reduces
+    /// first, then `+= weak` in the same order, then the `epilogue` scaling
+    /// per row in SIMD order.
+    ///
+    /// # Arguments
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    /// * `epilogue` - per-row post-processing after all adds.
+    ///
+    /// # Returns
+    /// `true` if the prepared apply ran, `false` to fall back.
+    pub fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        mut out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        let cache = match self.state_cache.as_ref() {
+            Some(cache) => cache,
+            None => return false,
+        };
+        let layout = self.problem.field_layout();
+        assert_eq!(
+            direction.nrows(),
+            layout.total_size,
+            "direction size mismatch"
+        );
+        assert_eq!(out.nrows(), layout.total_size, "output size mismatch");
+        assert_eq!(
+            out.ncols(),
+            direction.ncols(),
+            "output column count mismatch"
+        );
+        let ncols = direction.ncols();
+        if ncols == 0 {
+            return true;
+        }
+        let owned_state =
+            faer::MatRef::from_column_major_slice(&cache.state_copy, cache.nrows, cache.ncols);
+        // Tensor volume (cached) fills `out` first; the weak volume then `+=`
+        // in the same order as `apply_jacobian_into`.
+        let time = self.time;
+        let problem = self.problem;
+        let weak_kernel = self.weak_kernel;
+        self.fill_cached_tensor_volume(cache, direction, out.rb_mut());
+        out += problem.apply_jacobian(time, weak_kernel, owned_state, direction);
+        match epilogue {
+            RowEpilogue::None => {}
+            RowEpilogue::NegScale(m_inv) => {
+                assert_eq!(m_inv.len(), layout.total_size);
+                for c in 0..ncols {
+                    for r in 0..layout.total_size {
+                        // SIMD order `-(v * f)`, as in the fused tensor path.
+                        out[(r, c)] = -(out[(r, c)] * m_inv[r]);
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
@@ -286,6 +761,18 @@ where
         out: MatMut<'_, f64>,
     ) {
         SEM1DMixedResidualOperator::apply_jacobian_into(self, state, direction, out);
+    }
+
+    fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        SEM1DMixedResidualOperator::prepare_linearization(self, state)
+    }
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        SEM1DMixedResidualOperator::apply_prepared_jacobian_into(self, direction, out, epilogue)
     }
 }
 
@@ -366,6 +853,44 @@ where
             Self::Mixed(operator) => Self::Mixed(operator.at_time(time)),
         }
     }
+
+    /// Cache the tensor linearization state (no-op for `Weak`).
+    ///
+    /// # Arguments
+    /// * `state` - linearization point (`N×1`).
+    pub fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        match self {
+            Self::Weak(_) => {}
+            Self::Tensor(operator) => operator.prepare_linearization(state),
+            Self::Mixed(operator) => operator.prepare_linearization(state),
+        }
+    }
+
+    /// Prepared Jacobian action; `Weak` returns `false`, otherwise forwards.
+    ///
+    /// # Arguments
+    /// * `direction` - global directions (`N×ncols`).
+    /// * `out` - global output (`N×ncols`). Fully overwritten.
+    /// * `epilogue` - per-row post-processing fused into the reduction.
+    ///
+    /// # Returns
+    /// `true` if the prepared apply ran, `false` to fall back.
+    pub fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        match self {
+            Self::Weak(_) => false,
+            Self::Tensor(operator) => {
+                operator.apply_prepared_jacobian_into(direction, out, epilogue)
+            }
+            Self::Mixed(operator) => {
+                operator.apply_prepared_jacobian_into(direction, out, epilogue)
+            }
+        }
+    }
 }
 
 impl<M, T, W> CompleteResidualOperator for SEM1DResidualExecution<'_, '_, '_, '_, M, T, W>
@@ -397,6 +922,18 @@ where
         out: MatMut<'_, f64>,
     ) {
         SEM1DResidualExecution::apply_jacobian_into(self, state, direction, out);
+    }
+
+    fn prepare_linearization(&mut self, state: MatRef<f64>) {
+        SEM1DResidualExecution::prepare_linearization(self, state)
+    }
+    fn apply_prepared_jacobian_into(
+        &self,
+        direction: MatRef<f64>,
+        out: MatMut<'_, f64>,
+        epilogue: RowEpilogue<'_>,
+    ) -> bool {
+        SEM1DResidualExecution::apply_prepared_jacobian_into(self, direction, out, epilogue)
     }
 }
 
@@ -558,6 +1095,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             kernel,
             time: 0.0,
             terms: None,
+            state_cache: None,
         }
     }
 
@@ -604,6 +1142,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             tensor_kernel,
             weak_kernel,
             time: 0.0,
+            state_cache: None,
         }
     }
 }

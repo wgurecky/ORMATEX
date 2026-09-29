@@ -1,4 +1,4 @@
-use ormatex_sem_nd::{CellState, FluxKernel1D, LocalCtx};
+use ormatex_sem_nd::{FluxKernel1D, StateView, TensorCtx};
 
 /// Compressible Euler equations in conservative variables
 /// `[rho, momentum, total_energy]`.
@@ -13,7 +13,7 @@ impl Euler1D {
         Self { gamma }
     }
 
-    fn primitive(&self, state: &CellState, q: usize) -> (f64, f64, f64) {
+    fn primitive(&self, state: StateView<'_>, q: usize) -> (f64, f64, f64) {
         let rho = state.value(0, q);
         let momentum = state.value(1, q);
         let energy = state.value(2, q);
@@ -38,7 +38,7 @@ impl FluxKernel1D for Euler1D {
         )
     }
 
-    fn flux(&self, _ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64 {
+    fn flux(&self, _ctx: &TensorCtx<'_>, state: StateView<'_>, equation: usize, q: usize) -> f64 {
         let momentum = state.value(1, q);
         let energy = state.value(2, q);
         let (_, velocity, pressure) = self.primitive(state, q);
@@ -52,8 +52,8 @@ impl FluxKernel1D for Euler1D {
 
     fn flux_jacobian(
         &self,
-        _ctx: &LocalCtx,
-        state: &CellState,
+        _ctx: &TensorCtx<'_>,
+        state: StateView<'_>,
         equation: usize,
         unknown: usize,
         q: usize,

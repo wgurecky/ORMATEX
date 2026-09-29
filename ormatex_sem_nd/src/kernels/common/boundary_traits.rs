@@ -1,5 +1,16 @@
 //! State-dependent and state-independent boundary traits.
-use crate::common::{CellState, FacetCtx, TensorFacetCtx};
+//!
+//! # Lane-packed contract (tensor boundary kernels)
+//!
+//! The lane-packed entry points evaluate `LANES` facets at once: per lane they
+//! compute the scalar trace flux, lanes are independent, and outputs are
+//! overwritten. `ctxs.len()` must equal [`LANES`](crate::common::LANES) (one
+//! [`TensorFacetCtx`] per lane; padded lanes get a copy of a real facet's
+//! context). Facet [`LaneState`] uses `npts` = facet quadrature count and
+//! `gdim` = 2; its grads slice is present only when
+//! [`StateTensorBoundaryIntegrator::tensor_requires_gradients`] returns true,
+//! otherwise it may be empty and kernels must not read grads.
+use crate::common::{CellState, FacetCtx, LaneState, Lanes, TensorFacetCtx};
 
 /// Boundary integrator trait for Neumann and Robin forms.
 pub trait BoundaryIntegrator {
@@ -340,6 +351,22 @@ pub trait StateBoundaryIntegrator: Send + Sync {
 
 /// Statically dispatched tensor-product state boundary kernel.
 ///
+/// This is the single supported way to compute sum-factorized boundary
+/// residuals and Jacobian actions: every implementation evaluates `LANES`
+/// facets at once from lane-packed buffers. There is no scalar fallback.
+///
+/// # Lane-packed contract
+///
+/// * Inputs are lane-packed facet [`LaneState`] values with `npts` set to the
+///   facet quadrature count and `gdim = 2`; grads are present only when
+///   [`tensor_requires_gradients`](Self::tensor_requires_gradients) returns
+///   true, otherwise the grads slice may be empty and kernels must not read it.
+/// * One [`TensorFacetCtx`] per lane; `ctxs.len()` must equal [`LANES`](crate::common::LANES)
+///   (padded lanes get a copy of a real facet's context).
+/// * Lanes are independent and outputs are overwritten.
+/// * Per-lane material evaluation goes through the lane's [`StateView`](crate::common::StateView)
+///   (`state.lane(l)`), sharing one coefficient code path.
+///
 /// # Type parameters
 /// * `GDIM` - geometric dimension of the physical space: `1` for the 1D
 ///   interval, `2` for the 2D quadrilateral. Must match the volume kernel's
@@ -347,6 +374,29 @@ pub trait StateBoundaryIntegrator: Send + Sync {
 ///
 /// `GDIM` is part of the type so tensor boundary assembly can select this
 /// interface without probing the weak [`StateBoundaryIntegrator`] API.
+///
+/// # Example
+///
+/// ```ignore
+/// impl StateTensorBoundaryIntegrator<2> for TensorKernelAdvectionOutflow2D {
+///     fn tensor_residual(
+///         &self,
+///         ctxs: &[TensorFacetCtx<'_>],
+///         state: &LaneState<'_>,
+///         equation: usize,
+///         q: usize,
+///         out: &mut Lanes,
+///     ) {
+///         let c = state.value(equation, q);
+///         for l in 0..LANES {
+///             let n = ctxs[l].normal;
+///             let un = n[0] * self.ux(l, q) + n[1] * self.uy(l, q);
+///             out[l] = un.max(0.0) * c[l];
+///         }
+///     }
+///     // ... tensor_jacobian_action replaces `state` with `direction` ...
+/// }
+/// ```
 pub trait StateTensorBoundaryIntegrator<const GDIM: usize>: Send + Sync {
     /// Number of scalar equation/unknown fields in this boundary form.
     ///
@@ -401,61 +451,57 @@ pub trait StateTensorBoundaryIntegrator<const GDIM: usize>: Send + Sync {
     /// # Returns
     /// `true` if [`tensor_residual`](Self::tensor_residual) or
     /// [`tensor_jacobian_action`](Self::tensor_jacobian_action) reads
-    /// `state.grad(..)`; the assembler skips gradient interpolation otherwise.
+    /// lane gradients; the assembler skips gradient interpolation otherwise.
     fn tensor_requires_gradients(&self) -> bool {
         false
     }
 
-    /// Return the pointwise trace residual for one equation.
+    /// Lane-packed trace residuals for [`LANES`](crate::common::LANES) facets at one facet quadrature point.
     ///
-    /// Returns the scalar boundary flux `g` such that the weak facet integrand
-    /// for a trace test function `v` is `g * v(q)`. The assembler forms
-    /// `sum_q wts[q] * jfacet_det[q] * g * phi_trace[q]`; the kernel must NOT
-    /// include weights, facet determinants, or basis values. This is the facet
-    /// analogue of the volume `f0` slot (there is no `f1` flux slot because the
-    /// trace has no volume gradient to contract).
+    /// Each lane holds the scalar boundary flux `g` such that the weak facet
+    /// integrand for a trace test function `v` is `g * v(q)`. The assembler
+    /// forms `sum_q wts[q] * jfacet_det[q] * g * phi_trace[q]`; the kernel must
+    /// NOT include weights, facet determinants, or basis values. This is the
+    /// facet analogue of the volume `f0` slot (there is no `f1` flux slot
+    /// because the trace has no volume gradient to contract).
     ///
     /// # Arguments
-    /// * `ctx` - tensor facet context (time, facet metadata, points in
-    ///   `ctx.points`, outward unit normal in `ctx.normal`).
-    /// * `state` - interpolated facet state; read with `state.value(field, q)`
-    ///   and, if `tensor_requires_gradients()` is true, `state.grad(field, q, d)`.
-    /// * `equation` - output equation index in `0..output_nfields()`.
-    /// * `q` - facet quadrature-point index in `0..ctx.npts`.
-    ///
-    /// # Returns
-    /// Scalar trace flux `g` at `q` (e.g. a prescribed traction component,
-    /// `-p*n[i]`, or a nonlinear outflow flux).
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`](crate::common::LANES).
+    /// * `state` - lane-packed interpolated facet solution (`npts` = facet
+    ///   quadrature count, `gdim` = 2; grads present only if
+    ///   [`tensor_requires_gradients`](Self::tensor_requires_gradients)).
+    /// * `equation` - output equation index shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane trace-flux slots. Overwritten.
     fn tensor_residual(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64;
+        out: &mut Lanes,
+    );
 
-    /// Return the pointwise trace Jacobian action for one equation.
+    /// Lane-packed trace Jacobian actions for [`LANES`](crate::common::LANES) facets at one facet quadrature point.
     ///
-    /// Gateaux derivative `d/dε tensor_residual(state + ε*direction)|ε=0` at
-    /// `q`, with the same scalar-trace meaning: the weak facet Jacobian action
-    /// for test `v` is `dg * v(q)`.
+    /// Per-lane Gateaux derivative `d/dε tensor_residual(state + ε*direction)`
+    /// at `ε=0`, with the same scalar-trace meaning: the weak facet Jacobian
+    /// action for test `v` is `dg * v(q)`.
     ///
     /// # Arguments
-    /// * `ctx` - tensor facet context (same use as in `tensor_residual`).
-    /// * `state` - linearization point with `input_nfields()` fields.
-    /// * `direction` - Gateaux direction with `input_nfields()` fields; read
-    ///   with `direction.value(_, q)` / `direction.grad(_, q, _)`.
-    /// * `equation` - output equation index in `0..output_nfields()`.
-    /// * `q` - facet quadrature-point index in `0..ctx.npts`.
-    ///
-    /// # Returns
-    /// Scalar linearized trace flux `dg` at `q`.
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`](crate::common::LANES).
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation index shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane linearized trace-flux slots. Overwritten.
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64;
+        out: &mut Lanes,
+    );
 }

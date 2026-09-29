@@ -7,6 +7,9 @@
 //! * Time-marched 1D pipe: drift-flux mixture velocity with tiny inlet void
 //!   matches the base EDAC solution, and stays bounded for `alpha_in = 0.2`.
 
+mod common;
+use common::lanes;
+
 use faer::matrix_free::LinOp;
 use faer::prelude::*;
 use ndelement::types::ReferenceCellType;
@@ -17,8 +20,8 @@ use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
     BilinearOps, CellState, ConstantCoefficient, DofReduction1D, DofReduction2D, DriftFlux1DConfig,
     DriftFlux2DConfig, DriftOutflow1D, EdacNavierStokes1DConfig, EdacNavierStokes2DConfig,
-    FieldRegistry, ParallelOwnedMinvJacobian, SEM1DProblem, SEM2DProblem, StateBoundaryIntegrator,
-    StateTensorBoundaryIntegrator, TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,
+    FieldRegistry, ParallelOwnedMinvJacobian, SEM1DProblem, StateBoundaryIntegrator,
+    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,
     TensorDriftFlux2D, TensorDriftGravity1D, TensorDriftGravity2D,
     TensorDriftMomentumConvectionSplit1D, TensorDriftMomentumConvectionSplit2D,
     TensorDriftPressureAdvectionSplit1D, TensorDriftPressureAdvectionSplit2D,
@@ -164,41 +167,90 @@ fn drift_2d_matches_edac_for_matched_phases() {
 
     for eq in 0..2 {
         assert_triple_close(
-            TensorDriftMomentumConvectionSplit2D::new(dc).tensor_residual(&ctx, &drift, eq, 0),
-            TensorKernelEdacMomentumConvectionSplit2D::new(bc).tensor_residual(&ctx, &base, eq, 0),
+            lanes::volume_residual_2d(
+                &TensorDriftMomentumConvectionSplit2D::new(dc),
+                &ctx,
+                &drift,
+                eq,
+                0,
+            ),
+            lanes::volume_residual_2d(
+                &TensorKernelEdacMomentumConvectionSplit2D::new(bc),
+                &ctx,
+                &base,
+                eq,
+                0,
+            ),
             1e-12,
             "momentum convection residual",
         );
         assert_triple_close(
-            TensorDriftMomentumConvectionSplit2D::new(dc)
-                .tensor_jacobian_action(&ctx, &drift, &dd, eq, 0),
-            TensorKernelEdacMomentumConvectionSplit2D::new(bc)
-                .tensor_jacobian_action(&ctx, &base, &db, eq, 0),
+            lanes::volume_action_2d(
+                &TensorDriftMomentumConvectionSplit2D::new(dc),
+                &ctx,
+                &drift,
+                &dd,
+                eq,
+                0,
+            ),
+            lanes::volume_action_2d(
+                &TensorKernelEdacMomentumConvectionSplit2D::new(bc),
+                &ctx,
+                &base,
+                &db,
+                eq,
+                0,
+            ),
             1e-12,
             "momentum convection action",
         );
         assert_triple_close(
-            TensorDriftPressureGradient2D::new(dc).tensor_residual(&ctx, &drift, eq, 0),
-            TensorKernelEdacPressureGradient2D::new(bc).tensor_residual(&ctx, &base, eq, 0),
+            lanes::volume_residual_2d(&TensorDriftPressureGradient2D::new(dc), &ctx, &drift, eq, 0),
+            lanes::volume_residual_2d(
+                &TensorKernelEdacPressureGradient2D::new(bc),
+                &ctx,
+                &base,
+                eq,
+                0,
+            ),
             1e-12,
             "pressure gradient residual",
         );
         assert_triple_close(
-            TensorDriftViscousStress2D::new(dc).tensor_residual(&ctx, &drift, eq, 0),
-            TensorKernelEdacViscousStress2D::new(bc).tensor_residual(&ctx, &base, eq, 0),
+            lanes::volume_residual_2d(&TensorDriftViscousStress2D::new(dc), &ctx, &drift, eq, 0),
+            lanes::volume_residual_2d(
+                &TensorKernelEdacViscousStress2D::new(bc),
+                &ctx,
+                &base,
+                eq,
+                0,
+            ),
             1e-12,
             "viscous stress residual",
         );
         assert_triple_close(
-            TensorDriftViscousStress2D::new(dc).tensor_jacobian_action(&ctx, &drift, &dd, eq, 0),
-            TensorKernelEdacViscousStress2D::new(bc)
-                .tensor_jacobian_action(&ctx, &base, &db, eq, 0),
+            lanes::volume_action_2d(
+                &TensorDriftViscousStress2D::new(dc),
+                &ctx,
+                &drift,
+                &dd,
+                eq,
+                0,
+            ),
+            lanes::volume_action_2d(
+                &TensorKernelEdacViscousStress2D::new(bc),
+                &ctx,
+                &base,
+                &db,
+                eq,
+                0,
+            ),
             1e-12,
             "viscous stress action",
         );
         // Buoyant gravity is exactly zero for matched phases.
         assert_triple_close(
-            TensorDriftGravity2D::new(dc).tensor_residual(&ctx, &drift, eq, 0),
+            lanes::volume_residual_2d(&TensorDriftGravity2D::new(dc), &ctx, &drift, eq, 0),
             [0.0; 3],
             1e-14,
             "gravity residual",
@@ -206,27 +258,70 @@ fn drift_2d_matches_edac_for_matched_phases() {
     }
 
     assert_triple_close(
-        TensorDriftPressureAdvectionSplit2D::new(dc).tensor_residual(&ctx, &drift, 2, 0),
-        TensorKernelEdacPressureAdvectionSplit2D::new(bc).tensor_residual(&ctx, &base, 2, 0),
+        lanes::volume_residual_2d(
+            &TensorDriftPressureAdvectionSplit2D::new(dc),
+            &ctx,
+            &drift,
+            2,
+            0,
+        ),
+        lanes::volume_residual_2d(
+            &TensorKernelEdacPressureAdvectionSplit2D::new(bc),
+            &ctx,
+            &base,
+            2,
+            0,
+        ),
         1e-12,
         "pressure advection residual",
     );
     assert_triple_close(
-        TensorDriftPressureDivergence2D::new(dc).tensor_residual(&ctx, &drift, 2, 0),
-        TensorKernelEdacPressureDivergence2D::new(bc).tensor_residual(&ctx, &base, 2, 0),
+        lanes::volume_residual_2d(
+            &TensorDriftPressureDivergence2D::new(dc),
+            &ctx,
+            &drift,
+            2,
+            0,
+        ),
+        lanes::volume_residual_2d(
+            &TensorKernelEdacPressureDivergence2D::new(bc),
+            &ctx,
+            &base,
+            2,
+            0,
+        ),
         1e-12,
         "pressure divergence residual",
     );
     assert_triple_close(
-        TensorDriftPressureDivergence2D::new(dc).tensor_jacobian_action(&ctx, &drift, &dd, 2, 0),
-        TensorKernelEdacPressureDivergence2D::new(bc)
-            .tensor_jacobian_action(&ctx, &base, &db, 2, 0),
+        lanes::volume_action_2d(
+            &TensorDriftPressureDivergence2D::new(dc),
+            &ctx,
+            &drift,
+            &dd,
+            2,
+            0,
+        ),
+        lanes::volume_action_2d(
+            &TensorKernelEdacPressureDivergence2D::new(bc),
+            &ctx,
+            &base,
+            &db,
+            2,
+            0,
+        ),
         1e-12,
         "pressure divergence action",
     );
     assert_triple_close(
-        TensorDriftPressureDiffusion2D::new(dc).tensor_residual(&ctx, &drift, 2, 0),
-        TensorKernelEdacPressureDiffusion2D::new(bc).tensor_residual(&ctx, &base, 2, 0),
+        lanes::volume_residual_2d(&TensorDriftPressureDiffusion2D::new(dc), &ctx, &drift, 2, 0),
+        lanes::volume_residual_2d(
+            &TensorKernelEdacPressureDiffusion2D::new(bc),
+            &ctx,
+            &base,
+            2,
+            0,
+        ),
         1e-12,
         "pressure diffusion residual",
     );
@@ -242,12 +337,20 @@ fn drift_2d_matches_edac_for_matched_phases() {
         normal: Box::leak(vec![1.0, 0.0].into_boxed_slice()),
     };
     for eq in 0..3 {
-        let got = TensorDriftDirectionalDoNothing2D::new(1.0)
-            .with_split_flux()
-            .tensor_residual(&fctx, &drift, eq, 0);
-        let want = TensorKernelEdacDirectionalDoNothing2D::new(1.0)
-            .with_split_flux()
-            .tensor_residual(&fctx, &base, eq, 0);
+        let got = lanes::boundary_residual(
+            &TensorDriftDirectionalDoNothing2D::new(1.0).with_split_flux(),
+            &fctx,
+            &drift,
+            eq,
+            0,
+        );
+        let want = lanes::boundary_residual(
+            &TensorKernelEdacDirectionalDoNothing2D::new(1.0).with_split_flux(),
+            &fctx,
+            &base,
+            eq,
+            0,
+        );
         assert!(
             (got - want).abs() < 1e-12,
             "directional outflow residual eq {eq}: {got} != {want}"
@@ -264,23 +367,42 @@ fn drift_2d_corrections_scale_with_alpha() {
     let drift = drift_state_2d(0.7, -0.3, 0.5, 1e-5);
     let base = base_state_2d(0.7, -0.3, 0.5);
     for eq in 0..2 {
-        let got = TensorDriftPressureGradient2D::new(dc).tensor_residual(&ctx, &drift, eq, 0);
-        let want = TensorKernelEdacPressureGradient2D::new(bc).tensor_residual(&ctx, &base, eq, 0);
+        let got =
+            lanes::volume_residual_2d(&TensorDriftPressureGradient2D::new(dc), &ctx, &drift, eq, 0);
+        let want = lanes::volume_residual_2d(
+            &TensorKernelEdacPressureGradient2D::new(bc),
+            &ctx,
+            &base,
+            eq,
+            0,
+        );
         assert!(
             (got[0] - want[0]).abs() < 1e-4,
             "pressure gradient O(alpha) violated: {} != {}",
             got[0],
             want[0]
         );
-        let g = TensorDriftGravity2D::new(dc).tensor_residual(&ctx, &drift, eq, 0);
+        let g = lanes::volume_residual_2d(&TensorDriftGravity2D::new(dc), &ctx, &drift, eq, 0);
         assert!(
             g[0].abs() < 0.2,
             "gravity should be small at low void: {}",
             g[0]
         );
     }
-    let got = TensorDriftPressureDivergence2D::new(dc).tensor_residual(&ctx, &drift, 2, 0);
-    let want = TensorKernelEdacPressureDivergence2D::new(bc).tensor_residual(&ctx, &base, 2, 0);
+    let got = lanes::volume_residual_2d(
+        &TensorDriftPressureDivergence2D::new(dc),
+        &ctx,
+        &drift,
+        2,
+        0,
+    );
+    let want = lanes::volume_residual_2d(
+        &TensorKernelEdacPressureDivergence2D::new(bc),
+        &ctx,
+        &base,
+        2,
+        0,
+    );
     assert!(
         (got[0] - want[0]).abs() / want[0].abs().max(1e-12) < 1e-3,
         "pressure divergence O(alpha) violated"
@@ -293,7 +415,7 @@ fn drift_2d_corrections_scale_with_alpha() {
     ];
     for k in &kernels {
         assert!(!k.owns_equation(0) && k.owns_equation(3));
-        for v in k.tensor_residual(&ctx, &drift, 3, 0) {
+        for v in lanes::volume_residual_2d(&**k, &ctx, &drift, 3, 0) {
             assert!(v.is_finite());
         }
     }
@@ -311,10 +433,10 @@ fn drift_flux_action_matches_finite_difference() {
         let base = drift_state_2d(0.7, -0.3, 0.5, alpha);
         let perturbed = drift_state_2d(0.7, -0.3, 0.5, alpha + eps);
         let direction = drift_state_2d(0.0, 0.0, 0.0, 1.0);
-        let fd = (kernel.tensor_residual(&ctx, &perturbed, 3, 0)[1]
-            - kernel.tensor_residual(&ctx, &base, 3, 0)[1])
+        let fd = (lanes::volume_residual_2d(&kernel, &ctx, &perturbed, 3, 0)[1]
+            - lanes::volume_residual_2d(&kernel, &ctx, &base, 3, 0)[1])
             / eps;
-        let analytic = kernel.tensor_jacobian_action(&ctx, &base, &direction, 3, 0)[1];
+        let analytic = lanes::volume_action_2d(&kernel, &ctx, &base, &direction, 3, 0)[1];
         assert!(
             (fd - analytic).abs() < 1e-6 * analytic.abs().max(1.0),
             "2D drift action mismatch at alpha={alpha}: {analytic} != {fd}"
@@ -328,10 +450,10 @@ fn drift_flux_action_matches_finite_difference() {
         let base = drift_state_1d(0.7, 0.5, alpha);
         let perturbed = drift_state_1d(0.7, 0.5, alpha + eps);
         let direction = drift_state_1d(0.0, 0.0, 1.0);
-        let fd = (kernel1.tensor_residual(&ctx1, &perturbed, 2, 0)[1]
-            - kernel1.tensor_residual(&ctx1, &base, 2, 0)[1])
+        let fd = (lanes::volume_residual_1d(&kernel1, &ctx1, &perturbed, 2, 0)[1]
+            - lanes::volume_residual_1d(&kernel1, &ctx1, &base, 2, 0)[1])
             / eps;
-        let analytic = kernel1.tensor_jacobian_action(&ctx1, &base, &direction, 2, 0)[1];
+        let analytic = lanes::volume_action_1d(&kernel1, &ctx1, &base, &direction, 2, 0)[1];
         assert!(
             (fd - analytic).abs() < 1e-6 * analytic.abs().max(1.0),
             "1D drift action mismatch at alpha={alpha}: {analytic} != {fd}"
@@ -353,56 +475,118 @@ fn drift_1d_matches_edac_for_matched_phases() {
     let bc = base_1d();
 
     assert_triple_close(
-        TensorDriftMomentumConvectionSplit1D::new(dc).tensor_residual(&ctx, &drift, 0, 0),
-        TensorKernelEdacMomentumConvectionSplit1D::new(bc).tensor_residual(&ctx, &base, 0, 0),
+        lanes::volume_residual_1d(
+            &TensorDriftMomentumConvectionSplit1D::new(dc),
+            &ctx,
+            &drift,
+            0,
+            0,
+        ),
+        lanes::volume_residual_1d(
+            &TensorKernelEdacMomentumConvectionSplit1D::new(bc),
+            &ctx,
+            &base,
+            0,
+            0,
+        ),
         1e-12,
         "1d momentum convection",
     );
     assert_triple_close(
-        TensorDriftPressureGradient1D::new(dc).tensor_residual(&ctx, &drift, 0, 0),
-        TensorKernelEdacPressureGradient1D::new(bc).tensor_residual(&ctx, &base, 0, 0),
+        lanes::volume_residual_1d(&TensorDriftPressureGradient1D::new(dc), &ctx, &drift, 0, 0),
+        lanes::volume_residual_1d(
+            &TensorKernelEdacPressureGradient1D::new(bc),
+            &ctx,
+            &base,
+            0,
+            0,
+        ),
         1e-12,
         "1d pressure gradient",
     );
     assert_triple_close(
-        TensorDriftViscousStress1D::new(dc).tensor_residual(&ctx, &drift, 0, 0),
-        TensorKernelEdacViscousStress1D::new(bc).tensor_residual(&ctx, &base, 0, 0),
+        lanes::volume_residual_1d(&TensorDriftViscousStress1D::new(dc), &ctx, &drift, 0, 0),
+        lanes::volume_residual_1d(&TensorKernelEdacViscousStress1D::new(bc), &ctx, &base, 0, 0),
         1e-12,
         "1d viscous stress",
     );
     assert_triple_close(
-        TensorDriftViscousStress1D::new(dc).tensor_jacobian_action(&ctx, &drift, &dd, 0, 0),
-        TensorKernelEdacViscousStress1D::new(bc).tensor_jacobian_action(&ctx, &base, &db, 0, 0),
+        lanes::volume_action_1d(
+            &TensorDriftViscousStress1D::new(dc),
+            &ctx,
+            &drift,
+            &dd,
+            0,
+            0,
+        ),
+        lanes::volume_action_1d(
+            &TensorKernelEdacViscousStress1D::new(bc),
+            &ctx,
+            &base,
+            &db,
+            0,
+            0,
+        ),
         1e-12,
         "1d viscous action",
     );
     assert_triple_close(
-        TensorDriftPressureAdvectionSplit1D::new(dc).tensor_residual(&ctx, &drift, 1, 0),
-        TensorKernelEdacPressureAdvectionSplit1D::new(bc).tensor_residual(&ctx, &base, 1, 0),
+        lanes::volume_residual_1d(
+            &TensorDriftPressureAdvectionSplit1D::new(dc),
+            &ctx,
+            &drift,
+            1,
+            0,
+        ),
+        lanes::volume_residual_1d(
+            &TensorKernelEdacPressureAdvectionSplit1D::new(bc),
+            &ctx,
+            &base,
+            1,
+            0,
+        ),
         1e-12,
         "1d pressure advection",
     );
     assert_triple_close(
-        TensorDriftPressureDivergence1D::new(dc).tensor_residual(&ctx, &drift, 1, 0),
-        TensorKernelEdacPressureDivergence1D::new(bc).tensor_residual(&ctx, &base, 1, 0),
+        lanes::volume_residual_1d(
+            &TensorDriftPressureDivergence1D::new(dc),
+            &ctx,
+            &drift,
+            1,
+            0,
+        ),
+        lanes::volume_residual_1d(
+            &TensorKernelEdacPressureDivergence1D::new(bc),
+            &ctx,
+            &base,
+            1,
+            0,
+        ),
         1e-12,
         "1d pressure divergence",
     );
     assert_triple_close(
-        TensorDriftPressureDiffusion1D::new(dc).tensor_residual(&ctx, &drift, 1, 0),
-        TensorKernelEdacPressureDiffusion1D::new(bc).tensor_residual(&ctx, &base, 1, 0),
+        lanes::volume_residual_1d(&TensorDriftPressureDiffusion1D::new(dc), &ctx, &drift, 1, 0),
+        lanes::volume_residual_1d(
+            &TensorKernelEdacPressureDiffusion1D::new(bc),
+            &ctx,
+            &base,
+            1,
+            0,
+        ),
         1e-12,
         "1d pressure diffusion",
     );
     assert_triple_close(
-        TensorDriftGravity1D::horizontal(dc).tensor_residual(&ctx, &drift, 0, 0),
+        lanes::volume_residual_1d(&TensorDriftGravity1D::horizontal(dc), &ctx, &drift, 0, 0),
         [0.0; 3],
         1e-14,
         "1d horizontal gravity",
     );
     // Horizontal drift flux vanishes; tilted pipe gives finite up-pipe flux.
     assert_triple_close(
-        TensorDriftFlux1D::horizontal(dc).tensor_residual(&ctx, &drift, 2, 0),
+        lanes::volume_residual_1d(&TensorDriftFlux1D::horizontal(dc), &ctx, &drift, 2, 0),
         [0.0; 3],
         1e-14,
         "1d horizontal drift",
@@ -410,10 +594,15 @@ fn drift_1d_matches_edac_for_matched_phases() {
     // Tilted drift needs distinct phases (matched phases have zero buoyancy).
     let buoyant = DriftFlux1DConfig::new(1.0, 0.1, 0.01, 0.001, 10.0);
     let tilted = TensorDriftFlux1D::new(buoyant, ConstantCoefficient(std::f64::consts::FRAC_PI_2));
-    let f = tilted.tensor_residual(&ctx, &drift, 2, 0);
+    let f = lanes::volume_residual_1d(&tilted, &ctx, &drift, 2, 0);
     assert!(f[1] < 0.0 && f[1].is_finite(), "tilted drift flux: {f:?}");
-    let g = TensorDriftGravity1D::new(buoyant, ConstantCoefficient(std::f64::consts::FRAC_PI_2))
-        .tensor_residual(&ctx, &drift_state_1d(0.7, 0.5, 0.3), 0, 0);
+    let g = lanes::volume_residual_1d(
+        &TensorDriftGravity1D::new(buoyant, ConstantCoefficient(std::f64::consts::FRAC_PI_2)),
+        &ctx,
+        &drift_state_1d(0.7, 0.5, 0.3),
+        0,
+        0,
+    );
     assert!(g[0].is_finite());
 }
 
@@ -438,17 +627,16 @@ fn outflow_facet() -> ormatex_sem_nd::FacetCtx<'static> {
 #[test]
 fn drift_outflow_matches_split_plus_drift_flux() {
     // Right-endpoint pairing: split fluxes plus the axial drift flux, with an
-    // exact Jacobian (finite-difference checked, including the hindered-flux
-    // sign past alpha = 4/11).
+    // exact Jacobian (finite-difference checked over the non-monotone
+    // hindered-flux regime).
     let config = DriftFlux1DConfig::new(1.0, 0.1, 0.01, 0.001, 10.0);
-    let kernel = DriftOutflow1D::new(config, 1.0);
+    let theta = std::f64::consts::FRAC_PI_2;
+    let kernel = DriftOutflow1D::new(config, theta);
     let ctx = outflow_facet();
     let (u, p, a) = (0.8, 0.4, 0.25);
     let state = drift_state_1d(u, p, a);
     let c0 = config.distribution_parameter();
-    let f = config
-        .ishii_zuber
-        .drift_flux(a, config.rho_l, config.rho_g, config.gravity);
+    let f = config.axial_drift_flux(a, theta);
     assert_eq!(kernel.nfields(), 3);
     for (eq, want) in [
         (0, 0.5 * u * u),

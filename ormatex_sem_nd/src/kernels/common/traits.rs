@@ -4,7 +4,7 @@
 //! `ResidualKernel` / `TensorResidualKernel` describe state-dependent
 //! residuals for weak and sum-factorized assembly. Boundary traits live
 //! in [`boundary_traits`](super::boundary_traits).
-use crate::common::{CellState, LocalCtx, TensorCtx};
+use crate::common::{CellState, LaneState, Lanes, LocalCtx, StateView, TensorCtx};
 
 /// Per-cell bilinear-form kernel.
 pub trait BilinearForm {
@@ -413,13 +413,57 @@ pub trait ResidualKernel {
 
 /// Statically dispatched tensor-product residual kernel.
 ///
+/// This is the single supported way to compute sum-factorized volume
+/// residuals and Jacobian actions: every implementation evaluates `LANES`
+/// cells at once from lane-packed buffers. There is no scalar fallback.
+///
+/// # Lane-packed contract
+///
+/// * Inputs are lane-packed ([`LaneState`]: `values[(f*npts+q)*LANES+lane]`,
+///   `grads[((f*gdim+d)*npts+q)*LANES+lane]`) with one [`TensorCtx`] per lane;
+///   `ctxs.len()` must equal [`LANES`](crate::common::LANES).
+/// * Lanes are independent: lane `l` of the output depends only on lane `l`
+///   of the state (and direction) plus `ctxs[l]`. In particular no `mul_add`
+///   reassociation may change per-lane rounding.
+/// * Outputs (`f0`/`f1x`/`f1y`) are overwritten, never accumulated into.
+/// * 1D kernels (`TensorResidualKernel<1>`) must write `f1y = 0.0` for every
+///   lane and read only `gdim = 1` grads.
+/// * Per-lane material evaluation goes through
+///   [`TensorCtx::lane_material_context`] with `state.lane(l)`, so scalar and
+///   lane paths share one coefficient code path via [`StateView`].
+///
 /// # Type parameters
 /// * `GDIM` - geometric dimension of the physical space: `1` for the 1D
 ///   interval, `2` for the 2D quadrilateral. It must match
-///   `TensorCtx::geometric_dimension()` and `CellState::gdim`, and it selects
+///   `TensorCtx::geometric_dimension()` and the state `gdim`, and it selects
 ///   the 1D vs 2D sum-factorized assembly path. Only `1` and `2` are supported;
 ///   `GDIM` is part of the type so tensor assembly never needs a capability
 ///   query to select its volume path.
+///
+/// # Example
+///
+/// ```ignore
+/// impl TensorResidualKernel<2> for TensorKernelMass {
+///     fn tensor_residual(
+///         &self,
+///         _ctxs: &[TensorCtx<'_>],
+///         state: &LaneState<'_>,
+///         _equation: usize,
+///         q: usize,
+///         f0: &mut Lanes,
+///         f1x: &mut Lanes,
+///         f1y: &mut Lanes,
+///     ) {
+///         let u = state.value(0, q);
+///         for l in 0..LANES {
+///             f0[l] = u[l];
+///             f1x[l] = 0.0;
+///             f1y[l] = 0.0;
+///         }
+///     }
+///     // ... tensor_jacobian_action replaces `state` with `direction` ...
+/// }
+/// ```
 pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
     /// Number of scalar PDE fields/equations in this kernel.
     ///
@@ -484,9 +528,9 @@ pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
         true
     }
 
-    /// Pointwise weak-form flux triple for one equation at one quadrature point.
+    /// Lane-packed weak-form flux triples for [`LANES`](crate::common::LANES) cells at one quadrature point.
     ///
-    /// Returns `[f0, f1_x, f1_y]` such that the traditional weak-form
+    /// Each lane holds `[f0, f1_x, f1_y]` such that the traditional weak-form
     /// [`ResidualKernel::residual_integrand`] for a test function `v` is
     /// recovered pointwise as:
     ///
@@ -496,155 +540,115 @@ pub trait TensorResidualKernel<const GDIM: usize>: Send + Sync {
     ///
     /// so `f0` is the value (mass/reaction/source) slot and `(f1_x, f1_y)` is
     /// the physical flux vector dotted with `grad(v)` (diffusion, advection,
-    /// pressure, ...). The sum-factorized assembler (`tensor_assemble`)
-    /// contracts this triple against the test basis: `f0` is scattered with
-    /// `wdet`, while `(f1_x, f1_y)` are pulled back with `jinv` and contracted
-    /// with the 1D differentiation matrix. The kernel must NOT include
-    /// quadrature weights, Jacobian determinants, or basis values; those
-    /// belong to the assembler.
+    /// pressure, ...). The sum-factorized assembler contracts these triples
+    /// against the test basis: `f0` is scattered with `wdet`, while
+    /// `(f1_x, f1_y)` are pulled back with `jinv` and contracted with the 1D
+    /// differentiation matrix. The kernel must NOT include quadrature weights,
+    /// Jacobian determinants, or basis values; those belong to the assembler.
     ///
     /// In 1D (`TensorResidualKernel<1>`) only `f0` and `f1_x` are read;
-    /// `f1_y` must still be returned (conventionally `0.0`). In 2D all three
+    /// `f1_y` must still be written (conventionally `0.0`). In 2D all three
     /// slots are used.
     ///
     /// # Arguments
-    /// * `ctx` - tensor cell context. Use `ctx.point(q)` or
-    ///   `ctx.material_context(Some(state), q)` for coefficients; leave
-    ///   `ctx.wdet`/`ctx.jinv`/`ctx.differentiation` to the assembler.
-    /// * `state` - interpolated solution at all quadrature points; read the
-    ///   current point with `state.value(field, q)` / `state.grad(field, q, d)`.
-    /// * `equation` - output equation index in `0..output_nfields()`.
-    /// * `q` - quadrature-point index in `0..ctx.npts`.
-    ///
-    /// # Returns
-    /// `[f0, f1_x, f1_y]` physical-space flux triple described above.
+    /// * `ctxs` - one tensor cell context per lane, length [`LANES`](crate::common::LANES). Use
+    ///   `ctxs[l].point(q)` or `ctxs[l].lane_material_context(...)` for
+    ///   coefficients; leave `wdet`/`jinv`/`differentiation` to the assembler.
+    /// * `state` - lane-packed interpolated solution; read lane vectors with
+    ///   `state.value(field, q)` / `state.grad(field, q, d)`.
+    /// * `equation` - output equation index in `0..output_nfields()`, shared
+    ///   by all lanes.
+    /// * `q` - quadrature-point index in `0..npts`, shared by all lanes.
+    /// * `f0` - lane value slots. Overwritten.
+    /// * `f1x` - lane x-flux slots. Overwritten.
+    /// * `f1y` - lane y-flux slots. Overwritten (unused by the 1D assembler
+    ///   but still written).
     ///
     /// # Example
-    /// Diffusion `-div(nu*grad(u))` returns `[0.0, nu*du/dx, nu*du/dy]`;
-    /// conservative advection returns `[0.0, -velx*u, -vely*u]`; mass `u`
-    /// returns `[u, 0.0, 0.0]`; a constant source `s` moved to the LHS
-    /// returns `[-s, 0.0, 0.0]`.
+    /// Diffusion `-div(nu*grad(u))` writes `[0.0, nu*du/dx, nu*du/dy]` per
+    /// lane; conservative advection writes `[0.0, -velx*u, -vely*u]`; mass `u`
+    /// writes `[u, 0.0, 0.0]`; a constant source `s` moved to the LHS writes
+    /// `[-s, 0.0, 0.0]`.
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3];
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    );
 
-    /// Pointwise Gateaux derivative of [`tensor_residual`](Self::tensor_residual).
+    /// Lane-packed Gateaux derivative of [`tensor_residual`](Self::tensor_residual).
     ///
-    /// Returns `[df0, df1_x, df1_y]` with the same layout and weak-form meaning
-    /// as [`tensor_residual`](Self::tensor_residual): the Jacobian action for a
-    /// test function `v` is `df0*v + df1_x*dv/dx + df1_y*dv/dy`. Mathematically
-    /// this is `d/dε tensor_residual(state + ε*direction)|ε=0` evaluated
-    /// pointwise at `q`. Linear terms simply replace `state` with `direction`
-    /// (e.g. diffusion `[0.0, nu*ddu/dx, nu*ddu/dy]`); nonlinear or
+    /// Writes `[df0, df1_x, df1_y]` per lane with the same layout and weak-form
+    /// meaning as [`tensor_residual`](Self::tensor_residual): the Jacobian action
+    /// for a test function `v` is `df0*v + df1_x*dv/dx + df1_y*dv/dy`.
+    /// Mathematically this is `d/dε tensor_residual(state + ε*direction)|ε=0`
+    /// evaluated pointwise at `q`. Linear terms simply replace `state` with
+    /// `direction` (e.g. diffusion `[0.0, nu*ddu/dx, nu*ddu/dy]`); nonlinear or
     /// state-dependent-coefficient terms keep the `state` linearization point
     /// plus material-derivative products (e.g. `dnu*du*grad(state)`).
     ///
     /// The same 1D convention applies: only `df0` and `df1_x` are read by the
-    /// 1D assembler, but all three slots must be returned.
+    /// 1D assembler, but all three slots must be written.
     ///
     /// # Arguments
-    /// * `ctx` - tensor cell context (same use as in `tensor_residual`).
-    /// * `state` - linearization point; read with `state.value(_, q)` /
-    ///   `state.grad(_, q, _)`.
-    /// * `direction` - Gateaux direction with `input_nfields()` fields; read
-    ///   with `direction.value(_, q)` / `direction.grad(_, q, _)`.
-    /// * `equation` - output equation index in `0..output_nfields()`.
-    /// * `q` - quadrature-point index in `0..ctx.npts`.
-    ///
-    /// # Returns
-    /// `[df0, df1_x, df1_y]` linearized flux triple; contracted by the
-    /// assembler exactly like the residual triple.
+    /// * `ctxs` - one tensor cell context per lane, length [`LANES`](crate::common::LANES).
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction with `input_nfields()` fields.
+    /// * `equation` - output equation index in `0..output_nfields()`, shared
+    ///   by all lanes.
+    /// * `q` - quadrature-point index in `0..npts`, shared by all lanes.
+    /// * `f0` - lane linearized value slots. Overwritten.
+    /// * `f1x` - lane linearized x-flux slots. Overwritten.
+    /// * `f1y` - lane linearized y-flux slots. Overwritten.
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
-        equation: usize,
-        q: usize,
-    ) -> [f64; 3];
-
-    /// Batched pointwise residual across element lanes (SIMD-over-element hook).
-    ///
-    /// Default loops over lanes calling the scalar path (correct fallback).
-    /// Built-in kernels may override with lane-vectorized physics.
-    /// `ctxs/states` have one entry per lane; outputs are per-lane scalars.
-    ///
-    /// # Arguments
-    /// * `ctxs` - one tensor context per lane; `ctxs.len()` is the lane count.
-    /// * `states` - one interpolated state per lane, aligned with `ctxs`.
-    /// * `equation` - output equation index shared by all lanes.
-    /// * `q` - quadrature-point index shared by all lanes.
-    /// * `f0` - per-lane value slots, length `ctxs.len()`. Overwritten.
-    /// * `f1x` - per-lane x-flux slots, length `ctxs.len()`. Overwritten.
-    /// * `f1y` - per-lane y-flux slots, length `ctxs.len()`. Overwritten
-    ///   (unused by the 1D assembler but still written).
-    fn tensor_residual_batch(
-        &self,
         ctxs: &[TensorCtx<'_>],
-        states: &[CellState<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-        f0: &mut [f64],
-        f1x: &mut [f64],
-        f1y: &mut [f64],
-    ) {
-        debug_assert_eq!(ctxs.len(), states.len());
-        debug_assert_eq!(f0.len(), ctxs.len());
-        for (i, (ctx, state)) in ctxs.iter().zip(states.iter()).enumerate() {
-            let [a, b, c] = self.tensor_residual(ctx, state, equation, q);
-            f0[i] = a;
-            f1x[i] = b;
-            f1y[i] = c;
-        }
-    }
-
-    /// Batched pointwise Jacobian action across element lanes.
-    ///
-    /// Vectorized counterpart of
-    /// [`tensor_jacobian_action`](Self::tensor_jacobian_action); the default
-    /// loops over lanes calling the scalar path.
-    ///
-    /// # Arguments
-    /// * `ctxs` - one tensor context per lane.
-    /// * `states` - one linearization-point state per lane, aligned with `ctxs`.
-    /// * `directions` - one Gateaux-direction state per lane, aligned with `ctxs`.
-    /// * `equation` - output equation index shared by all lanes.
-    /// * `q` - quadrature-point index shared by all lanes.
-    /// * `f0` - per-lane linearized value slots, length `ctxs.len()`. Overwritten.
-    /// * `f1x` - per-lane linearized x-flux slots, length `ctxs.len()`. Overwritten.
-    /// * `f1y` - per-lane linearized y-flux slots, length `ctxs.len()`. Overwritten.
-    fn tensor_jacobian_action_batch(
-        &self,
-        ctxs: &[TensorCtx<'_>],
-        states: &[CellState<'_>],
-        directions: &[CellState<'_>],
-        equation: usize,
-        q: usize,
-        f0: &mut [f64],
-        f1x: &mut [f64],
-        f1y: &mut [f64],
-    ) {
-        debug_assert_eq!(ctxs.len(), states.len());
-        debug_assert_eq!(ctxs.len(), directions.len());
-        for (i, ((ctx, state), dir)) in ctxs
-            .iter()
-            .zip(states.iter())
-            .zip(directions.iter())
-            .enumerate()
-        {
-            let [a, b, c] = self.tensor_jacobian_action(ctx, state, dir, equation, q);
-            f0[i] = a;
-            f1x[i] = b;
-            f1y[i] = c;
-        }
-    }
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    );
 }
 
 /// Pointwise 1D conservation-law flux kernel.
+///
+/// The interface is pointwise over a [`StateView`] so the lane-packed tensor
+/// adapter ([`TensorKernelConservationLaw1D`](crate::kernels::basic::tensor::TensorKernelConservationLaw1D))
+/// can call it once per lane (`state.lane(l)`) with that lane's [`TensorCtx`]
+/// and no per-lane copy. Flux implementations must only read `ctx.time`,
+/// `ctx.cell`, `ctx.point(q)` and `ctx.npts` from the context: the weak
+/// Galerkin adapter ([`KernelConservationLaw1D`](crate::kernels::basic::weak::KernelConservationLaw1D))
+/// bridges its [`LocalCtx`](crate::common::LocalCtx) to a [`TensorCtx`] that
+/// preserves exactly those fields.
+///
+/// # Example
+///
+/// ```ignore
+/// impl FluxKernel1D for BurgersFlux {
+///     fn nfields(&self) -> usize { 1 }
+///     fn flux(&self, _ctx: &TensorCtx<'_>, state: StateView<'_>, equation: usize, q: usize) -> f64 {
+///         let u = state.value(equation, q);
+///         0.5 * u * u
+///     }
+///     fn flux_jacobian(
+///         &self,
+///         _ctx: &TensorCtx<'_>,
+///         state: StateView<'_>,
+///         equation: usize,
+///         _unknown: usize,
+///         q: usize,
+///     ) -> f64 {
+///         state.value(equation, q)
+///     }
+/// }
+/// ```
 pub trait FluxKernel1D {
     /// Number of scalar equation/unknown fields in this flux.
     ///
@@ -663,20 +667,20 @@ pub trait FluxKernel1D {
     /// Physical flux for one equation at one quadrature point.
     ///
     /// # Arguments
-    /// * `ctx` - cell context (time, cell metadata, physical points).
-    /// * `state` - interpolated conserved state at all quadrature points.
+    /// * `ctx` - tensor cell context (time, cell metadata, physical points).
+    /// * `state` - per-lane state view; read with `state.value(field, q)`.
     /// * `equation` - equation index in `0..nfields()`.
     /// * `q` - quadrature-point index in `0..ctx.npts`.
     ///
     /// # Returns
     /// Scalar physical flux `F_equation(state(q))`.
-    fn flux(&self, ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64;
+    fn flux(&self, ctx: &TensorCtx<'_>, state: StateView<'_>, equation: usize, q: usize) -> f64;
 
     /// Derivative of [`flux`](Self::flux) for one equation/unknown pair.
     ///
     /// # Arguments
-    /// * `ctx` - cell context.
-    /// * `state` - linearization point.
+    /// * `ctx` - tensor cell context.
+    /// * `state` - per-lane linearization point.
     /// * `equation` - equation index in `0..nfields()`.
     /// * `unknown` - unknown index in `0..nfields()`.
     /// * `q` - quadrature-point index in `0..ctx.npts`.
@@ -685,8 +689,8 @@ pub trait FluxKernel1D {
     /// Scalar flux Jacobian `dF_equation/dU_unknown` at `q`.
     fn flux_jacobian(
         &self,
-        ctx: &LocalCtx,
-        state: &CellState,
+        ctx: &TensorCtx<'_>,
+        state: StateView<'_>,
         equation: usize,
         unknown: usize,
         q: usize,

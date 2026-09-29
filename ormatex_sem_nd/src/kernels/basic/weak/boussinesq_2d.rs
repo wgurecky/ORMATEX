@@ -34,6 +34,7 @@ impl KernelBoussinesq2D {
         self
     }
 
+    #[inline]
     pub(crate) fn temperature(&self, state: &CellState, q: usize) -> f64 {
         state.value(0, q) - self.reference_temperature
     }

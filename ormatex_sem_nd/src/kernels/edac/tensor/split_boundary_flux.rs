@@ -4,61 +4,102 @@
 //! (momentum components and pressure) that the split volume terms integrate
 //! by parts. Pair with split-form volume kernels as the default boundary;
 //! outlets additionally need Dong or directional-do-nothing with split flux.
-use crate::common::{CellState, TensorFacetCtx};
+use crate::common::{LaneState, Lanes, TensorFacetCtx, LANES};
 use crate::kernels::common::StateTensorBoundaryIntegrator;
 use crate::kernels::edac::config::fluid_field_names;
 /// Tensor-product boundary consistency flux for split EDAC advection.
 pub struct TensorKernelEdacSplitBoundaryFlux2D;
 
 impl StateTensorBoundaryIntegrator<2> for TensorKernelEdacSplitBoundaryFlux2D {
+    #[inline]
     fn nfields(&self) -> usize {
         3
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         fluid_field_names()
     }
 
+    /// Lane-packed split-flux residual for all lanes.
+    ///
+    /// Per lane `l` computes exactly the scalar expression with
+    /// `&ctxs[l]` (same operations in the same order).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed facet solution.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
-        let velocity = [state.value(0, q), state.value(1, q)];
-        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
         let transported = if equation < 2 {
-            velocity[equation]
+            state.value(equation, q)
         } else {
             state.value(2, q)
         };
-        0.5 * normal_velocity * transported
+        for l in 0..LANES {
+            let normal = ctxs[l].normal;
+            let normal_velocity = normal[0] * u0[l] + normal[1] * u1[l];
+            out[l] = 0.5 * normal_velocity * transported[l];
+        }
     }
 
+    /// Lane-packed split-flux Jacobian action for all lanes.
+    ///
+    /// Per lane `l` computes exactly the scalar expression with
+    /// `&ctxs[l]` (same operations in the same order).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane linearized trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
-        let velocity = [state.value(0, q), state.value(1, q)];
-        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
-        let normal_velocity = ctx.normal[0] * velocity[0] + ctx.normal[1] * velocity[1];
-        let direction_normal_velocity =
-            ctx.normal[0] * direction_velocity[0] + ctx.normal[1] * direction_velocity[1];
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
+        let du0 = direction.value(0, q);
+        let du1 = direction.value(1, q);
         let transported = if equation < 2 {
-            velocity[equation]
+            state.value(equation, q)
         } else {
             state.value(2, q)
         };
         let direction_transported = if equation < 2 {
-            direction_velocity[equation]
+            direction.value(equation, q)
         } else {
             direction.value(2, q)
         };
-        0.5 * (direction_normal_velocity * transported + normal_velocity * direction_transported)
+        for l in 0..LANES {
+            let normal = ctxs[l].normal;
+            let normal_velocity = normal[0] * u0[l] + normal[1] * u1[l];
+            let direction_normal_velocity = normal[0] * du0[l] + normal[1] * du1[l];
+            out[l] = 0.5
+                * (direction_normal_velocity * transported[l]
+                    + normal_velocity * direction_transported[l]);
+        }
     }
 }

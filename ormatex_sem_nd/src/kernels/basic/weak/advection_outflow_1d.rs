@@ -40,18 +40,21 @@ impl KernelAdvectionOutflow1D {
         kernel
     }
 
+    #[inline]
     fn normal_velocity(&self, normal: &[f64]) -> f64 {
         normal[0] * self.vel
     }
 }
 
 /// Advective outflow flux with zero backflow concentration.
+#[inline]
 pub(crate) fn outflow_flux_1d(normal_velocity: f64, c: f64) -> f64 {
     normal_velocity.max(0.0) * c
 }
 
 /// Gateaux derivative of [`outflow_flux_1d`] w.r.t. the transported value.
 /// The frozen velocity contributes nothing; at `u.n = 0` both sides agree.
+#[inline]
 pub(crate) fn outflow_flux_action_1d(normal_velocity: f64, dc: f64) -> f64 {
     normal_velocity.max(0.0) * dc
 }

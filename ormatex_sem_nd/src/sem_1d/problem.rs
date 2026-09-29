@@ -2,7 +2,7 @@
 use crate::common::jacobian_pattern::JacobianPatternCache;
 use crate::common::{
     cell_ctx, interpolate_cell_state, CellData, CellState, ElementRestriction, FieldDofLayout,
-    LocalCtx, ReducedDofMap, TensorCtx, TensorProductData,
+    LocalCtx, ReducedDofMap, SortedRowScatter, TensorBatchPlan, TensorCtx, TensorProductData,
 };
 use crate::fields::{FieldRegistry, FieldSelection, FieldValues};
 use crate::kernels::common::ResidualKernel;
@@ -90,6 +90,13 @@ pub struct SEM1DProblem<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> 
     pub(crate) dof_x: Vec<f64>,
     pub(crate) metadata: MeshMetadata,
     pub(crate) jacobian_pattern_cache: JacobianPatternCache,
+    pub(crate) tensor_batch_plan: TensorBatchPlan,
+    /// Reusable E-vector scratch pool (one `nslots * ncols` row-sorted buffer
+    /// per in-flight tensor pass; reused, not allocated).
+    pub(crate) evec_pool: std::sync::Mutex<Vec<Vec<f64>>>,
+    /// Lazily built row-sorted scatter tables, one per distinct output selection.
+    pub(crate) sorted_scatter_cache:
+        std::sync::RwLock<Vec<(Vec<usize>, std::sync::Arc<SortedRowScatter>)>>,
 }
 
 impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
@@ -306,6 +313,7 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
         };
         let restriction =
             ElementRestriction::new(&cell_reduced_dofs, &cell_prescribed_values, &field_sizes);
+        let tensor_batch_plan = TensorBatchPlan::build_1d(&cell_data, &restriction);
 
         Self {
             mesh,
@@ -320,6 +328,9 @@ impl<M: Mesh<EntityDescriptor = ReferenceCellType, T = f64>> SEM1DProblem<M> {
             dof_x,
             metadata,
             jacobian_pattern_cache: JacobianPatternCache::new(),
+            tensor_batch_plan,
+            evec_pool: std::sync::Mutex::new(Vec::new()),
+            sorted_scatter_cache: std::sync::RwLock::new(Vec::new()),
         }
     }
 

@@ -84,3 +84,7 @@ path = "examples/navier-stokes/drift_flux_cylinder_tensor.rs"
 [[example]]
 name = "navier-stokes-drift-flux-bubble-plume-tensor"
 path = "examples/navier-stokes/drift_flux_bubble_plume_tensor.rs"
+
+[[example]]
+name = "navier-stokes-bench-tensor-jacobian"
+path = "examples/navier-stokes/bench_tensor_jacobian.rs"

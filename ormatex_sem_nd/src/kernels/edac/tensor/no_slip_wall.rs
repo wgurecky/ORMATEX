@@ -1,6 +1,6 @@
 //! Stationary tensor no-slip EDAC wall closure (zero inviscid flux).
 //!
-use crate::common::{CellState, TensorFacetCtx};
+use crate::common::{LaneState, Lanes, TensorFacetCtx, LANES};
 use crate::kernels::common::StateTensorBoundaryIntegrator;
 use crate::kernels::edac::config::fluid_field_names;
 
@@ -14,32 +14,57 @@ impl TensorKernelEdacNoSlipWall2D {
 }
 
 impl StateTensorBoundaryIntegrator<2> for TensorKernelEdacNoSlipWall2D {
+    #[inline]
     fn nfields(&self) -> usize {
         3
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         fluid_field_names()
     }
 
+    /// Lane-packed no-slip residual (identically zero).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed facet solution (unused).
+    /// * `equation` - output equation shared by all lanes (unused).
+    /// * `q` - facet quadrature-point index shared by all lanes (unused).
+    /// * `out` - lane trace-flux slots. Overwritten with zero.
+    #[inline]
     fn tensor_residual(
         &self,
-        _ctx: &TensorFacetCtx<'_>,
-        _state: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        _state: &LaneState<'_>,
         _equation: usize,
         _q: usize,
-    ) -> f64 {
-        0.0
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *out = [0.0; LANES];
     }
 
+    /// Lane-packed no-slip Jacobian action (identically zero).
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed linearization point (unused).
+    /// * `direction` - lane-packed Gateaux direction (unused).
+    /// * `equation` - output equation shared by all lanes (unused).
+    /// * `q` - facet quadrature-point index shared by all lanes (unused).
+    /// * `out` - lane linearized trace-flux slots. Overwritten with zero.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        _ctx: &TensorFacetCtx<'_>,
-        _state: &CellState<'_>,
-        _direction: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        _state: &LaneState<'_>,
+        _direction: &LaneState<'_>,
         _equation: usize,
         _q: usize,
-    ) -> f64 {
-        0.0
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *out = [0.0; LANES];
     }
 }

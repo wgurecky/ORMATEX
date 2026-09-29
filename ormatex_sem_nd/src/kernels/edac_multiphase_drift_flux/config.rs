@@ -3,11 +3,13 @@
 //! Mixture model (Ishii 1975 dispersed-bubbly simplification, EDAC base):
 //! mixture velocity `u_m` in the momentum balance, EDAC pressure evolution
 //! with mixture density `rho_m(alpha) = a*rho_g + (1-a)*rho_l`, void transport
-//! `u_g = C0*j + V_gj` with `j ~= u_m`, buoyant gravity `(rho_m - rho_l)/rho_m`
+//! `u_g = C0*u_m + V_um` with the um-referenced slip `V_um = Vdj*rho_l/rho_m`
+//! (Ishii-Zuber `Vdj` re-referenced from the volumetric flux to `u_m`, exact
+//! for `C0 = 1`), buoyant gravity `(rho_m - rho_l)/rho_m`
 //! so `alpha -> 0` recovers single-phase EDAC exactly, and Smagorinsky-Lilly
 //! eddy viscosity on the mixture velocity (as in the base EDAC kernels).
 
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::kernels::edac::smagorinsky_lilly::SmagorinskyLilly2D;
 
 use super::closures::{clamp_alpha, DistributionParameter, IshiiZuberParams};
@@ -144,30 +146,55 @@ impl DriftFlux2DConfig {
         [-self.gravity[0] / g, -self.gravity[1] / g]
     }
 
+    /// Um-referenced slip speed `V_um(a) = Vdj(a)*rho_l/rho_m(a)`.
+    ///
+    /// The Ishii-Zuber correlation measures drift against the volumetric flux
+    /// `j`, but every kernel closes on the mass-averaged `u_m`
+    /// (`u_g = C0*u_m + V*e`). Re-referencing by `rho_l/rho_m` (exact for
+    /// `C0 = 1`: the `u_m`-closed void equation then transports void
+    /// identically to Ishii's `j`-form) keeps one reference velocity
+    /// throughout, so no `j - u_m` gap terms are needed anywhere. Unity at
+    /// `alpha = 0` and for matched phases; regular at `alpha = 1` (zero).
+    pub fn slip_speed(&self, alpha: f64) -> f64 {
+        self.ishii_zuber
+            .drift_speed(alpha, self.rho_l, self.rho_g, self.gravity_magnitude())
+            * self.rho_l
+            / self.mixture_density(alpha)
+    }
+
     /// Drift-velocity vector (rise opposite gravity) at `alpha`.
     pub fn drift_velocity(&self, alpha: f64) -> [f64; 2] {
-        let g = self.gravity_magnitude();
-        let speed = self
-            .ishii_zuber
-            .drift_speed(alpha, self.rho_l, self.rho_g, g);
+        let speed = self.slip_speed(alpha);
         let e = self.rise_direction();
         [e[0] * speed, e[1] * speed]
     }
 
-    /// Hindered drift flux magnitude `F(a) = a*V_gj(a)`.
+    /// Hindered drift flux magnitude `F(a) = a*V_um(a)` (um-referenced).
     pub fn drift_flux(&self, alpha: f64) -> f64 {
-        self.ishii_zuber
-            .drift_flux(alpha, self.rho_l, self.rho_g, self.gravity_magnitude())
+        clamp_alpha(alpha) * self.slip_speed(alpha)
     }
 
-    /// Exact drift-flux derivative `dF/da` (sign-correct past `a = 4/11`).
+    /// Exact drift-flux derivative `dF_um/da` (non-monotone hindered regime:
+    /// the exact sign matters).
+    ///
+    /// Quotient rule on `F_dj*rho_l/rho_m` with `F_dj`, `dF_dj/da` the
+    /// correlation values; exact (no frozen terms), so linearizations stay
+    /// consistent with [`Self::drift_flux`].
     pub fn drift_flux_derivative(&self, alpha: f64) -> f64 {
-        self.ishii_zuber.drift_flux_derivative(
+        if alpha <= 0.0 || alpha >= 1.0 {
+            return 0.0;
+        }
+        let rho = self.mixture_density(alpha);
+        let f =
+            self.ishii_zuber
+                .drift_flux(alpha, self.rho_l, self.rho_g, self.gravity_magnitude());
+        let df = self.ishii_zuber.drift_flux_derivative(
             alpha,
             self.rho_l,
             self.rho_g,
             self.gravity_magnitude(),
-        )
+        );
+        self.rho_l * (df * rho - f * self.mixture_density_derivative()) / (rho * rho)
     }
 
     /// Vapor-phase velocity from the slip relation `u_g = C0*u_m + V_drift`.
@@ -201,56 +228,140 @@ impl DriftFlux2DConfig {
         ]
     }
 
-    pub(crate) fn pressure_diffusivity_tensor(&self, ctx: &TensorCtx<'_>) -> f64 {
-        self.pressure_diffusion_factor * self.c0 * self.smagorinsky.filter_width_tensor(ctx)
-    }
-
-    pub(crate) fn strain_component(state: &CellState, q: usize, i: usize, j: usize) -> f64 {
-        0.5 * (state.grad(i, q, j) + state.grad(j, q, i))
-    }
-
-    /// Mixture viscous-stress row with Smagorinsky eddy viscosity on `u_m`.
+    /// Lane-packed hindered drift fluxes matching [`drift_flux`](Self::drift_flux).
     ///
-    /// `tau_ij = 2 (nu_m(alpha) + nu_t) S_ij`; shares one viscosity eval.
-    pub(crate) fn stress_tensor_row(
-        &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        q: usize,
-        i: usize,
-    ) -> [f64; 2] {
-        let viscosity = self.mixture_nu(state.value(ALPHA_2D, q))
-            + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
-        [
-            2.0 * viscosity * Self::strain_component(state, q, i, 0),
-            2.0 * viscosity * Self::strain_component(state, q, i, 1),
-        ]
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    ///
+    /// # Returns
+    /// Per-lane `F(a)`, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub(crate) fn drift_flux_lanes(&self, alphas: &Lanes) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.drift_flux(alphas[l]);
+        }
+        out
     }
 
-    pub(crate) fn stress_tensor_row_directional_derivative(
+    /// Lane-packed drift-flux derivatives matching [`drift_flux_derivative`](Self::drift_flux_derivative).
+    ///
+    /// # Arguments
+    /// * `alphas` - per-lane void fractions.
+    ///
+    /// # Returns
+    /// Per-lane `dF_um/da`, bit-identical to the scalar path lane-by-lane.
+    #[inline]
+    pub(crate) fn drift_flux_derivative_lanes(&self, alphas: &Lanes) -> Lanes {
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.drift_flux_derivative(alphas[l]);
+        }
+        out
+    }
+
+    /// Lane-packed pressure diffusivities in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    ///
+    /// # Returns
+    /// Per-lane `(factor * c0) * width[l]` with scalar operation order.
+    #[inline]
+    pub(crate) fn pressure_diffusivities_tensor_lanes(&self, ctxs: &[TensorCtx<'_>]) -> Lanes {
+        let widths = self.smagorinsky.filter_widths_tensor_lanes(ctxs);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.pressure_diffusion_factor * self.c0 * widths[l];
+        }
+        out
+    }
+
+    /// Lane-packed mixture viscous-stress row in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `i` - momentum row (`0` or `1`).
+    ///
+    /// # Returns
+    /// `(row_x, row_y)` lane vectors with `row = 2*visc*strain` in scalar order.
+    #[inline]
+    pub(crate) fn stress_tensor_row_lanes(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         q: usize,
         i: usize,
-    ) -> [f64; 2] {
+    ) -> (Lanes, Lanes) {
+        let nu_t = self
+            .smagorinsky
+            .eddy_viscosities_tensor_lanes(ctxs, state, q);
+        let alpha = state.value(ALPHA_2D, q);
+        let gi0 = state.grad(i, q, 0);
+        let gi1 = state.grad(i, q, 1);
+        let g0i = state.grad(0, q, i);
+        let g1i = state.grad(1, q, i);
+        let mut row0 = [0.0; LANES];
+        let mut row1 = [0.0; LANES];
+        for l in 0..LANES {
+            let viscosity = self.mixture_nu(alpha[l]) + nu_t[l];
+            let s0 = 0.5 * (gi0[l] + g0i[l]);
+            let s1 = 0.5 * (gi1[l] + g1i[l]);
+            row0[l] = 2.0 * viscosity * s0;
+            row1[l] = 2.0 * viscosity * s1;
+        }
+        (row0, row1)
+    }
+
+    /// Lane-packed directional-derivative stress row in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `i` - momentum row (`0` or `1`).
+    ///
+    /// # Returns
+    /// `(row_x, row_y)` lane vectors with `row = 2*(visc*dstrain+dvisc*strain)`
+    /// in scalar order.
+    #[inline]
+    pub(crate) fn stress_tensor_row_directional_derivative_lanes(
+        &self,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
+        q: usize,
+        i: usize,
+    ) -> (Lanes, Lanes) {
+        let (nu_t, dnu_t) = self
+            .smagorinsky
+            .eddy_viscosity_and_derivative_lanes(ctxs, state, direction, q);
         let alpha = state.value(ALPHA_2D, q);
         let dalpha = direction.value(ALPHA_2D, q);
-        let viscosity =
-            self.mixture_nu(alpha) + self.smagorinsky.eddy_viscosity_tensor(ctx, state, q);
-        let dviscosity = self.mixture_nu_derivative(alpha) * dalpha
-            + self
-                .smagorinsky
-                .eddy_viscosity_directional_derivative(ctx, state, direction, q);
-        let dstrain = [
-            0.5 * (direction.grad(i, q, 0) + direction.grad(0, q, i)),
-            0.5 * (direction.grad(i, q, 1) + direction.grad(1, q, i)),
-        ];
-        [
-            2.0 * (viscosity * dstrain[0] + dviscosity * Self::strain_component(state, q, i, 0)),
-            2.0 * (viscosity * dstrain[1] + dviscosity * Self::strain_component(state, q, i, 1)),
-        ]
+        let gi0 = state.grad(i, q, 0);
+        let gi1 = state.grad(i, q, 1);
+        let g0i = state.grad(0, q, i);
+        let g1i = state.grad(1, q, i);
+        let dgi0 = direction.grad(i, q, 0);
+        let dgi1 = direction.grad(i, q, 1);
+        let dg0i = direction.grad(0, q, i);
+        let dg1i = direction.grad(1, q, i);
+        let mut row0 = [0.0; LANES];
+        let mut row1 = [0.0; LANES];
+        for l in 0..LANES {
+            let viscosity = self.mixture_nu(alpha[l]) + nu_t[l];
+            let dviscosity = self.mixture_nu_derivative(alpha[l]) * dalpha[l] + dnu_t[l];
+            let s0 = 0.5 * (gi0[l] + g0i[l]);
+            let s1 = 0.5 * (gi1[l] + g1i[l]);
+            let ds0 = 0.5 * (dgi0[l] + dg0i[l]);
+            let ds1 = 0.5 * (dgi1[l] + dg1i[l]);
+            row0[l] = 2.0 * (viscosity * ds0 + dviscosity * s0);
+            row1[l] = 2.0 * (viscosity * ds1 + dviscosity * s1);
+        }
+        (row0, row1)
     }
 }
 
@@ -262,9 +373,4 @@ pub(crate) fn drift_field_names() -> Option<Vec<String>> {
             .map(str::to_owned)
             .collect(),
     )
-}
-
-/// Mixture velocity components at quadrature point `q`.
-pub(crate) fn velocity(state: &CellState, q: usize) -> [f64; 2] {
-    [state.value(0, q), state.value(1, q)]
 }

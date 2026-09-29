@@ -15,11 +15,18 @@ use std::sync::OnceLock;
 
 use crate::fields::FieldRegistry;
 use crate::kernels::common::{
-    BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryTerms,
+    BoundaryIntegrator, StateBoundaryIntegrator, StateBoundaryTerms, StateTensorBoundaryIntegrator,
+    StateTensorBoundaryTerms,
 };
 use crate::regions::{FacetMeta, MeshMetadata, PhysicalRegion};
 
-use super::contexts::{CellState, FacetCtx, TensorFacetCtx};
+use super::contexts::{CellState, FacetCtx};
+use super::facet_batch::{
+    action_phase_a_parallel, action_phase_a_serial, alloc_assembled_pointwise,
+    alloc_facet_pointwise, assembled_phase_a_serial, boundary_column_lists, build_facet_map_table,
+    chunk_facet_batches, plan_facet_batches, residual_phase_a_parallel, residual_phase_a_serial,
+    FacetMapTable, FacetPointwise, INACTIVE_FACET,
+};
 use super::restriction::{DisjointOut, ElementRestriction};
 
 /// Facet count above which boundary assembly parallels over the global pool
@@ -789,6 +796,11 @@ where
     let mut residual = include_residual.then(|| vec![0.0; system_size]);
     let mut triplets = Vec::new();
     let mut coord = [0.0; 2];
+    // ponytail: resolved once per distinct kernel; map scratch reused per facet.
+    let mut resolved: Vec<ResolvedWeakBoundary> = Vec::new();
+    let mut input_maps_buf: Vec<&[Option<usize>]> = Vec::new();
+    let mut input_prescribed_buf: Vec<&[Option<f64>]> = Vec::new();
+    let mut output_maps_buf: Vec<&[Option<usize>]> = Vec::new();
 
     for facet in mesh.entity_iter(ReferenceCellType::Interval) {
         let facet_index = facet.local_index();
@@ -823,25 +835,18 @@ where
         }) else {
             continue;
         };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
+        let entry_index = resolve_weak_entry(
+            &mut resolved,
+            fields,
+            field_offsets,
+            kernel,
             "state boundary kernel",
         );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
+        let entry = &resolved[entry_index];
+        let ninputs = entry.inputs.len();
+        let noutputs = entry.outputs.len();
+        let input_offsets = &entry.input_offsets;
+        let output_offsets = &entry.output_offsets;
 
         let cell = mesh
             .entity(ReferenceCellType::Quadrilateral, cell_index)
@@ -962,39 +967,27 @@ where
             grads: &grads,
         };
 
-        let input_maps = if field_reduced_dofs.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_reduced_dofs[0][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let input_prescribed = if field_prescribed_values.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_prescribed_values[0][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_prescribed_values[field][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let output_maps = if field_reduced_dofs.len() == 1 {
-            (0..noutputs)
-                .map(|_| field_reduced_dofs[0][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .outputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
+        fill_maps_for_cell(
+            field_reduced_dofs,
+            &entry.inputs,
+            cell_index,
+            &mut input_maps_buf,
+        );
+        fill_maps_for_cell(
+            field_prescribed_values,
+            &entry.inputs,
+            cell_index,
+            &mut input_prescribed_buf,
+        );
+        fill_maps_for_cell(
+            field_reduced_dofs,
+            &entry.outputs,
+            cell_index,
+            &mut output_maps_buf,
+        );
+        let input_maps = &input_maps_buf;
+        let input_prescribed = &input_prescribed_buf;
+        let output_maps = &output_maps_buf;
         let mut state_values = vec![0.0; ninputs * npts];
         for field in 0..ninputs {
             for (facet_i, &cell_i) in facet_cell_indices.iter().enumerate() {
@@ -1101,23 +1094,191 @@ fn cell_i_for_dof(cell_dofs: &[usize], full_dof: usize) -> usize {
         .expect("boundary dof missing from owning cell")
 }
 
-/// Select per-field cell maps for one boundary cell, handling the shared
-/// single-map and field-specific layouts. Used for input, prescribed, and
-/// output maps alike (all are `Option`-per-local-DOF slices).
-fn maps_for_cell<'m, T>(
+/// Per-call resolved weak state-boundary kernel entry, keyed by kernel
+/// identity so `resolve_selection` and offset mapping run once per distinct
+/// kernel per call instead of once per facet.
+struct ResolvedWeakBoundary {
+    /// Fat-pointer identity `(data address, vtable address)` of the
+    /// `&dyn StateBoundaryIntegrator` (see [`weak_kernel_key`]).
+    key: (usize, usize),
+    /// Global field IDs consumed by the kernel.
+    inputs: Vec<usize>,
+    /// Global field IDs produced by the kernel.
+    outputs: Vec<usize>,
+    /// System offsets for `inputs` (from `field_offsets`).
+    input_offsets: Vec<usize>,
+    /// System offsets for `outputs` (from `field_offsets`).
+    output_offsets: Vec<usize>,
+}
+
+/// Per-call resolved tensor state-boundary kernel entry (see
+/// [`ResolvedWeakBoundary`]; adds the gradient flag).
+pub(crate) struct ResolvedTensorBoundary {
+    /// Fat-pointer identity `(data address, vtable address)` of the
+    /// `&dyn StateTensorBoundaryIntegrator<2>` (see [`tensor_kernel_key`]).
+    pub(crate) key: (usize, usize),
+    /// Global field IDs consumed by the kernel.
+    pub(crate) inputs: Vec<usize>,
+    /// Global field IDs produced by the kernel.
+    pub(crate) outputs: Vec<usize>,
+    /// System offsets for `inputs` (from `field_offsets`).
+    pub(crate) input_offsets: Vec<usize>,
+    /// System offsets for `outputs` (from `field_offsets`).
+    pub(crate) output_offsets: Vec<usize>,
+    /// Cached `tensor_requires_gradients()` value.
+    pub(crate) include_gradients: bool,
+}
+
+/// Fat-pointer identity of a weak state-boundary kernel: `(data, vtable)`.
+///
+/// Inputs: the kernel trait object. Purpose: key per-call resolved entries by
+/// kernel identity. Rationale: the data address alone is insufficient because
+/// zero-sized kernels perform no per-value allocation, so distinct ZSTs (even
+/// of different types behind different `Arc`s) may share the same dangling
+/// data address; the vtable address disambiguates them. Output: the
+/// `(data address, vtable address)` pair.
+fn weak_kernel_key(kernel: &dyn StateBoundaryIntegrator) -> (usize, usize) {
+    // SAFETY: `&dyn Trait` and `*const dyn Trait` are both fat pointers with
+    // `(data, vtable)` layout; transmuting the raw fat pointer to two usizes
+    // only copies the pointer itself, never the pointee. (`std::ptr::metadata`
+    // is not yet stable on this toolchain, hence the transmute.)
+    let fat = kernel as *const dyn StateBoundaryIntegrator;
+    unsafe { std::mem::transmute::<*const dyn StateBoundaryIntegrator, (usize, usize)>(fat) }
+}
+
+/// Fat-pointer identity of a tensor state-boundary kernel: `(data, vtable)`.
+///
+/// Inputs: the kernel trait object. Purpose: same ZST-safe identity keying as
+/// [`weak_kernel_key`], for `StateTensorBoundaryIntegrator<2>` kernels.
+/// Output: the `(data address, vtable address)` pair.
+pub(crate) fn tensor_kernel_key(kernel: &dyn StateTensorBoundaryIntegrator<2>) -> (usize, usize) {
+    // SAFETY: see [`weak_kernel_key`].
+    let fat = kernel as *const dyn StateTensorBoundaryIntegrator<2>;
+    unsafe {
+        std::mem::transmute::<*const dyn StateTensorBoundaryIntegrator<2>, (usize, usize)>(fat)
+    }
+}
+
+/// Resolve (or reuse) the weak kernel entry for `kernel`.
+///
+/// Inputs: per-call entry cache, field registry, system field offsets, and the
+/// kernel reference. Purpose: hoist `resolve_selection` plus offset mapping
+/// out of the per-facet loop. Output: index of the entry in `cache`.
+fn resolve_weak_entry(
+    cache: &mut Vec<ResolvedWeakBoundary>,
+    fields: &FieldRegistry,
+    field_offsets: &[usize],
+    kernel: &dyn StateBoundaryIntegrator,
+    context: &str,
+) -> usize {
+    let key = weak_kernel_key(kernel);
+    if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+        return index;
+    }
+    let selection = fields.resolve_selection(
+        kernel.input_nfields(),
+        kernel.input_field_names(),
+        kernel.output_nfields(),
+        kernel.output_field_names(),
+        context,
+    );
+    let input_offsets = selection
+        .inputs
+        .iter()
+        .map(|&field| field_offsets[field])
+        .collect();
+    let output_offsets = selection
+        .outputs
+        .iter()
+        .map(|&field| field_offsets[field])
+        .collect();
+    cache.push(ResolvedWeakBoundary {
+        key,
+        inputs: selection.inputs,
+        outputs: selection.outputs,
+        input_offsets,
+        output_offsets,
+    });
+    cache.len() - 1
+}
+
+/// Pre-resolve every distinct tensor kernel referenced by the cache.
+///
+/// Inputs: field registry, system field offsets, boundary facet cache, and the
+/// boundary terms. Purpose: serial one-time resolution so later loops only
+/// do pointer lookups. Output: resolved entries for the distinct kernels.
+pub(crate) fn preresolve_tensor_entries(
+    fields: &FieldRegistry,
+    field_offsets: &[usize],
+    cache: &QuadStateBoundaryCache,
+    terms: &StateTensorBoundaryTerms<2>,
+) -> Vec<ResolvedTensorBoundary> {
+    let mut resolved = Vec::new();
+    for facet in &cache.facets {
+        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+            continue;
+        };
+        let key = tensor_kernel_key(kernel);
+        if resolved
+            .iter()
+            .any(|entry: &ResolvedTensorBoundary| entry.key == key)
+        {
+            continue;
+        }
+        let selection = fields.resolve_selection(
+            kernel.input_nfields(),
+            kernel.input_field_names(),
+            kernel.output_nfields(),
+            kernel.output_field_names(),
+            "tensor state boundary kernel",
+        );
+        let input_offsets = selection
+            .inputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        let output_offsets = selection
+            .outputs
+            .iter()
+            .map(|&field| field_offsets[field])
+            .collect();
+        resolved.push(ResolvedTensorBoundary {
+            key,
+            inputs: selection.inputs,
+            outputs: selection.outputs,
+            input_offsets,
+            output_offsets,
+            include_gradients: kernel.tensor_requires_gradients(),
+        });
+    }
+    resolved
+}
+
+/// Fill `out` with per-field cell maps for one boundary cell without
+/// allocating, handling the shared single-map and field-specific layouts.
+///
+/// Inputs: field maps, selected global field IDs, owning cell index, and the
+/// scratch buffer (cleared and refilled). Purpose: replace per-facet map
+/// `Vec` allocations in hot boundary loops. Output: none (the
+/// scratch holds one slice per selected field on return).
+pub(crate) fn fill_maps_for_cell<'m, T>(
     field_maps: &'m [Vec<Vec<Option<T>>>],
     fields: &[usize],
     cell: usize,
-) -> Vec<&'m [Option<T>]> {
+    out: &mut Vec<&'m [Option<T>]>,
+) {
+    out.clear();
     if field_maps.len() == 1 {
-        (0..fields.len())
-            .map(|_| field_maps[0][cell].as_slice())
-            .collect()
+        let slice = field_maps[0][cell].as_slice();
+        out.reserve(fields.len());
+        for _ in 0..fields.len() {
+            out.push(slice);
+        }
     } else {
-        fields
-            .iter()
-            .map(|&field| field_maps[field][cell].as_slice())
-            .collect()
+        out.reserve(fields.len());
+        for &field in fields {
+            out.push(field_maps[field][cell].as_slice());
+        }
     }
 }
 
@@ -1126,7 +1287,11 @@ fn maps_for_cell<'m, T>(
 /// Writes `nfields*npts` values and, if `include_gradients`,
 /// `nfields*2*npts` grads into caller scratch (zeroed here); pass empty
 /// `grads` otherwise. Allocation-free so hot boundary loops can reuse buffers.
-fn tensor_boundary_state_into(
+///
+/// Test-only: the batched driver interpolates lane-packed traces instead; the
+/// interpolation equivalence test compares against this scalar reference.
+#[cfg(test)]
+pub(crate) fn tensor_boundary_state_into(
     facet: &QuadStateBoundaryFacet,
     nfields: usize,
     maps: &[&[Option<usize>]],
@@ -1169,9 +1334,12 @@ fn tensor_boundary_state_into(
     }
 }
 
-/// Interpolate one direction column to facet points (see
-/// [`tensor_boundary_state_into`]; eliminated DOFs read as zero).
-fn tensor_boundary_direction_into(
+/// Interpolate one direction column to facet points (same layout as the
+/// state interpolation above; eliminated DOFs read as zero).
+///
+/// Test-only (see `tensor_boundary_state_into`).
+#[cfg(test)]
+pub(crate) fn tensor_boundary_direction_into(
     facet: &QuadStateBoundaryFacet,
     nfields: usize,
     maps: &[&[Option<usize>]],
@@ -1214,6 +1382,107 @@ fn tensor_boundary_direction_into(
     }
 }
 
+/// Fill per-facet maps, interpolate the state, and build the weak views.
+///
+/// Inputs: the pre-resolved `entry` (callers resolve with
+/// [`resolve_weak_entry` first), the boundary `facet`, shared quadrature
+/// `wts`, evaluation `time`, field DOF/prescribed maps, the nonlinear
+/// `state`, and caller-owned scratch (same reuse contract as the former
+/// tensor view helper). Purpose: hoist the resolve-entry/fill-maps/
+/// state-interpolation/view setup shared by the cached weak boundary variants
+/// (residual and Jacobian action) into one place without changing arithmetic
+/// or order. Outputs: the interpolated `(CellState, FacetCtx)` views; map
+/// buffers are left filled for the caller's scatter.
+#[allow(clippy::too_many_arguments)]
+fn weak_facet_views<'m, 'f, 's>(
+    entry: &ResolvedWeakBoundary,
+    facet: &'f QuadStateBoundaryFacet,
+    wts: &'f [f64],
+    time: f64,
+    field_reduced_dofs: &'m [Vec<Vec<Option<usize>>>],
+    field_prescribed_values: &'m [Vec<Vec<Option<f64>>>],
+    state: MatRef<'_, f64>,
+    input_maps_buf: &mut Vec<&'m [Option<usize>]>,
+    input_prescribed_buf: &mut Vec<&'m [Option<f64>]>,
+    output_maps_buf: &mut Vec<&'m [Option<usize>]>,
+    state_values: &'s mut Vec<f64>,
+    state_grads: &'s mut Vec<f64>,
+) -> (CellState<'s>, FacetCtx<'f>) {
+    let ninputs = entry.inputs.len();
+    let npts = wts.len();
+    let nfacet = facet.facet_dofs.len();
+    fill_maps_for_cell(
+        field_reduced_dofs,
+        &entry.inputs,
+        facet.cell_index,
+        input_maps_buf,
+    );
+    fill_maps_for_cell(
+        field_prescribed_values,
+        &entry.inputs,
+        facet.cell_index,
+        input_prescribed_buf,
+    );
+    fill_maps_for_cell(
+        field_reduced_dofs,
+        &entry.outputs,
+        facet.cell_index,
+        output_maps_buf,
+    );
+    let input_offsets = &entry.input_offsets;
+    state_values.resize(ninputs * npts, 0.0);
+    state_grads.resize(ninputs * 2 * npts, 0.0);
+    state_values[..ninputs * npts].fill(0.0);
+    state_grads[..ninputs * 2 * npts].fill(0.0);
+    for field in 0..ninputs {
+        for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+            let coefficient = input_maps_buf[field][cell_i].map_or(
+                input_prescribed_buf[field][cell_i].unwrap_or(0.0),
+                |reduced| state[(input_offsets[field] + reduced, 0)],
+            );
+            for q in 0..npts {
+                state_values[field * npts + q] += coefficient * facet.values[facet_i * npts + q];
+            }
+        }
+        for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate() {
+            let coefficient = input_maps_buf[field][cell_i].map_or(
+                input_prescribed_buf[field][cell_i].unwrap_or(0.0),
+                |reduced| state[(input_offsets[field] + reduced, 0)],
+            );
+            for q in 0..npts {
+                for gd in 0..2 {
+                    state_grads[(field * 2 + gd) * npts + q] +=
+                        coefficient * cell_grads[gd * npts + q];
+                }
+            }
+        }
+    }
+    let facet_state = CellState {
+        nfields: ninputs,
+        npts,
+        gdim: 2,
+        values: &state_values[..ninputs * npts],
+        grads: &state_grads[..ninputs * 2 * npts],
+        field_indices: &[],
+    };
+    let ctx = FacetCtx {
+        time,
+        facet: facet.facet,
+        tdim: 1,
+        gdim: 2,
+        ncomp: 1,
+        npts,
+        ndofs: nfacet,
+        wts,
+        jfacet_det: &facet.jfacet_det,
+        points: &facet.points,
+        normal: &facet.normal,
+        values: &facet.values,
+        grads: &facet.grads,
+    };
+    (facet_state, ctx)
+}
+
 pub(crate) fn assemble_quad_state_boundary_residual_cached(
     cache: &QuadStateBoundaryCache,
     fields: &FieldRegistry,
@@ -1230,114 +1499,44 @@ pub(crate) fn assemble_quad_state_boundary_residual_cached(
     assert_eq!(state.nrows(), system_size, "state size mismatch");
     assert_eq!(state.ncols(), 1, "boundary state requires one column");
     let mut out = vec![0.0; system_size];
+    // ponytail: resolved once per distinct kernel; map/state scratch reused.
+    let mut resolved: Vec<ResolvedWeakBoundary> = Vec::new();
+    let mut input_maps_buf: Vec<&[Option<usize>]> = Vec::new();
+    let mut input_prescribed_buf: Vec<&[Option<f64>]> = Vec::new();
+    let mut output_maps_buf: Vec<&[Option<usize>]> = Vec::new();
+    let mut state_values = Vec::new();
+    let mut state_grads = Vec::new();
 
     for facet in &cache.facets {
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
+        let entry_index = resolve_weak_entry(
+            &mut resolved,
+            fields,
+            field_offsets,
+            kernel,
             "state boundary kernel",
         );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let input_maps = if field_reduced_dofs.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let input_prescribed = if field_prescribed_values.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let output_maps = if field_reduced_dofs.len() == 1 {
-            (0..noutputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .outputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let npts = cache.wts.len();
+        let entry = &resolved[entry_index];
+        let noutputs = entry.outputs.len();
         let nfacet = facet.facet_dofs.len();
-        let mut state_values = vec![0.0; ninputs * npts];
-        let mut state_grads = vec![0.0; ninputs * 2 * npts];
-        for field in 0..ninputs {
-            for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let coefficient = input_maps[field][cell_i]
-                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(input_offsets[field] + reduced, 0)]
-                    });
-                for q in 0..npts {
-                    state_values[field * npts + q] +=
-                        coefficient * facet.values[facet_i * npts + q];
-                }
-            }
-            for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate() {
-                let coefficient = input_maps[field][cell_i]
-                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(input_offsets[field] + reduced, 0)]
-                    });
-                for q in 0..npts {
-                    for gd in 0..2 {
-                        state_grads[(field * 2 + gd) * npts + q] +=
-                            coefficient * cell_grads[gd * npts + q];
-                    }
-                }
-            }
-        }
-        let facet_state = CellState {
-            nfields: ninputs,
-            npts,
-            gdim: 2,
-            values: &state_values,
-            grads: &state_grads,
-            field_indices: &[],
-        };
-        let ctx = FacetCtx {
+        let (facet_state, ctx) = weak_facet_views(
+            entry,
+            facet,
+            &cache.wts,
             time,
-            facet: facet.facet,
-            tdim: 1,
-            gdim: 2,
-            ncomp: 1,
-            npts,
-            ndofs: nfacet,
-            wts: &cache.wts,
-            jfacet_det: &facet.jfacet_det,
-            points: &facet.points,
-            normal: &facet.normal,
-            values: &facet.values,
-            grads: &facet.grads,
-        };
+            field_reduced_dofs,
+            field_prescribed_values,
+            state,
+            &mut input_maps_buf,
+            &mut input_prescribed_buf,
+            &mut output_maps_buf,
+            &mut state_values,
+            &mut state_grads,
+        );
+        let output_maps = &output_maps_buf;
+        let output_offsets = &entry.output_offsets;
         let mut local = vec![0.0; noutputs * nfacet];
         kernel.assemble_local_residual(&ctx, &facet_state, &mut local);
         for equation in 0..noutputs {
@@ -1368,12 +1567,16 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
     assert_eq!(field_offsets.len(), nfields + 1);
     assert_eq!(state.nrows(), system_size, "state size mismatch");
     assert_eq!(state.ncols(), 1, "boundary state requires one column");
-    let npts = cache.wts.len();
     if terms.is_empty() {
         return vec![0.0; system_size];
     }
     // ponytail: small facet counts stay serial (fewer threads than volume);
     // large ones or an explicit ORMATEX_BOUNDARY_THREADS setting go parallel.
+    // NOTE (bit-identity): phase A computes all pointwise fluxes first (per
+    // kernel batch, order-independent); phase B scatters them facet-by-facet
+    // in `cache.facets` order (serial) or in color order (parallel), with the
+    // same per-point arithmetic as before. Same path and thread count => same
+    // bits; only accumulation order differs across paths.
     if use_parallel_boundary(cache.facets.len()) {
         let run = || {
             tensor_boundary_residual_parallel(
@@ -1393,89 +1596,71 @@ pub(crate) fn assemble_quad_state_tensor_boundary_residual_cached(
             None => run(),
         };
     }
+    let resolved = preresolve_tensor_entries(fields, field_offsets, cache, terms);
+    let batches = plan_facet_batches(cache, terms, &resolved);
+    let maps = build_facet_map_table(
+        cache,
+        &batches,
+        &resolved,
+        field_reduced_dofs,
+        field_prescribed_values,
+    );
+    let chunks = chunk_facet_batches(&batches);
+    let mut table = alloc_facet_pointwise(cache, &batches, &resolved);
+    residual_phase_a_serial(
+        cache, &batches, &chunks, &resolved, &maps, time, state, &mut table,
+    );
     let mut out = vec![0.0; system_size];
+    scatter_residual_serial(cache, &resolved, &maps, &table, &mut out);
+    out
+}
 
-    // ponytail: boundary facets are few; one serial loop with reused scratch
-    // beats parallel dispatch here (parallel coloring added barriers costing
-    // more than the whole boundary budget on the cylinder case).
-    let mut state_values = vec![0.0; nfields * npts];
-    let mut state_grads = vec![0.0; nfields * 2 * npts];
-    for facet in &cache.facets {
-        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+/// Scatter stored pointwise fluxes in `cache.facets` order (phase B).
+///
+/// Inputs: cache, resolved entries, map table, pointwise table, output.
+/// Purpose: serial residual scatter with exactly the historical
+/// equation-outer/quadrature/trace order and `(w*j)*flux` arithmetic.
+/// Output: none (`out` accumulated).
+fn scatter_residual_serial(
+    cache: &QuadStateBoundaryCache,
+    resolved: &[ResolvedTensorBoundary],
+    maps: &FacetMapTable<'_>,
+    table: &FacetPointwise,
+    out: &mut [f64],
+) {
+    let npts = cache.wts.len();
+    let mut wj = vec![0.0; npts];
+    for (position, facet) in cache.facets.iter().enumerate() {
+        let base = table.offset[position];
+        if base == INACTIVE_FACET {
             continue;
-        };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
-            "tensor state boundary kernel",
-        );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let input_maps = maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
-        let input_prescribed =
-            maps_for_cell(field_prescribed_values, &selection.inputs, facet.cell_index);
-        let output_maps = maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
-        tensor_boundary_state_into(
-            facet,
-            ninputs,
-            &input_maps,
-            &input_prescribed,
-            state,
-            &input_offsets,
-            npts,
-            kernel.tensor_requires_gradients(),
-            &mut state_values[..ninputs * npts],
-            &mut state_grads[..ninputs * 2 * npts],
-        );
-        let tensor_state = CellState {
-            nfields: ninputs,
-            npts,
-            gdim: 2,
-            values: &state_values[..ninputs * npts],
-            grads: &state_grads[..ninputs * 2 * npts],
-            field_indices: &[],
-        };
-        let tensor_ctx = TensorFacetCtx {
-            time,
-            facet: facet.facet,
-            npts,
-            wts: &cache.wts,
-            jfacet_det: &facet.jfacet_det,
-            points: &facet.points,
-            normal: &facet.normal,
-        };
-        for equation in 0..noutputs {
+        }
+        let entry = &resolved[table.entry_of[position]];
+        // ponytail: per-facet quadrature weights hoisted; `(w*j)*flux` matches
+        // the old `w * j * flux` evaluation order exactly.
+        for q in 0..npts {
+            wj[q] = cache.wts[q] * facet.jfacet_det[q];
+        }
+        for equation in 0..entry.outputs.len() {
+            let output_offset = entry.output_offsets[equation];
+            let output_map = &maps.output[position][equation];
             for q in 0..npts {
-                let flux = kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
-                let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
+                let flux = table.data[base + equation * npts + q];
+                let weight = wj[q] * flux;
                 for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                    if let Some(reduced) = output_maps[equation][cell_i] {
-                        out[output_offsets[equation] + reduced] +=
-                            weight * facet.values[facet_i * npts + q];
+                    if let Some(reduced) = output_map[cell_i] {
+                        out[output_offset + reduced] += weight * facet.values[facet_i * npts + q];
                     }
                 }
             }
         }
     }
-    out
 }
 
-/// Color-parallel tensor boundary residual (see the serial path in
-/// [`assemble_quad_state_tensor_boundary_residual_cached`] for the algorithm).
-/// Runs inside the caller's pool: the global pool by default, or the
-/// dedicated `ORMATEX_BOUNDARY_THREADS` pool when configured.
+/// Color-parallel tensor boundary residual: batched phase A, then the
+/// color-ordered phase-B scatter (see [`scatter_residual_serial`] for the
+/// per-point arithmetic). Runs inside the caller's pool: the global pool by
+/// default, or the dedicated `ORMATEX_BOUNDARY_THREADS` pool when configured.
 fn tensor_boundary_residual_parallel(
     cache: &QuadStateBoundaryCache,
     fields: &FieldRegistry,
@@ -1487,100 +1672,57 @@ fn tensor_boundary_residual_parallel(
     restriction: &ElementRestriction,
     terms: &StateTensorBoundaryTerms<2>,
 ) -> Vec<f64> {
-    let nfields = fields.len();
     let system_size = *field_offsets.last().unwrap();
     let npts = cache.wts.len();
+    let resolved = preresolve_tensor_entries(fields, field_offsets, cache, terms);
+    let batches = plan_facet_batches(cache, terms, &resolved);
+    let maps = build_facet_map_table(
+        cache,
+        &batches,
+        &resolved,
+        field_reduced_dofs,
+        field_prescribed_values,
+    );
+    let chunks = chunk_facet_batches(&batches);
+    let mut table = alloc_facet_pointwise(cache, &batches, &resolved);
+    residual_phase_a_parallel(
+        cache, &batches, &chunks, &resolved, &maps, time, state, &mut table,
+    );
     let mut out = vec![0.0; system_size];
     {
         let dis = unsafe { DisjointOut::new(&mut out) };
         for color_cells in restriction.cell_colors() {
-            color_cells.par_iter().for_each_init(
-                || (vec![0.0; nfields * npts], vec![0.0; nfields * 2 * npts]),
-                |(state_values, state_grads), &cell| {
-                    for &facet_index in &cache.cell_facets[cell] {
-                        let facet = &cache.facets[facet_index];
-                        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
-                            continue;
-                        };
-                        let selection = fields.resolve_selection(
-                            kernel.input_nfields(),
-                            kernel.input_field_names(),
-                            kernel.output_nfields(),
-                            kernel.output_field_names(),
-                            "tensor state boundary kernel",
-                        );
-                        let ninputs = selection.inputs.len();
-                        let noutputs = selection.outputs.len();
-                        let input_offsets: Vec<_> = selection
-                            .inputs
-                            .iter()
-                            .map(|&field| field_offsets[field])
-                            .collect();
-                        let output_offsets: Vec<_> = selection
-                            .outputs
-                            .iter()
-                            .map(|&field| field_offsets[field])
-                            .collect();
-                        let input_maps =
-                            maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
-                        let input_prescribed = maps_for_cell(
-                            field_prescribed_values,
-                            &selection.inputs,
-                            facet.cell_index,
-                        );
-                        let output_maps =
-                            maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
-                        tensor_boundary_state_into(
-                            facet,
-                            ninputs,
-                            &input_maps,
-                            &input_prescribed,
-                            state,
-                            &input_offsets,
-                            npts,
-                            kernel.tensor_requires_gradients(),
-                            &mut state_values[..ninputs * npts],
-                            &mut state_grads[..ninputs * 2 * npts],
-                        );
-                        let tensor_state = CellState {
-                            nfields: ninputs,
-                            npts,
-                            gdim: 2,
-                            values: &state_values[..ninputs * npts],
-                            grads: &state_grads[..ninputs * 2 * npts],
-                            field_indices: &[],
-                        };
-                        let tensor_ctx = TensorFacetCtx {
-                            time,
-                            facet: facet.facet,
-                            npts,
-                            wts: &cache.wts,
-                            jfacet_det: &facet.jfacet_det,
-                            points: &facet.points,
-                            normal: &facet.normal,
-                        };
-                        for equation in 0..noutputs {
-                            for q in 0..npts {
-                                let flux =
-                                    kernel.tensor_residual(&tensor_ctx, &tensor_state, equation, q);
-                                let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
-                                for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                                    if let Some(reduced) = output_maps[equation][cell_i] {
-                                        // SAFETY: same-color cells are row-disjoint;
-                                        // one cell's facets run serially.
-                                        unsafe {
-                                            dis.add(
-                                                output_offsets[equation] + reduced,
-                                                weight * facet.values[facet_i * npts + q],
-                                            )
-                                        };
-                                    }
+            color_cells.par_iter().for_each(|&cell| {
+                for &position in &cache.cell_facets[cell] {
+                    let facet = &cache.facets[position];
+                    let base = table.offset[position];
+                    if base == INACTIVE_FACET {
+                        continue;
+                    }
+                    let entry = &resolved[table.entry_of[position]];
+                    let output_maps = &maps.output[position];
+                    for equation in 0..entry.outputs.len() {
+                        let output_offset = entry.output_offsets[equation];
+                        let output_map: &[Option<usize>] = &output_maps[equation];
+                        for q in 0..npts {
+                            let flux = table.data[base + equation * npts + q];
+                            let weight = cache.wts[q] * facet.jfacet_det[q] * flux;
+                            for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                                if let Some(reduced) = output_map[cell_i] {
+                                    // SAFETY: same-color cells are row-disjoint;
+                                    // one cell's facets run serially.
+                                    unsafe {
+                                        dis.add(
+                                            output_offset + reduced,
+                                            weight * facet.values[facet_i * npts + q],
+                                        )
+                                    };
                                 }
                             }
                         }
                     }
-                },
-            );
+                }
+            });
         }
     }
     out
@@ -1608,114 +1750,47 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
         "boundary direction size mismatch"
     );
     let mut out = Mat::<f64>::zeros(system_size, direction.ncols());
+    // ponytail: resolved once per distinct kernel; map/state scratch reused.
+    let mut resolved: Vec<ResolvedWeakBoundary> = Vec::new();
+    let mut input_maps_buf: Vec<&[Option<usize>]> = Vec::new();
+    let mut input_prescribed_buf: Vec<&[Option<f64>]> = Vec::new();
+    let mut output_maps_buf: Vec<&[Option<usize>]> = Vec::new();
+    let mut state_values = Vec::new();
+    let mut state_grads = Vec::new();
 
     for facet in &cache.facets {
         let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
             continue;
         };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
+        let entry_index = resolve_weak_entry(
+            &mut resolved,
+            fields,
+            field_offsets,
+            kernel,
             "tensor state boundary kernel",
         );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let input_maps = if field_reduced_dofs.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let input_prescribed = if field_prescribed_values.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let output_maps = if field_reduced_dofs.len() == 1 {
-            (0..noutputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .outputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let npts = cache.wts.len();
+        let entry = &resolved[entry_index];
+        let ninputs = entry.inputs.len();
+        let noutputs = entry.outputs.len();
         let nfacet = facet.facet_dofs.len();
-        let mut state_values = vec![0.0; ninputs * npts];
-        let mut state_grads = vec![0.0; ninputs * 2 * npts];
-        for field in 0..ninputs {
-            for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                let coefficient = input_maps[field][cell_i]
-                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(input_offsets[field] + reduced, 0)]
-                    });
-                for q in 0..npts {
-                    state_values[field * npts + q] +=
-                        coefficient * facet.values[facet_i * npts + q];
-                }
-            }
-            for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate() {
-                let coefficient = input_maps[field][cell_i]
-                    .map_or(input_prescribed[field][cell_i].unwrap_or(0.0), |reduced| {
-                        state[(input_offsets[field] + reduced, 0)]
-                    });
-                for q in 0..npts {
-                    for gd in 0..2 {
-                        state_grads[(field * 2 + gd) * npts + q] +=
-                            coefficient * cell_grads[gd * npts + q];
-                    }
-                }
-            }
-        }
-        let facet_state = CellState {
-            nfields: ninputs,
-            npts,
-            gdim: 2,
-            values: &state_values,
-            grads: &state_grads,
-            field_indices: &[],
-        };
-        let ctx = FacetCtx {
+        let (facet_state, ctx) = weak_facet_views(
+            entry,
+            facet,
+            &cache.wts,
             time,
-            facet: facet.facet,
-            tdim: 1,
-            gdim: 2,
-            ncomp: 1,
-            npts,
-            ndofs: nfacet,
-            wts: &cache.wts,
-            jfacet_det: &facet.jfacet_det,
-            points: &facet.points,
-            normal: &facet.normal,
-            values: &facet.values,
-            grads: &facet.grads,
-        };
+            field_reduced_dofs,
+            field_prescribed_values,
+            state,
+            &mut input_maps_buf,
+            &mut input_prescribed_buf,
+            &mut output_maps_buf,
+            &mut state_values,
+            &mut state_grads,
+        );
+        let input_maps = &input_maps_buf;
+        let input_offsets = &entry.input_offsets;
+        let output_maps = &output_maps_buf;
+        let output_offsets = &entry.output_offsets;
         let input_size = ninputs * nfacet;
         let output_size = noutputs * nfacet;
         let mut local_direction = vec![0.0; input_size];
@@ -1730,13 +1805,28 @@ pub(crate) fn apply_quad_state_boundary_terms_cached(
                 }
             }
             kernel.apply_local_jacobian(&ctx, &facet_state, &local_direction, &mut local_action);
-            for field in 0..noutputs {
-                for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                    let Some(reduced) = output_maps[field][cell_i] else {
-                        continue;
-                    };
-                    out[(output_offsets[field] + reduced, column)] +=
-                        local_action[field * nfacet + facet_i];
+            // ponytail: contiguous column slice instead of 2D indexing; same order.
+            if let Some(column_view) = out.as_mut().col_mut(column).try_as_col_major_mut() {
+                let slice = column_view.as_slice_mut();
+                for field in 0..noutputs {
+                    let base = output_offsets[field];
+                    let map = output_maps[field];
+                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                        let Some(reduced) = map[cell_i] else {
+                            continue;
+                        };
+                        slice[base + reduced] += local_action[field * nfacet + facet_i];
+                    }
+                }
+            } else {
+                for field in 0..noutputs {
+                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                        let Some(reduced) = output_maps[field][cell_i] else {
+                            continue;
+                        };
+                        out[(output_offsets[field] + reduced, column)] +=
+                            local_action[field * nfacet + facet_i];
+                    }
                 }
             }
         }
@@ -1775,6 +1865,11 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
     }
     // ponytail: small facet counts stay serial (fewer threads than volume);
     // large ones or an explicit ORMATEX_BOUNDARY_THREADS setting go parallel.
+    // NOTE (bit-identity): the serial loop below accumulates facet-by-facet in
+    // `cache.facets` order while the parallel path accumulates in color order,
+    // so shared corner rows can differ in the last bit depending on facet count
+    // / `ORMATEX_BOUNDARY_THREADS`. Same path and thread count => same bits;
+    // arithmetic is identical, only accumulation order differs.
     if use_parallel_boundary(cache.facets.len()) {
         let run = || {
             tensor_boundary_apply_parallel(
@@ -1802,105 +1897,86 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
         }
         return out;
     }
-    let npts = cache.wts.len();
+    let resolved = preresolve_tensor_entries(fields, field_offsets, cache, terms);
+    let batches = plan_facet_batches(cache, terms, &resolved);
+    let maps = build_facet_map_table(
+        cache,
+        &batches,
+        &resolved,
+        field_reduced_dofs,
+        field_prescribed_values,
+    );
+    let chunks = chunk_facet_batches(&batches);
+    let mut table = alloc_facet_pointwise(cache, &batches, &resolved);
     let mut out = Mat::<f64>::zeros(system_size, direction.ncols());
+    // ponytail: column-outer phasing reuses one pointwise table; the
+    // per-column accumulation order matches the old facet-outer loop exactly.
+    for column in 0..direction.ncols() {
+        action_phase_a_serial(
+            cache, &batches, &chunks, &resolved, &maps, time, state, direction, column, &mut table,
+        );
+        scatter_action_column_serial(cache, &resolved, &maps, &table, column, &mut out);
+    }
+    out
+}
 
-    // ponytail: serial facet loop with reused scratch; see the residual path.
-    let mut state_values = vec![0.0; nfields * npts];
-    let mut state_grads = vec![0.0; nfields * 2 * npts];
-    let mut direction_values = vec![0.0; nfields * npts];
-    let mut direction_grads = vec![0.0; nfields * 2 * npts];
-    for facet in &cache.facets {
-        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+/// Scatter one column of stored pointwise actions in `cache.facets` order
+/// (phase B).
+///
+/// Inputs: cache, resolved entries, map table, pointwise table, scattered
+/// column, output. Purpose: serial action scatter with exactly the historical
+/// equation-outer/quadrature/trace order and `(w*j)*action` arithmetic,
+/// including the contiguous column-slice fast path. Output: none (`out`
+/// accumulated).
+fn scatter_action_column_serial(
+    cache: &QuadStateBoundaryCache,
+    resolved: &[ResolvedTensorBoundary],
+    maps: &FacetMapTable<'_>,
+    table: &FacetPointwise,
+    column: usize,
+    out: &mut Mat<f64>,
+) {
+    let npts = cache.wts.len();
+    let mut wj = vec![0.0; npts];
+    for (position, facet) in cache.facets.iter().enumerate() {
+        let base = table.offset[position];
+        if base == INACTIVE_FACET {
             continue;
-        };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
-            "tensor state boundary kernel",
-        );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let input_maps = maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
-        let input_prescribed =
-            maps_for_cell(field_prescribed_values, &selection.inputs, facet.cell_index);
-        let output_maps = maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
-        let include_gradients = kernel.tensor_requires_gradients();
-        tensor_boundary_state_into(
-            facet,
-            ninputs,
-            &input_maps,
-            &input_prescribed,
-            state,
-            &input_offsets,
-            npts,
-            include_gradients,
-            &mut state_values[..ninputs * npts],
-            &mut state_grads[..ninputs * 2 * npts],
-        );
-        let tensor_state = CellState {
-            nfields: ninputs,
-            npts,
-            gdim: 2,
-            values: &state_values[..ninputs * npts],
-            grads: &state_grads[..ninputs * 2 * npts],
-            field_indices: &[],
-        };
-        let tensor_ctx = TensorFacetCtx {
-            time,
-            facet: facet.facet,
-            npts,
-            wts: &cache.wts,
-            jfacet_det: &facet.jfacet_det,
-            points: &facet.points,
-            normal: &facet.normal,
-        };
-        for column in 0..direction.ncols() {
-            tensor_boundary_direction_into(
-                facet,
-                ninputs,
-                &input_maps,
-                direction,
-                &input_offsets,
-                column,
-                npts,
-                include_gradients,
-                &mut direction_values[..ninputs * npts],
-                &mut direction_grads[..ninputs * 2 * npts],
-            );
-            let tensor_direction = CellState {
-                nfields: ninputs,
-                npts,
-                gdim: 2,
-                values: &direction_values[..ninputs * npts],
-                grads: &direction_grads[..ninputs * 2 * npts],
-                field_indices: &[],
-            };
+        }
+        let entry = &resolved[table.entry_of[position]];
+        let noutputs = entry.outputs.len();
+        // ponytail: per-facet quadrature weights hoisted; `(w*j)*action`
+        // matches the old `w * j * action` evaluation order exactly.
+        for q in 0..npts {
+            wj[q] = cache.wts[q] * facet.jfacet_det[q];
+        }
+        // ponytail: contiguous column slice instead of 2D indexing, with
+        // the old path as fallback; accumulation order per output entry
+        // (equation outer, q inner, facet trace inner) is unchanged.
+        if let Some(column_view) = out.as_mut().col_mut(column).try_as_col_major_mut() {
+            let slice = column_view.as_slice_mut();
+            for equation in 0..noutputs {
+                let output_offset = entry.output_offsets[equation];
+                let output_map: &[Option<usize>] = &maps.output[position][equation];
+                for q in 0..npts {
+                    let action = table.data[base + equation * npts + q];
+                    let weight = wj[q] * action;
+                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                        if let Some(reduced) = output_map[cell_i] {
+                            slice[output_offset + reduced] +=
+                                weight * facet.values[facet_i * npts + q];
+                        }
+                    }
+                }
+            }
+        } else {
             for equation in 0..noutputs {
                 for q in 0..npts {
-                    let action = kernel.tensor_jacobian_action(
-                        &tensor_ctx,
-                        &tensor_state,
-                        &tensor_direction,
-                        equation,
-                        q,
-                    );
-                    let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                    let action = table.data[base + equation * npts + q];
+                    let weight = wj[q] * action;
                     for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                        if let Some(reduced) = output_maps[equation][cell_i] {
-                            out[(output_offsets[equation] + reduced, column)] +=
+                        if let Some(reduced) = maps.output[position][equation][cell_i] {
+                            out[(entry.output_offsets[equation] + reduced, column)] +=
                                 weight * facet.values[facet_i * npts + q];
                         }
                     }
@@ -1908,7 +1984,6 @@ pub(crate) fn apply_quad_state_tensor_boundary_terms_cached(
             }
         }
     }
-    out
 }
 
 /// Color-parallel tensor boundary Jacobian action, returning column-major
@@ -1928,10 +2003,19 @@ fn tensor_boundary_apply_parallel(
     restriction: &ElementRestriction,
     terms: &StateTensorBoundaryTerms<2>,
 ) -> Vec<f64> {
-    let nfields = fields.len();
     let system_size = *field_offsets.last().unwrap();
     let ncols = direction.ncols();
-    let npts = cache.wts.len();
+    let resolved = preresolve_tensor_entries(fields, field_offsets, cache, terms);
+    let batches = plan_facet_batches(cache, terms, &resolved);
+    let maps = build_facet_map_table(
+        cache,
+        &batches,
+        &resolved,
+        field_reduced_dofs,
+        field_prescribed_values,
+    );
+    let chunks = chunk_facet_batches(&batches);
+    let mut table = alloc_facet_pointwise(cache, &batches, &resolved);
     let mut actions = vec![0.0; system_size * ncols];
     {
         let mut outs = Vec::with_capacity(ncols);
@@ -1940,130 +2024,47 @@ fn tensor_boundary_apply_parallel(
             // are row-disjoint (one cell's facets run serially).
             outs.push(unsafe { DisjointOut::new(column_actions) });
         }
-        for color_cells in restriction.cell_colors() {
-            color_cells.par_iter().for_each_init(
-                || {
-                    (
-                        vec![0.0; nfields * npts],
-                        vec![0.0; nfields * 2 * npts],
-                        vec![0.0; nfields * npts],
-                        vec![0.0; nfields * 2 * npts],
-                    )
-                },
-                |(state_values, state_grads, direction_values, direction_grads), &cell| {
-                    for &facet_index in &cache.cell_facets[cell] {
-                        let facet = &cache.facets[facet_index];
-                        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+        let npts = cache.wts.len();
+        // ponytail: column-outer phasing reuses one pointwise table; the
+        // per-column accumulation order matches the old loop exactly.
+        for (column, &column_out) in outs.iter().enumerate() {
+            action_phase_a_parallel(
+                cache, &batches, &chunks, &resolved, &maps, time, state, direction, column,
+                &mut table,
+            );
+            for color_cells in restriction.cell_colors() {
+                color_cells.par_iter().for_each(|&cell| {
+                    for &position in &cache.cell_facets[cell] {
+                        let facet = &cache.facets[position];
+                        let base = table.offset[position];
+                        if base == INACTIVE_FACET {
                             continue;
-                        };
-                        let selection = fields.resolve_selection(
-                            kernel.input_nfields(),
-                            kernel.input_field_names(),
-                            kernel.output_nfields(),
-                            kernel.output_field_names(),
-                            "tensor state boundary kernel",
-                        );
-                        let ninputs = selection.inputs.len();
-                        let noutputs = selection.outputs.len();
-                        let input_offsets: Vec<_> = selection
-                            .inputs
-                            .iter()
-                            .map(|&field| field_offsets[field])
-                            .collect();
-                        let output_offsets: Vec<_> = selection
-                            .outputs
-                            .iter()
-                            .map(|&field| field_offsets[field])
-                            .collect();
-                        let input_maps =
-                            maps_for_cell(field_reduced_dofs, &selection.inputs, facet.cell_index);
-                        let input_prescribed = maps_for_cell(
-                            field_prescribed_values,
-                            &selection.inputs,
-                            facet.cell_index,
-                        );
-                        let output_maps =
-                            maps_for_cell(field_reduced_dofs, &selection.outputs, facet.cell_index);
-                        let include_gradients = kernel.tensor_requires_gradients();
-                        tensor_boundary_state_into(
-                            facet,
-                            ninputs,
-                            &input_maps,
-                            &input_prescribed,
-                            state,
-                            &input_offsets,
-                            npts,
-                            include_gradients,
-                            &mut state_values[..ninputs * npts],
-                            &mut state_grads[..ninputs * 2 * npts],
-                        );
-                        let tensor_state = CellState {
-                            nfields: ninputs,
-                            npts,
-                            gdim: 2,
-                            values: &state_values[..ninputs * npts],
-                            grads: &state_grads[..ninputs * 2 * npts],
-                            field_indices: &[],
-                        };
-                        let tensor_ctx = TensorFacetCtx {
-                            time,
-                            facet: facet.facet,
-                            npts,
-                            wts: &cache.wts,
-                            jfacet_det: &facet.jfacet_det,
-                            points: &facet.points,
-                            normal: &facet.normal,
-                        };
-                        for (column, &column_out) in outs.iter().enumerate() {
-                            tensor_boundary_direction_into(
-                                facet,
-                                ninputs,
-                                &input_maps,
-                                direction,
-                                &input_offsets,
-                                column,
-                                npts,
-                                include_gradients,
-                                &mut direction_values[..ninputs * npts],
-                                &mut direction_grads[..ninputs * 2 * npts],
-                            );
-                            let tensor_direction = CellState {
-                                nfields: ninputs,
-                                npts,
-                                gdim: 2,
-                                values: &direction_values[..ninputs * npts],
-                                grads: &direction_grads[..ninputs * 2 * npts],
-                                field_indices: &[],
-                            };
-                            for equation in 0..noutputs {
-                                for q in 0..npts {
-                                    let action = kernel.tensor_jacobian_action(
-                                        &tensor_ctx,
-                                        &tensor_state,
-                                        &tensor_direction,
-                                        equation,
-                                        q,
-                                    );
-                                    let weight = cache.wts[q] * facet.jfacet_det[q] * action;
-                                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate()
-                                    {
-                                        if let Some(reduced) = output_maps[equation][cell_i] {
-                                            // SAFETY: same-color cells are row-disjoint;
-                                            // one cell's facets run serially.
-                                            unsafe {
-                                                column_out.add(
-                                                    output_offsets[equation] + reduced,
-                                                    weight * facet.values[facet_i * npts + q],
-                                                )
-                                            };
-                                        }
+                        }
+                        let entry = &resolved[table.entry_of[position]];
+                        let output_maps = &maps.output[position];
+                        for equation in 0..entry.outputs.len() {
+                            let output_offset = entry.output_offsets[equation];
+                            let output_map: &[Option<usize>] = &output_maps[equation];
+                            for q in 0..npts {
+                                let action = table.data[base + equation * npts + q];
+                                let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                                for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                                    if let Some(reduced) = output_map[cell_i] {
+                                        // SAFETY: same-color cells are row-disjoint;
+                                        // one cell's facets run serially.
+                                        unsafe {
+                                            column_out.add(
+                                                output_offset + reduced,
+                                                weight * facet.values[facet_i * npts + q],
+                                            )
+                                        };
                                     }
                                 }
                             }
                         }
                     }
-                },
-            );
+                });
+            }
         }
     }
     actions
@@ -2085,162 +2086,46 @@ pub(crate) fn assemble_quad_state_tensor_boundary_jacobian_cached(
     assert_eq!(state.nrows(), system_size, "state size mismatch");
     assert_eq!(state.ncols(), 1, "boundary state requires one column");
     let mut triplets = Vec::new();
-
-    for facet in &cache.facets {
-        let Some(kernel) = terms.kernel_for(facet.facet.local_index) else {
+    let resolved = preresolve_tensor_entries(fields, field_offsets, cache, terms);
+    let batches = plan_facet_batches(cache, terms, &resolved);
+    let maps = build_facet_map_table(
+        cache,
+        &batches,
+        &resolved,
+        field_reduced_dofs,
+        field_prescribed_values,
+    );
+    let columns = boundary_column_lists(cache, &batches, &resolved, &maps);
+    let chunks = chunk_facet_batches(&batches);
+    let mut table = alloc_assembled_pointwise(cache, &batches, &resolved, &columns);
+    assembled_phase_a_serial(
+        cache, &batches, &chunks, &resolved, &maps, &columns, time, state, &mut table,
+    );
+    // Phase B: facet order, impulse-column discovery order, equation, q —
+    // exactly the historical triplet order and arithmetic.
+    let npts = cache.wts.len();
+    for (position, facet) in cache.facets.iter().enumerate() {
+        let base = table.offset[position];
+        if base == INACTIVE_FACET {
             continue;
-        };
-        let selection = fields.resolve_selection(
-            kernel.input_nfields(),
-            kernel.input_field_names(),
-            kernel.output_nfields(),
-            kernel.output_field_names(),
-            "tensor state boundary kernel",
-        );
-        let ninputs = selection.inputs.len();
-        let noutputs = selection.outputs.len();
-        let input_offsets: Vec<_> = selection
-            .inputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let output_offsets: Vec<_> = selection
-            .outputs
-            .iter()
-            .map(|&field| field_offsets[field])
-            .collect();
-        let input_maps = if field_reduced_dofs.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let input_prescribed = if field_prescribed_values.len() == 1 {
-            (0..ninputs)
-                .map(|_| field_prescribed_values[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .inputs
-                .iter()
-                .map(|&field| field_prescribed_values[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let output_maps = if field_reduced_dofs.len() == 1 {
-            (0..noutputs)
-                .map(|_| field_reduced_dofs[0][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        } else {
-            selection
-                .outputs
-                .iter()
-                .map(|&field| field_reduced_dofs[field][facet.cell_index].as_slice())
-                .collect::<Vec<_>>()
-        };
-        let npts = cache.wts.len();
-        let include_gradients = kernel.tensor_requires_gradients();
-        let mut state_values = vec![0.0; ninputs * npts];
-        let mut state_grads = vec![0.0; ninputs * 2 * npts];
-        tensor_boundary_state_into(
-            facet,
-            ninputs,
-            &input_maps,
-            &input_prescribed,
-            state,
-            &input_offsets,
-            npts,
-            include_gradients,
-            &mut state_values,
-            &mut state_grads,
-        );
-        let tensor_state = CellState {
-            nfields: ninputs,
-            npts,
-            gdim: 2,
-            values: &state_values,
-            grads: &state_grads,
-            field_indices: &[],
-        };
-        let tensor_ctx = TensorFacetCtx {
-            time,
-            facet: facet.facet,
-            npts,
-            wts: &cache.wts,
-            jfacet_det: &facet.jfacet_det,
-            points: &facet.points,
-            normal: &facet.normal,
-        };
-
-        let mut columns = std::collections::HashSet::new();
-        for unknown in 0..ninputs {
-            for &cell_i in &facet.cell_indices {
-                let Some(reduced) = input_maps[unknown][cell_i] else {
-                    continue;
-                };
-                if !columns.insert((unknown, reduced)) {
-                    continue;
-                }
-                let mut direction_values = vec![0.0; ninputs * npts];
-                for (facet_i, &basis_cell_i) in facet.cell_indices.iter().enumerate() {
-                    if input_maps[unknown][basis_cell_i] != Some(reduced) {
-                        continue;
-                    }
-                    for q in 0..npts {
-                        direction_values[unknown * npts + q] += facet.values[facet_i * npts + q];
-                    }
-                }
-                let mut direction_grads = if include_gradients {
-                    vec![0.0; ninputs * 2 * npts]
-                } else {
-                    Vec::new()
-                };
-                if include_gradients {
-                    for (cell_i, cell_grads) in facet.cell_grads.chunks_exact(2 * npts).enumerate()
-                    {
-                        if input_maps[unknown][cell_i] != Some(reduced) {
-                            continue;
-                        }
-                        for q in 0..npts {
-                            for gd in 0..2 {
-                                direction_grads[(unknown * 2 + gd) * npts + q] +=
-                                    cell_grads[gd * npts + q];
-                            }
-                        }
-                    }
-                }
-                let tensor_direction = CellState {
-                    nfields: ninputs,
-                    npts,
-                    gdim: 2,
-                    values: &direction_values,
-                    grads: &direction_grads,
-                    field_indices: &[],
-                };
-                for equation in 0..noutputs {
-                    for q in 0..npts {
-                        let action = kernel.tensor_jacobian_action(
-                            &tensor_ctx,
-                            &tensor_state,
-                            &tensor_direction,
-                            equation,
-                            q,
-                        );
-                        let weight = cache.wts[q] * facet.jfacet_det[q] * action;
-                        for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
-                            if let Some(row) = output_maps[equation][cell_i] {
-                                let value = weight * facet.values[facet_i * npts + q];
-                                if value != 0.0 {
-                                    triplets.push(Triplet::new(
-                                        output_offsets[equation] + row,
-                                        input_offsets[unknown] + reduced,
-                                        value,
-                                    ));
-                                }
+        }
+        let entry = &resolved[table.entry_of[position]];
+        let noutputs = entry.outputs.len();
+        let output_maps = &maps.output[position];
+        for (j, &(unknown, reduced)) in columns[position].iter().enumerate() {
+            for equation in 0..noutputs {
+                for q in 0..npts {
+                    let action = table.data[base + (j * noutputs + equation) * npts + q];
+                    let weight = cache.wts[q] * facet.jfacet_det[q] * action;
+                    for (facet_i, &cell_i) in facet.cell_indices.iter().enumerate() {
+                        if let Some(row) = output_maps[equation][cell_i] {
+                            let value = weight * facet.values[facet_i * npts + q];
+                            if value != 0.0 {
+                                triplets.push(Triplet::new(
+                                    entry.output_offsets[equation] + row,
+                                    entry.input_offsets[unknown] + reduced,
+                                    value,
+                                ));
                             }
                         }
                     }

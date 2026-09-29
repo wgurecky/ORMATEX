@@ -6,7 +6,7 @@
 //! Smagorinsky-Lilly eddy viscosity evaluated on the mixture velocity (same
 //! model as the base EDAC kernels, per request). The action linearizes both
 //! the `nu_m(alpha)` dependence and the eddy viscosity. Owns equations 0-1.
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::kernels::common::TensorResidualKernel;
 use crate::kernels::edac_multiphase_drift_flux::config::{drift_field_names, DriftFlux2DConfig};
 
@@ -29,33 +29,82 @@ impl TensorResidualKernel<2> for TensorDriftViscousStress2D {
     fn owns_equation(&self, equation: usize) -> bool {
         equation < 2
     }
+
+    /// Lane-packed mixture viscous-stress residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - momentum equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0` - lane value slots. Overwritten.
+    /// * `f1x` - lane x-flux slots. Overwritten.
+    /// * `f1y` - lane y-flux slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation >= 2 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
-        let row = self.config.stress_tensor_row(ctx, state, q, equation);
-        [0.0, row[0], row[1]]
+        let (row0, row1) = self
+            .config
+            .stress_tensor_row_lanes(ctxs, state, q, equation);
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = row0[l];
+            f1y[l] = row1[l];
+        }
     }
+
+    /// Lane-packed mixture viscous-stress Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - momentum equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0` - lane linearized value slots. Overwritten.
+    /// * `f1x` - lane linearized x-flux slots. Overwritten.
+    /// * `f1y` - lane linearized y-flux slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation >= 2 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
-        let row = self
+        let (row0, row1) = self
             .config
-            .stress_tensor_row_directional_derivative(ctx, state, direction, q, equation);
-        [0.0, row[0], row[1]]
+            .stress_tensor_row_directional_derivative_lanes(ctxs, state, direction, q, equation);
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = row0[l];
+            f1y[l] = row1[l];
+        }
     }
 }

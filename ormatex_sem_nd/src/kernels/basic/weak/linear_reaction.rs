@@ -58,6 +58,7 @@ impl KernelLinearReaction {
         kernel
     }
 
+    #[inline]
     fn coefficient(&self, equation: usize, unknown: usize) -> f64 {
         self.interactions[equation]
             .iter()

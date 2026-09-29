@@ -59,6 +59,12 @@ impl JacobianPatternCache {
             }
             // Length mismatch: fall through and rebuild (stale pattern).
         }
+        // Build the symbolic pattern once via faer (structure only), then fill
+        // the values with the same triplet-order accumulation as the
+        // cache-hit path above. `try_new_from_triplets` sums duplicate
+        // triplets in sorted order, which can differ by 1 ulp from the
+        // sequential accumulation, so returning its matrix here would make
+        // the first assembly differ bitwise from all later ones.
         let matrix =
             SparseColMat::try_new_from_triplets(system_size, system_size, &triplets).unwrap();
         let symbolic = matrix.symbolic().to_owned().unwrap();
@@ -73,13 +79,17 @@ impl JacobianPatternCache {
                 .expect("triplet missing from symbolic pattern");
             triplet_to_nnz.push(start + offset);
         }
-        self.inner.write().unwrap().insert(
-            key,
-            Arc::new(CachedPattern {
-                symbolic: symbolic.clone(),
-                triplet_to_nnz,
-            }),
-        );
-        matrix
+        let cached = Arc::new(CachedPattern {
+            symbolic,
+            triplet_to_nnz,
+        });
+        let nnz = cached.symbolic.row_idx().len();
+        let mut vals = vec![0.0; nnz];
+        for (i, t) in triplets.iter().enumerate() {
+            vals[cached.triplet_to_nnz[i]] += t.val;
+        }
+        let out = SparseColMat::new(cached.symbolic.clone(), vals);
+        self.inner.write().unwrap().insert(key, cached);
+        out
     }
 }

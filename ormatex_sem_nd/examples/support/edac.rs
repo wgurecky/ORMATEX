@@ -403,7 +403,7 @@ where
 
 pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
     let expmv = Box::new(PadeExpm::new(12));
-    let krylov = KrylovExpm::new(expmv, 30, 100, 1e-12, Some(2));
+    let krylov = KrylovExpm::new(expmv, 30, 300, 1e-12, Some(2));
     EpirkIntegrator::new(0.0, state0, "epi3".to_string(), krylov)
 }
 

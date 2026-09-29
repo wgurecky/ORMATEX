@@ -1,4 +1,4 @@
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::material::MaterialProperty;
 
 use crate::kernels::common::TensorResidualKernel;
@@ -29,63 +29,115 @@ impl TensorKernelAdvDiffSUPG2D {
 }
 
 impl TensorResidualKernel<2> for TensorKernelAdvDiffSUPG2D {
+    /// Lane-packed SUPG residual for all lanes.
+    ///
+    /// Coefficients are evaluated per lane with the real `q` via
+    /// `lane_material_context`, exactly the value the scalar path sees.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let m = ctx.material_context(Some(state), q);
-        let nu = self.0.nu.eval(&m);
-        let tau = self.0.tau.eval(&m);
-        let v = [self.0.vel[0].eval(&m), self.0.vel[1].eval(&m)];
-        let value = state.value(0, q);
-        let advection = v[0] * state.grad(0, q, 0) + v[1] * state.grad(0, q, 1);
-        [
-            0.0,
-            nu * state.grad(0, q, 0) + tau * advection * v[0] - v[0] * value,
-            nu * state.grad(0, q, 1) + tau * advection * v[1] - v[1] * value,
-        ]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let mut nu = [0.0; LANES];
+        let mut tau = [0.0; LANES];
+        let mut vx = [0.0; LANES];
+        let mut vy = [0.0; LANES];
+        for l in 0..LANES {
+            let m = ctxs[l].lane_material_context(Some(state), l, q);
+            nu[l] = self.0.nu.eval(&m);
+            tau[l] = self.0.tau.eval(&m);
+            vx[l] = self.0.vel[0].eval(&m);
+            vy[l] = self.0.vel[1].eval(&m);
+        }
+        let v = state.value(0, q);
+        let gx = state.grad(0, q, 0);
+        let gy = state.grad(0, q, 1);
+        for l in 0..LANES {
+            let advection = vx[l] * gx[l] + vy[l] * gy[l];
+            f0[l] = 0.0;
+            f1x[l] = nu[l] * gx[l] + tau[l] * advection * vx[l] - vx[l] * v[l];
+            f1y[l] = nu[l] * gy[l] + tau[l] * advection * vy[l] - vy[l] * v[l];
+        }
     }
+
+    /// Lane-packed SUPG Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let m = ctx.material_context(Some(state), q);
-        let nu = self.0.nu.eval(&m);
-        let tau = self.0.tau.eval(&m);
-        let dnu = self.0.nu.derivative(&m, 0).unwrap_or(0.0);
-        let dtau = self.0.tau.derivative(&m, 0).unwrap_or(0.0);
-        let v = [self.0.vel[0].eval(&m), self.0.vel[1].eval(&m)];
-        let dvv = [
-            self.0.vel[0].derivative(&m, 0).unwrap_or(0.0),
-            self.0.vel[1].derivative(&m, 0).unwrap_or(0.0),
-        ];
-        let value = state.value(0, q);
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let mut nu = [0.0; LANES];
+        let mut tau = [0.0; LANES];
+        let mut dnu = [0.0; LANES];
+        let mut dtau = [0.0; LANES];
+        let mut vx = [0.0; LANES];
+        let mut vy = [0.0; LANES];
+        let mut dvx = [0.0; LANES];
+        let mut dvy = [0.0; LANES];
+        for l in 0..LANES {
+            let m = ctxs[l].lane_material_context(Some(state), l, q);
+            nu[l] = self.0.nu.eval(&m);
+            tau[l] = self.0.tau.eval(&m);
+            dnu[l] = self.0.nu.derivative(&m, 0).unwrap_or(0.0);
+            dtau[l] = self.0.tau.derivative(&m, 0).unwrap_or(0.0);
+            vx[l] = self.0.vel[0].eval(&m);
+            vy[l] = self.0.vel[1].eval(&m);
+            dvx[l] = self.0.vel[0].derivative(&m, 0).unwrap_or(0.0);
+            dvy[l] = self.0.vel[1].derivative(&m, 0).unwrap_or(0.0);
+        }
+        let v = state.value(0, q);
+        let gx = state.grad(0, q, 0);
+        let gy = state.grad(0, q, 1);
         let dv = direction.value(0, q);
-        let g = [state.grad(0, q, 0), state.grad(0, q, 1)];
-        let dg = [direction.grad(0, q, 0), direction.grad(0, q, 1)];
-        let advection = v[0] * g[0] + v[1] * g[1];
-        let dadvection = dvv[0] * dv * g[0] + dvv[1] * dv * g[1] + v[0] * dg[0] + v[1] * dg[1];
-        [
-            0.0,
-            nu * dg[0]
-                + dnu * dv * g[0]
-                + dtau * dv * advection * v[0]
-                + tau * dadvection * v[0]
-                + tau * advection * dvv[0] * dv
-                - (v[0] + dvv[0] * value) * dv,
-            nu * dg[1]
-                + dnu * dv * g[1]
-                + dtau * dv * advection * v[1]
-                + tau * dadvection * v[1]
-                + tau * advection * dvv[1] * dv
-                - (v[1] + dvv[1] * value) * dv,
-        ]
+        let dgx = direction.grad(0, q, 0);
+        let dgy = direction.grad(0, q, 1);
+        for l in 0..LANES {
+            let advection = vx[l] * gx[l] + vy[l] * gy[l];
+            let dadvection =
+                dvx[l] * dv[l] * gx[l] + dvy[l] * dv[l] * gy[l] + vx[l] * dgx[l] + vy[l] * dgy[l];
+            f0[l] = 0.0;
+            f1x[l] = nu[l] * dgx[l]
+                + dnu[l] * dv[l] * gx[l]
+                + dtau[l] * dv[l] * advection * vx[l]
+                + tau[l] * dadvection * vx[l]
+                + tau[l] * advection * dvx[l] * dv[l]
+                - (vx[l] + dvx[l] * v[l]) * dv[l];
+            f1y[l] = nu[l] * dgy[l]
+                + dnu[l] * dv[l] * gy[l]
+                + dtau[l] * dv[l] * advection * vy[l]
+                + tau[l] * dadvection * vy[l]
+                + tau[l] * advection * dvy[l] * dv[l]
+                - (vy[l] + dvy[l] * v[l]) * dv[l];
+        }
     }
 }

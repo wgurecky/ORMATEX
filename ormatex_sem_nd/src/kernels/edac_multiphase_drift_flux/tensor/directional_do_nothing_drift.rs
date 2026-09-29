@@ -6,7 +6,7 @@
 //! `split_flux` it also supplies the conservative-half fluxes for split
 //! momentum/pressure advection. The void equation gets the passive-scalar
 //! split outflow `1/2 (u.n) alpha` (zero when `split_flux` is off).
-use crate::common::{CellState, TensorFacetCtx};
+use crate::common::{LaneState, Lanes, TensorFacetCtx, LANES};
 use crate::kernels::common::StateTensorBoundaryIntegrator;
 use crate::kernels::edac::weak::directional_do_nothing::{
     directional_jacobian_action, directional_residual,
@@ -46,63 +46,112 @@ impl StateTensorBoundaryIntegrator<2> for TensorDriftDirectionalDoNothing2D {
         drift_field_names()
     }
 
+    /// Lane-packed directional do-nothing residual for all lanes.
+    ///
+    /// Each lane evaluates exactly the scalar expression with its own facet
+    /// context and state lane, preserving the `split_flux` branches.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed facet solution.
+    /// * `equation` - output equation index shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation == ALPHA_2D {
             if !self.split_flux {
-                return 0.0;
+                *out = [0.0; LANES];
+                return;
             }
-            let normal_velocity =
-                ctx.normal[0] * state.value(0, q) + ctx.normal[1] * state.value(1, q);
-            return 0.5 * normal_velocity * state.value(ALPHA_2D, q);
+            let u0 = state.value(0, q);
+            let u1 = state.value(1, q);
+            let a = state.value(ALPHA_2D, q);
+            for l in 0..LANES {
+                let normal_velocity = ctxs[l].normal[0] * u0[l] + ctxs[l].normal[1] * u1[l];
+                out[l] = 0.5 * normal_velocity * a[l];
+            }
+            return;
         }
-        let velocity = [state.value(0, q), state.value(1, q)];
-        directional_residual(
-            ctx.normal,
-            velocity,
-            state.value(2, q),
-            self.rho_l,
-            self.split_flux,
-            equation,
-        )
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
+        let p = state.value(2, q);
+        for l in 0..LANES {
+            out[l] = directional_residual(
+                ctxs[l].normal,
+                [u0[l], u1[l]],
+                p[l],
+                self.rho_l,
+                self.split_flux,
+                equation,
+            );
+        }
     }
 
+    /// Lane-packed directional do-nothing Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor facet context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation index shared by all lanes.
+    /// * `q` - facet quadrature-point index shared by all lanes.
+    /// * `out` - lane linearized trace-flux slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorFacetCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorFacetCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> f64 {
+        out: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation == ALPHA_2D {
             if !self.split_flux {
-                return 0.0;
+                *out = [0.0; LANES];
+                return;
             }
-            let normal_velocity =
-                ctx.normal[0] * state.value(0, q) + ctx.normal[1] * state.value(1, q);
-            let direction_normal_velocity =
-                ctx.normal[0] * direction.value(0, q) + ctx.normal[1] * direction.value(1, q);
-            return 0.5
-                * (direction_normal_velocity * state.value(ALPHA_2D, q)
-                    + normal_velocity * direction.value(ALPHA_2D, q));
+            let u0 = state.value(0, q);
+            let u1 = state.value(1, q);
+            let a = state.value(ALPHA_2D, q);
+            let du0 = direction.value(0, q);
+            let du1 = direction.value(1, q);
+            let da = direction.value(ALPHA_2D, q);
+            for l in 0..LANES {
+                let normal_velocity = ctxs[l].normal[0] * u0[l] + ctxs[l].normal[1] * u1[l];
+                let direction_normal_velocity =
+                    ctxs[l].normal[0] * du0[l] + ctxs[l].normal[1] * du1[l];
+                out[l] = 0.5 * (direction_normal_velocity * a[l] + normal_velocity * da[l]);
+            }
+            return;
         }
-        let velocity = [state.value(0, q), state.value(1, q)];
-        let direction_velocity = [direction.value(0, q), direction.value(1, q)];
-        directional_jacobian_action(
-            ctx.normal,
-            velocity,
-            direction_velocity,
-            state.value(2, q),
-            direction.value(2, q),
-            self.rho_l,
-            self.split_flux,
-            equation,
-        )
+        let u0 = state.value(0, q);
+        let u1 = state.value(1, q);
+        let p = state.value(2, q);
+        let du0 = direction.value(0, q);
+        let du1 = direction.value(1, q);
+        let dp = direction.value(2, q);
+        for l in 0..LANES {
+            out[l] = directional_jacobian_action(
+                ctxs[l].normal,
+                [u0[l], u1[l]],
+                [du0[l], du1[l]],
+                p[l],
+                dp[l],
+                self.rho_l,
+                self.split_flux,
+                equation,
+            );
+        }
     }
 }

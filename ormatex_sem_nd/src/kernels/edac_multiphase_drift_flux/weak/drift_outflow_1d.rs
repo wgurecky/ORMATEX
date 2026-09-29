@@ -3,8 +3,9 @@
 //! Mathematics: right-endpoint (`n = +1`) pairing fluxes for the split-form
 //! 1D drift volumes, following the `-(volume f1 . n)` rule used by the 2D
 //! split boundaries: `+u^2/2` (momentum), `+u p/2` (pressure), and
-//! `+C0 u a/2 + F(a) sin(theta)` (void, with hindered drift flux `F`).
-//! Attach only at outflow facets; no backflow stabilization is included.
+//! `+C0 u a/2 + F_um(a) sin(theta)` (void, with the um-referenced hindered
+//! drift flux `F_um`, matching the volume drift kernel exactly). Attach only
+//! at outflow facets; no backflow stabilization is included.
 //! Precedent:
 //! [`KernelAdvectionOutflow1D`](crate::kernels::KernelAdvectionOutflow1D)
 //! documents that the 1D tensor operator reuses weak endpoint terms (the 1D
@@ -19,17 +20,14 @@ use crate::kernels::edac_multiphase_drift_flux::config_1d::{
 /// 1D drift-flux outflow endpoint (owns all three equations at the facet).
 pub struct DriftOutflow1D {
     pub config: DriftFlux1DConfig,
-    /// `sin(theta)` at the outlet facet (axial drift/gravity factor).
-    pub sin_theta: f64,
+    /// Pipe angle `theta` at the outlet facet (radians from horizontal).
+    pub theta: f64,
 }
 
 impl DriftOutflow1D {
-    pub fn new(config: DriftFlux1DConfig, sin_theta: f64) -> Self {
-        assert!(
-            sin_theta.is_finite() && (0.0..=1.0).contains(&sin_theta),
-            "outlet sin(theta) must be in [0, 1]"
-        );
-        Self { config, sin_theta }
+    pub fn new(config: DriftFlux1DConfig, theta: f64) -> Self {
+        assert!(theta.is_finite(), "outlet pipe angle must be finite");
+        Self { config, theta }
     }
 
     fn check(&self, ctx: &FacetCtx, state: &CellState) {
@@ -65,12 +63,7 @@ impl StateBoundaryIntegrator for DriftOutflow1D {
             2 => {
                 let a = state.value(2, q);
                 (0.5 * self.config.distribution_parameter() * u * a
-                    + self.config.ishii_zuber.drift_flux(
-                        a,
-                        self.config.rho_l,
-                        self.config.rho_g,
-                        self.config.gravity,
-                    ) * self.sin_theta)
+                    + self.config.axial_drift_flux(a, self.theta))
                     * test
             }
             _ => unreachable!(),
@@ -99,12 +92,9 @@ impl StateBoundaryIntegrator for DriftOutflow1D {
             (2, 0) => 0.5 * self.config.distribution_parameter() * trial * state.value(2, q) * test,
             (2, 2) => {
                 (0.5 * self.config.distribution_parameter() * u
-                    + self.config.ishii_zuber.drift_flux_derivative(
-                        state.value(2, q),
-                        self.config.rho_l,
-                        self.config.rho_g,
-                        self.config.gravity,
-                    ) * self.sin_theta)
+                    + self
+                        .config
+                        .axial_drift_flux_derivative(state.value(2, q), self.theta))
                     * trial
                     * test
             }

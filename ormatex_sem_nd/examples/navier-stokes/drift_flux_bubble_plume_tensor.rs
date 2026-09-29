@@ -172,9 +172,11 @@ fn build_case(inlet_velocity: f64) -> (SEM2DProblem<QuadMesh>, StateTensorBounda
     let u_values = dirichlet_values_with_precedence(&mesh, 2, &wall_u, &inlet_u);
     let v_values = dirichlet_values_with_precedence(&mesh, 2, &wall_v, &inlet_v);
 
+    // basis fn order
+    let p = 2;
     let problem = SEM2DProblem::new_with_metadata(
         mesh,
-        2,
+        p,
         FieldRegistry::new(["u", "v", "p", "alpha"]),
         DofReduction2D::FieldSpecific {
             reductions: vec![

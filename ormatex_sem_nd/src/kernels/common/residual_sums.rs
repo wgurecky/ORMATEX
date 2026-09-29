@@ -1,6 +1,6 @@
 //! Dynamically dispatched sums and sets of residual kernels.
 use super::traits::{ResidualKernel, TensorResidualKernel};
-use crate::common::{CellState, LocalCtx, TensorCtx};
+use crate::common::{CellState, LaneState, Lanes, LocalCtx, TensorCtx, LANES};
 
 /// Additive composition of state-aware cell kernels.
 ///
@@ -296,6 +296,8 @@ pub struct TensorResidualKernelSet<'a, const GDIM: usize> {
     fields: Vec<String>,
     input_maps: Vec<Vec<usize>>,
     output_maps: Vec<Vec<usize>>,
+    /// Per-global-equation `(kernel index, local equation)` terms in kernel order.
+    equation_terms: Vec<Vec<(usize, usize)>>,
 }
 
 impl<'a, const GDIM: usize> TensorResidualKernelSet<'a, GDIM> {
@@ -316,6 +318,7 @@ impl<'a, const GDIM: usize> TensorResidualKernelSet<'a, GDIM> {
             fields: Vec::new(),
             input_maps: Vec::new(),
             output_maps: Vec::new(),
+            equation_terms: Vec::new(),
         };
         for kernel in kernels {
             set.push(kernel);
@@ -351,6 +354,28 @@ impl<'a, const GDIM: usize> TensorResidualKernelSet<'a, GDIM> {
         self.kernels.push(kernel);
         self.input_maps.push(input_maps);
         self.output_maps.push(output_maps);
+        self.rebuild_equation_terms();
+    }
+
+    /// Rebuild the per-equation term lists from the current output maps.
+    ///
+    /// # Arguments
+    /// * `&mut self` - set whose `fields`/`output_maps` just changed.
+    ///
+    /// # Returns
+    /// Nothing; overwrites `equation_terms` so entry `equation` holds the
+    /// `(kernel index, local equation)` pairs owning it, in kernel order.
+    fn rebuild_equation_terms(&mut self) {
+        let mut terms: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.fields.len()];
+        for (kernel_idx, output_map) in self.output_maps.iter().enumerate() {
+            for (local_equation, &field) in output_map.iter().enumerate() {
+                // First occurrence wins for each field, in kernel order.
+                if !terms[field].iter().any(|&(k, _)| k == kernel_idx) {
+                    terms[field].push((kernel_idx, local_equation));
+                }
+            }
+        }
+        self.equation_terms = terms;
     }
 
     fn union_field(&mut self, name: &str) -> usize {
@@ -373,25 +398,40 @@ impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorResidualKernelSet<'
         Some(self.fields.clone())
     }
 
+    /// Lane-packed residual accumulated term-by-term in kernel order.
+    ///
+    /// Zero-fill, then for each `(kernel, local_equation)` term call the
+    /// child's lane-packed residual with a child [`LaneState`] carrying the
+    /// Set's `input_map` as `field_indices`, and accumulate
+    /// `result[l] += contribution[l]` in kernel order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed union solution.
+    /// * `equation` - global output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let mut result = [0.0; 3];
-        for ((kernel, output_map), input_map) in self
-            .kernels
-            .iter()
-            .zip(&self.output_maps)
-            .zip(&self.input_maps)
-        {
-            let Some(local_equation) = output_map.iter().position(|&field| field == equation)
-            else {
-                continue;
-            };
-            let child = CellState {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *f0 = [0.0; LANES];
+        *f1x = [0.0; LANES];
+        *f1y = [0.0; LANES];
+        let Some(terms) = self.equation_terms.get(equation) else {
+            return;
+        };
+        for &(kernel_idx, local_equation) in terms {
+            let input_map = &self.input_maps[kernel_idx];
+            let child = LaneState {
                 nfields: input_map.len(),
                 npts: state.npts,
                 gdim: state.gdim,
@@ -399,34 +439,60 @@ impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorResidualKernelSet<'
                 grads: state.grads,
                 field_indices: input_map,
             };
-            let contribution = kernel.tensor_residual(ctx, &child, local_equation, q);
-            result[0] += contribution[0];
-            result[1] += contribution[1];
-            result[2] += contribution[2];
+            let mut t0 = [0.0; LANES];
+            let mut t1x = [0.0; LANES];
+            let mut t1y = [0.0; LANES];
+            self.kernels[kernel_idx].tensor_residual(
+                ctxs,
+                &child,
+                local_equation,
+                q,
+                &mut t0,
+                &mut t1x,
+                &mut t1y,
+            );
+            for l in 0..LANES {
+                f0[l] += t0[l];
+                f1x[l] += t1x[l];
+                f1y[l] += t1y[l];
+            }
         }
-        result
     }
 
+    /// Lane-packed Jacobian action accumulated term-by-term in kernel order.
+    ///
+    /// Zero-fill, then accumulate each term's child lane-packed action in
+    /// kernel order with the Set's `input_map` as child `field_indices`.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed union linearization point.
+    /// * `direction` - lane-packed union Gateaux direction.
+    /// * `equation` - global output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let mut result = [0.0; 3];
-        for ((kernel, output_map), input_map) in self
-            .kernels
-            .iter()
-            .zip(&self.output_maps)
-            .zip(&self.input_maps)
-        {
-            let Some(local_equation) = output_map.iter().position(|&field| field == equation)
-            else {
-                continue;
-            };
-            let child_state = CellState {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *f0 = [0.0; LANES];
+        *f1x = [0.0; LANES];
+        *f1y = [0.0; LANES];
+        let Some(terms) = self.equation_terms.get(equation) else {
+            return;
+        };
+        for &(kernel_idx, local_equation) in terms {
+            let input_map = &self.input_maps[kernel_idx];
+            let child_state = LaneState {
                 nfields: input_map.len(),
                 npts: state.npts,
                 gdim: state.gdim,
@@ -434,7 +500,7 @@ impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorResidualKernelSet<'
                 grads: state.grads,
                 field_indices: input_map,
             };
-            let child_direction = CellState {
+            let child_direction = LaneState {
                 nfields: input_map.len(),
                 npts: direction.npts,
                 gdim: direction.gdim,
@@ -442,17 +508,24 @@ impl<const GDIM: usize> TensorResidualKernel<GDIM> for TensorResidualKernelSet<'
                 grads: direction.grads,
                 field_indices: input_map,
             };
-            let contribution = kernel.tensor_jacobian_action(
-                ctx,
+            let mut t0 = [0.0; LANES];
+            let mut t1x = [0.0; LANES];
+            let mut t1y = [0.0; LANES];
+            self.kernels[kernel_idx].tensor_jacobian_action(
+                ctxs,
                 &child_state,
                 &child_direction,
                 local_equation,
                 q,
+                &mut t0,
+                &mut t1x,
+                &mut t1y,
             );
-            result[0] += contribution[0];
-            result[1] += contribution[1];
-            result[2] += contribution[2];
+            for l in 0..LANES {
+                f0[l] += t0[l];
+                f1x[l] += t1x[l];
+                f1y[l] += t1y[l];
+            }
         }
-        result
     }
 }

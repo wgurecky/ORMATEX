@@ -1,4 +1,4 @@
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 use crate::kernels::common::TensorResidualKernel;
 
@@ -25,64 +25,101 @@ impl TensorKernelBoussinesq2D {
 }
 
 impl TensorResidualKernel<2> for TensorKernelBoussinesq2D {
+    #[inline]
     fn nfields(&self) -> usize {
         2
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         None
     }
 
+    #[inline]
     fn input_nfields(&self) -> usize {
         1
     }
 
+    #[inline]
     fn output_nfields(&self) -> usize {
         2
     }
 
+    #[inline]
     fn input_field_names(&self) -> Option<Vec<String>> {
         Some(["T"].into_iter().map(str::to_owned).collect())
     }
 
+    #[inline]
     fn output_field_names(&self) -> Option<Vec<String>> {
         Some(["u", "v"].into_iter().map(str::to_owned).collect())
     }
 
+    /// Lane-packed buoyancy residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed `[T]` solution.
+    /// * `equation` - momentum equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        _ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         assert_eq!(state.nfields, 1, "Boussinesq state must contain [T]");
         assert!(equation < 2);
-        [
-            -self.0.buoyancy * self.0.gravity[equation] * self.0.temperature(state, q),
-            0.0,
-            0.0,
-        ]
+        let t = state.value(0, q);
+        let coeff = -self.0.buoyancy * self.0.gravity[equation];
+        for l in 0..LANES {
+            f0[l] = coeff * (t[l] - self.0.reference_temperature);
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
+        }
     }
 
+    /// Lane-packed buoyancy Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`] (unused).
+    /// * `state` - lane-packed `[T]` linearization point (checked, unused).
+    /// * `direction` - lane-packed `[T]` direction.
+    /// * `equation` - momentum equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        _ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         assert_eq!(state.nfields, 1, "Boussinesq state must contain [T]");
         assert_eq!(
             direction.nfields, 1,
             "Boussinesq direction must contain [T]"
         );
         assert!(equation < 2);
-        [
-            -self.0.buoyancy * self.0.gravity[equation] * direction.value(0, q),
-            0.0,
-            0.0,
-        ]
+        let dt = direction.value(0, q);
+        let coeff = -self.0.buoyancy * self.0.gravity[equation];
+        for l in 0..LANES {
+            f0[l] = coeff * dt[l];
+            f1x[l] = 0.0;
+            f1y[l] = 0.0;
+        }
     }
 }

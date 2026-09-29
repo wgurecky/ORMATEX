@@ -13,7 +13,7 @@
 //! outlets, plus tensor no-slip/slip walls. Weak counterpart:
 //! [`KernelEdacNavierStokesSplit2D`](crate::kernels::edac::weak::navier_stokes_split::KernelEdacNavierStokesSplit2D).
 
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 use super::momentum_convection_split::TensorKernelEdacMomentumConvectionSplit2D;
 use super::pressure_advection_split::TensorKernelEdacPressureAdvectionSplit2D;
@@ -37,68 +37,166 @@ impl TensorKernelEdacNavierStokesSplit2D {
 }
 
 impl TensorResidualKernel<2> for TensorKernelEdacNavierStokesSplit2D {
+    #[inline]
     fn nfields(&self) -> usize {
         3
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         fluid_field_names()
     }
 
+    /// Lane-packed fused split residual via part-kernel lanes.
+    ///
+    /// Accumulates the six part triples starting from zero in part order,
+    /// matching the scalar `parts.iter().map(..).sum()` order per lane.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let parts = [
-            TensorKernelEdacMomentumConvectionSplit2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-            TensorKernelEdacPressureGradient2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-            TensorKernelEdacViscousStress2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-            TensorKernelEdacPressureDivergence2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-            TensorKernelEdacPressureAdvectionSplit2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-            TensorKernelEdacPressureDiffusion2D::new(self.config)
-                .tensor_residual(ctx, state, equation, q),
-        ];
-        [
-            parts.iter().map(|t| t[0]).sum(),
-            parts.iter().map(|t| t[1]).sum(),
-            parts.iter().map(|t| t[2]).sum(),
-        ]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *f0 = [0.0; LANES];
+        *f1x = [0.0; LANES];
+        *f1y = [0.0; LANES];
+        let mut t0 = [0.0; LANES];
+        let mut t1x = [0.0; LANES];
+        let mut t1y = [0.0; LANES];
+        TensorKernelEdacMomentumConvectionSplit2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureGradient2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacViscousStress2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureDivergence2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureAdvectionSplit2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureDiffusion2D::new(self.config)
+            .tensor_residual(ctxs, state, equation, q, &mut t0, &mut t1x, &mut t1y);
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
     }
 
+    /// Lane-packed fused split Jacobian action via part-kernel lanes.
+    ///
+    /// Lane counterpart of the scalar fused action with identical part order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let parts = [
-            TensorKernelEdacMomentumConvectionSplit2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-            TensorKernelEdacPressureGradient2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-            TensorKernelEdacViscousStress2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-            TensorKernelEdacPressureDivergence2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-            TensorKernelEdacPressureAdvectionSplit2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-            TensorKernelEdacPressureDiffusion2D::new(self.config)
-                .tensor_jacobian_action(ctx, state, direction, equation, q),
-        ];
-        [
-            parts.iter().map(|t| t[0]).sum(),
-            parts.iter().map(|t| t[1]).sum(),
-            parts.iter().map(|t| t[2]).sum(),
-        ]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        *f0 = [0.0; LANES];
+        *f1x = [0.0; LANES];
+        *f1y = [0.0; LANES];
+        let mut t0 = [0.0; LANES];
+        let mut t1x = [0.0; LANES];
+        let mut t1y = [0.0; LANES];
+        TensorKernelEdacMomentumConvectionSplit2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureGradient2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacViscousStress2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureDivergence2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureAdvectionSplit2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
+        TensorKernelEdacPressureDiffusion2D::new(self.config).tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut t0, &mut t1x, &mut t1y,
+        );
+        for l in 0..LANES {
+            f0[l] += t0[l];
+            f1x[l] += t1x[l];
+            f1y[l] += t1y[l];
+        }
     }
 }

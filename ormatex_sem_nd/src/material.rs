@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::CellState;
+use crate::common::StateView;
 
 // Keep the old module paths available while mesh metadata has its own home.
 pub use crate::regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion};
@@ -12,11 +12,16 @@ pub use crate::regions::{CellMeta, FacetMeta, MeshMetadata, PhysicalRegion};
 ///
 /// `state` is absent during state-independent bilinear assembly. Coefficients
 /// that require state therefore belong in residual assembly, not a bilinear form.
+///
+/// `state` is a lane-agnostic [`StateView`]: scalar assembly passes
+/// `CellState::view()` (`stride` 1, `lane` 0) while lane kernels pass
+/// `LaneState::lane(lane)`, so one coefficient implementation serves both
+/// paths with identical arithmetic.
 pub struct MaterialContext<'a> {
     pub time: f64,
     pub point: &'a [f64],
     pub cell: CellMeta,
-    pub state: Option<&'a CellState<'a>>,
+    pub state: Option<StateView<'a>>,
     pub q: usize,
 }
 
@@ -40,6 +45,7 @@ impl<T, F> Coefficient<T> for F
 where
     F: for<'a> Fn(&MaterialContext<'a>) -> T + Send + Sync,
 {
+    #[inline]
     fn eval(&self, ctx: &MaterialContext<'_>) -> T {
         self(ctx)
     }
@@ -52,6 +58,7 @@ impl<T, F> MaterialProperty<T> for F where F: for<'a> Fn(&MaterialContext<'a>) -
 pub struct ConstantCoefficient<T>(pub T);
 
 impl<T: Copy + Send + Sync> Coefficient<T> for ConstantCoefficient<T> {
+    #[inline]
     fn eval(&self, _ctx: &MaterialContext<'_>) -> T {
         self.0
     }
@@ -73,6 +80,7 @@ impl<T> RegionCoefficient<T> {
 }
 
 impl<T: Clone + Send + Sync> Coefficient<T> for RegionCoefficient<T> {
+    #[inline]
     fn eval(&self, ctx: &MaterialContext<'_>) -> T {
         ctx.cell
             .physical_region

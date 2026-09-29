@@ -33,7 +33,7 @@ pub mod void_advection_split_1d;
 pub use directional_do_nothing_drift::TensorDriftDirectionalDoNothing2D;
 pub use drift_flux::TensorDriftFlux2D;
 pub use drift_flux_1d::TensorDriftFlux1D;
-pub use free_surface::TensorDriftFreeSurface2D;
+pub use free_surface::{TensorDriftFreeSurface2D, DEFAULT_FREE_SURFACE_PENALTY};
 pub use gravity_buoyancy::TensorDriftGravity2D;
 pub use gravity_buoyancy_1d::TensorDriftGravity1D;
 pub use momentum_convection_split::TensorDriftMomentumConvectionSplit2D;

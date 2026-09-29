@@ -13,7 +13,7 @@ use ormatex_sem_nd::{
     BilinearForm, BoundaryIntegrator, CellState, DofReduction1D, FacetCtx, FieldRegistry,
     FluxKernel1D, KernelAdvDiff, KernelMass, LinearForm, LocalCtx, MatrixFreeMinvJacobian,
     ParallelOwnedMinvJacobian, ResidualKernel, SEM1DProblem, StateBoundaryIntegrator,
-    StateBoundaryTerms, TensorKernelAdvDiff,
+    StateBoundaryTerms, TensorCtx, TensorKernelAdvDiff,
 };
 use ormatex_sem_nd::{BilinearOps, WeakResidualOps};
 
@@ -202,20 +202,20 @@ impl MaterialProperty<f64> for TemperatureDiffusion {
     }
 }
 
-fn flux_context() -> LocalCtx<'static> {
-    LocalCtx {
+fn flux_context() -> TensorCtx<'static> {
+    TensorCtx {
         time: 0.0,
         cell: CellMeta::default(),
-        tdim: 1,
-        gdim: 1,
-        ncomp: 1,
+        n1d: 1,
         npts: 1,
-        ndofs: 1,
         wts: &[],
         jdets: &[],
+        wdet: &[],
         points: &[],
-        values: &[],
-        grads: &[],
+        differentiation: &[],
+        q_to_local: &[],
+        jinv: &[],
+        cell_size: 0.0,
     }
 }
 
@@ -681,11 +681,11 @@ fn isothermal_euler_flux_jacobian_matches_finite_difference() {
                 values: &plus,
                 ..state
             };
-            let derivative = (kernel.flux(&ctx, &plus_state, equation, 0)
-                - kernel.flux(&ctx, &state, equation, 0))
+            let derivative = (kernel.flux(&ctx, plus_state.view(), equation, 0)
+                - kernel.flux(&ctx, state.view(), equation, 0))
                 / eps;
             assert!(
-                (derivative - kernel.flux_jacobian(&ctx, &state, equation, unknown, 0)).abs()
+                (derivative - kernel.flux_jacobian(&ctx, state.view(), equation, unknown, 0)).abs()
                     < 1e-7
             );
         }
@@ -713,11 +713,11 @@ fn conservative_euler_flux_jacobian_matches_finite_difference() {
                 values: &plus,
                 ..state
             };
-            let derivative = (kernel.flux(&ctx, &plus_state, equation, 0)
-                - kernel.flux(&ctx, &state, equation, 0))
+            let derivative = (kernel.flux(&ctx, plus_state.view(), equation, 0)
+                - kernel.flux(&ctx, state.view(), equation, 0))
                 / eps;
             assert!(
-                (derivative - kernel.flux_jacobian(&ctx, &state, equation, unknown, 0)).abs()
+                (derivative - kernel.flux_jacobian(&ctx, state.view(), equation, unknown, 0)).abs()
                     < 1e-6,
                 "Euler flux Jacobian mismatch at ({equation}, {unknown})"
             );

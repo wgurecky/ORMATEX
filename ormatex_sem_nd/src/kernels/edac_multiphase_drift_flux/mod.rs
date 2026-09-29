@@ -33,14 +33,15 @@ pub use closures::{DistributionParameter, IshiiZuberParams, MIN_LIQUID_FRACTION}
 pub use config::{DriftFlux2DConfig, ALPHA_2D};
 pub use config_1d::{DriftFlux1DConfig, ALPHA_1D};
 pub use tensor::{
-    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D,     TensorDriftFlux2D, TensorDriftFreeSurface2D, TensorDriftGravity1D,
-    TensorDriftGravity2D, TensorDriftMomentumConvectionSplit1D,
-    TensorDriftMomentumConvectionSplit2D, TensorDriftPressureAdvectionSplit1D,
-    TensorDriftPressureAdvectionSplit2D, TensorDriftPressureDiffusion1D,
-    TensorDriftPressureDiffusion2D, TensorDriftPressureDivergence1D,
-    TensorDriftPressureDivergence2D, TensorDriftPressureGradient1D, TensorDriftPressureGradient2D,
-    TensorDriftSplitBoundaryFlux2D, TensorDriftTurbulentDispersion1D,
-    TensorDriftTurbulentDispersion2D, TensorDriftViscousStress1D, TensorDriftViscousStress2D,
-    TensorDriftVoidAdvectionSplit1D, TensorDriftVoidAdvectionSplit2D,
+    TensorDriftDirectionalDoNothing2D, TensorDriftFlux1D, TensorDriftFlux2D,
+    TensorDriftFreeSurface2D, TensorDriftGravity1D, TensorDriftGravity2D,
+    TensorDriftMomentumConvectionSplit1D, TensorDriftMomentumConvectionSplit2D,
+    TensorDriftPressureAdvectionSplit1D, TensorDriftPressureAdvectionSplit2D,
+    TensorDriftPressureDiffusion1D, TensorDriftPressureDiffusion2D,
+    TensorDriftPressureDivergence1D, TensorDriftPressureDivergence2D,
+    TensorDriftPressureGradient1D, TensorDriftPressureGradient2D, TensorDriftSplitBoundaryFlux2D,
+    TensorDriftTurbulentDispersion1D, TensorDriftTurbulentDispersion2D, TensorDriftViscousStress1D,
+    TensorDriftViscousStress2D, TensorDriftVoidAdvectionSplit1D, TensorDriftVoidAdvectionSplit2D,
+    DEFAULT_FREE_SURFACE_PENALTY,
 };
 pub use weak::DriftOutflow1D;

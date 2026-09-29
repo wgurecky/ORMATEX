@@ -100,6 +100,7 @@ pub(crate) struct ElementRestriction {
 #[derive(Clone, Copy)]
 pub(crate) struct DisjointOut {
     ptr: *mut f64,
+    len: usize,
 }
 
 // SAFETY: sound only for row-disjoint concurrent use; callers uphold this by
@@ -115,6 +116,7 @@ impl DisjointOut {
     pub(crate) unsafe fn new(slice: &mut [f64]) -> Self {
         Self {
             ptr: slice.as_mut_ptr(),
+            len: slice.len(),
         }
     }
 
@@ -123,6 +125,7 @@ impl DisjointOut {
     /// SAFETY: same requirements as the handle itself: concurrent adds must
     /// target disjoint rows.
     pub(crate) unsafe fn add(&self, row: usize, value: f64) {
+        debug_assert!(row < self.len, "DisjointOut row out of bounds");
         *self.ptr.add(row) += value;
     }
 }
@@ -193,7 +196,7 @@ impl ElementRestriction {
         }
 
         let colors = color_cells(cell_count, &rows);
-        debug_assert!(
+        assert!(
             colors_are_disjoint(cell_count, &rows, &colors),
             "same-color cells must not share a reduced DOF"
         );
@@ -233,6 +236,58 @@ impl ElementRestriction {
         &self.colors
     }
 
+    /// Number of restriction sources (1 shared map or one per field).
+    pub(crate) fn n_sources(&self) -> usize {
+        self.maps.len()
+    }
+
+    /// Restriction source index for a global field id.
+    ///
+    /// Returns `0` when a single map is shared by all fields, else `field`.
+    pub(crate) fn field_map_source(&self, field: usize) -> usize {
+        if self.maps.len() == 1 {
+            0
+        } else {
+            field
+        }
+    }
+
+    /// Reduced-DOF row for one source and cell.
+    pub(crate) fn cell_map(&self, source: usize, cell: usize) -> &[Option<usize>] {
+        &self.maps[source][cell]
+    }
+
+    /// Prescribed values for one source and cell.
+    pub(crate) fn cell_prescribed(&self, source: usize, cell: usize) -> &[Option<f64>] {
+        &self.prescribed[source][cell]
+    }
+
+    /// Local DOFs per cell (uniform by construction).
+    pub(crate) fn cell_size(&self) -> usize {
+        self.cell_size
+    }
+
+    /// Number of volume cells (`maps[0].len()`).
+    ///
+    /// # Returns
+    /// Cell count covered by the restriction.
+    pub(crate) fn cell_count(&self) -> usize {
+        self.maps[0].len()
+    }
+
+    /// Total global rows across all fields.
+    ///
+    /// # Returns
+    /// Sum of `field_sizes`.
+    pub(crate) fn total_size(&self) -> usize {
+        self.total_size
+    }
+
+    /// Global row offset for one field.
+    pub(crate) fn offset(&self, field: usize) -> usize {
+        self.offsets[field]
+    }
+
     /// Add field-major `local` (`[field_pos][local]`) into one global column.
     ///
     /// `output_fields` holds global field ids; `None` (eliminated) map entries
@@ -249,11 +304,12 @@ impl ElementRestriction {
         out: DisjointOut,
     ) {
         debug_assert_eq!(local.len(), output_fields.len() * self.cell_size);
+        let single_map = self.maps.len() == 1;
         for (position, &field) in output_fields.iter().enumerate() {
             debug_assert!(field < self.offsets.len(), "field index out of range");
-            let source = if self.maps.len() == 1 { 0 } else { field };
+            let source = if single_map { 0 } else { field };
             let map = &self.maps[source][cell];
-            let base = self.offsets[field];
+            let base = self.offset(field);
             let row = &local[position * self.cell_size..(position + 1) * self.cell_size];
             for (local_dof, &reduced) in map.iter().enumerate() {
                 if let Some(reduced) = reduced {
@@ -273,74 +329,30 @@ impl ElementRestriction {
         out: &mut [f64],
     ) {
         assert_eq!(out.len(), fields.len() * self.cell_size);
+        let single_map = self.maps.len() == 1;
+        let col: Option<&[f64]> = state.col(0).try_as_col_major().map(|c| c.as_slice());
         for (field_pos, &field) in fields.iter().enumerate() {
-            let source = if self.maps.len() == 1 { 0 } else { field };
+            let source = if single_map { 0 } else { field };
             let map = &self.maps[source][cell];
             let prescribed = &self.prescribed[source][cell];
-            for (local, &reduced) in map.iter().enumerate() {
-                out[field_pos * self.cell_size + local] = reduced
-                    .map_or(prescribed[local].unwrap_or(0.0), |reduced| {
-                        state[(offsets[field_pos] + reduced, 0)]
-                    });
-            }
-        }
-    }
-
-    /// Batched lane-contiguous gather for SIMD-over-element tiles.
-    ///
-    /// `cells.len() <= lane_width`; output is `[(field_pos * cell_size + local) *
-    /// lane_width + lane]`. Irregular restriction stays scalar; callers run
-    /// dense tensor ops across lanes afterwards.
-    pub(crate) fn gather_state_batch(
-        &self,
-        cells: &[usize],
-        fields: &[usize],
-        offsets: &[usize],
-        state: MatRef<'_, f64>,
-        out: &mut [f64],
-        lane_width: usize,
-    ) {
-        assert!(cells.len() <= lane_width);
-        assert_eq!(out.len(), fields.len() * self.cell_size * lane_width);
-        // ponytail: lane-inner order keeps the W consecutive lane writes contiguous.
-        for (field_pos, &field) in fields.iter().enumerate() {
-            let source = if self.maps.len() == 1 { 0 } else { field };
-            for local in 0..self.cell_size {
-                for (lane, &cell) in cells.iter().enumerate() {
-                    let map = &self.maps[source][cell];
-                    let prescribed = &self.prescribed[source][cell];
-                    let reduced = map[local];
-                    out[(field_pos * self.cell_size + local) * lane_width + lane] = reduced
-                        .map_or(prescribed[local].unwrap_or(0.0), |reduced| {
-                            state[(offsets[field_pos] + reduced, 0)]
-                        });
+            let off = offsets[field_pos];
+            let dst_base = field_pos * self.cell_size;
+            match col {
+                Some(slice) => {
+                    for (local, &reduced) in map.iter().enumerate() {
+                        out[dst_base + local] = match reduced {
+                            Some(reduced) => slice[off + reduced],
+                            None => prescribed[local].unwrap_or(0.0),
+                        };
+                    }
                 }
-            }
-        }
-    }
-
-    /// Batched lane-contiguous direction gather (eliminated DOFs read as zero).
-    pub(crate) fn gather_direction_batch(
-        &self,
-        cells: &[usize],
-        fields: &[usize],
-        offsets: &[usize],
-        direction: MatRef<'_, f64>,
-        column: usize,
-        out: &mut [f64],
-        lane_width: usize,
-    ) {
-        assert!(cells.len() <= lane_width);
-        assert_eq!(out.len(), fields.len() * self.cell_size * lane_width);
-        for (field_pos, &field) in fields.iter().enumerate() {
-            let source = if self.maps.len() == 1 { 0 } else { field };
-            for local in 0..self.cell_size {
-                for (lane, &cell) in cells.iter().enumerate() {
-                    let reduced = self.maps[source][cell][local];
-                    out[(field_pos * self.cell_size + local) * lane_width + lane] = reduced
-                        .map_or(0.0, |reduced| {
-                            direction[(offsets[field_pos] + reduced, column)]
-                        });
+                None => {
+                    for (local, &reduced) in map.iter().enumerate() {
+                        out[dst_base + local] = reduced
+                            .map_or(prescribed[local].unwrap_or(0.0), |reduced| {
+                                state[(off + reduced, 0)]
+                            });
+                    }
                 }
             }
         }
@@ -356,13 +368,31 @@ impl ElementRestriction {
         out: &mut [f64],
     ) {
         assert_eq!(out.len(), fields.len() * self.cell_size);
+        let single_map = self.maps.len() == 1;
+        let col: Option<&[f64]> = direction
+            .col(column)
+            .try_as_col_major()
+            .map(|c| c.as_slice());
         for (field_pos, &field) in fields.iter().enumerate() {
-            let source = if self.maps.len() == 1 { 0 } else { field };
+            let source = if single_map { 0 } else { field };
             let map = &self.maps[source][cell];
-            for (local, &reduced) in map.iter().enumerate() {
-                out[field_pos * self.cell_size + local] = reduced.map_or(0.0, |reduced| {
-                    direction[(offsets[field_pos] + reduced, column)]
-                });
+            let off = offsets[field_pos];
+            let dst_base = field_pos * self.cell_size;
+            match col {
+                Some(slice) => {
+                    for (local, &reduced) in map.iter().enumerate() {
+                        out[dst_base + local] = match reduced {
+                            Some(reduced) => slice[off + reduced],
+                            None => 0.0,
+                        };
+                    }
+                }
+                None => {
+                    for (local, &reduced) in map.iter().enumerate() {
+                        out[dst_base + local] =
+                            reduced.map_or(0.0, |reduced| direction[(off + reduced, column)]);
+                    }
+                }
             }
         }
     }

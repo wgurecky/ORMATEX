@@ -2,7 +2,8 @@
 //!
 //! Assembly is split by family: [`weak`], [`tensor`], [`bilinear`];
 //! residual operators live in [`operators`], shared traits in
-//! `crate::sem_traits`.
+//! `crate::sem_traits`. The [`tensor`] volume pass is a thin 1D adapter over
+//! the shared [`crate::common::tensor_pass`] skeleton used by both 1D and 2D.
 
 pub mod bilinear;
 pub mod operators;

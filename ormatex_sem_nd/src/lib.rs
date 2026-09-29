@@ -27,13 +27,14 @@ mod simd;
 
 pub use common::{
     dirichlet_values_with_precedence, BoundaryContributions, BoundaryFacet, CellState, FacetCtx,
-    LocalCtx, ShapeFn, StateBoundaryContributions, TensorCtx, TensorFacetCtx,
+    LaneState, Lanes, LocalCtx, ShapeFn, StateBoundaryContributions, StateView, TensorCtx,
+    TensorFacetCtx, LANES,
 };
 pub use fields::{FieldRegistry, FieldValues};
 pub use io::gmsh::{gmsh_quad_data, gmsh_quad_mesh, GmshQuadData, QuadMesh};
 pub use jacobian::{
     CompleteResidualOperator, MatrixFreeJacobianProblem, MatrixFreeJacobianSource,
-    MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian,
+    MatrixFreeMinvJacobian, OwnedMinvJacobian, ParallelOwnedMinvJacobian, RowEpilogue,
 };
 pub use kernels::{
     BilinearForm, BoundaryIntegrator, DistributionParameter, DriftFlux1DConfig, DriftFlux2DConfig,
@@ -78,6 +79,7 @@ pub use kernels::{
     TensorKernelEnergyAdvectionDiffusion1D, TensorKernelEnergyAdvectionDiffusion2D,
     TensorKernelLinearReaction, TensorKernelMass, TensorKernelVolumeSource, TensorResidualKernel,
     TensorResidualKernelSet, TensorResidualKernelSum, ALPHA_1D, ALPHA_2D,
+    DEFAULT_FREE_SURFACE_PENALTY, MIN_LIQUID_FRACTION,
 };
 pub use material::{
     Coefficient, ConstantCoefficient, FrozenFacetField, FrozenQuadratureField, FrozenVelocity2D,

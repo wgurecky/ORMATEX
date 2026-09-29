@@ -1,4 +1,4 @@
-use ormatex_sem_nd::{CellState, FluxKernel1D, LocalCtx};
+use ormatex_sem_nd::{FluxKernel1D, StateView, TensorCtx};
 
 /// Isothermal Euler equations in primitive variables `[u, rho]`.
 #[derive(Clone, Copy, Debug)]
@@ -12,7 +12,7 @@ impl IsothermalEuler1D {
         Self { sound_speed }
     }
 
-    fn density(&self, state: &CellState, q: usize) -> f64 {
+    fn density(&self, state: StateView<'_>, q: usize) -> f64 {
         let rho = state.value(1, q);
         assert!(rho > 0.0, "isothermal Euler density must be positive");
         rho
@@ -28,7 +28,7 @@ impl FluxKernel1D for IsothermalEuler1D {
         Some(["u", "rho"].into_iter().map(str::to_owned).collect())
     }
 
-    fn flux(&self, _ctx: &LocalCtx, state: &CellState, equation: usize, q: usize) -> f64 {
+    fn flux(&self, _ctx: &TensorCtx<'_>, state: StateView<'_>, equation: usize, q: usize) -> f64 {
         let u = state.value(0, q);
         let rho = self.density(state, q);
         let cs2 = self.sound_speed * self.sound_speed;
@@ -41,8 +41,8 @@ impl FluxKernel1D for IsothermalEuler1D {
 
     fn flux_jacobian(
         &self,
-        _ctx: &LocalCtx,
-        state: &CellState,
+        _ctx: &TensorCtx<'_>,
+        state: StateView<'_>,
         equation: usize,
         unknown: usize,
         q: usize,

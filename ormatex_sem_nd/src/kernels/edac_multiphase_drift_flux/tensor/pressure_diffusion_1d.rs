@@ -2,7 +2,7 @@
 //!
 //! Mathematics: `(0, k dp/dx, 0)` for equation 1 with `k` from the cell
 //! length; owns equation 1 only.
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::kernels::common::TensorResidualKernel;
 use crate::kernels::edac_multiphase_drift_flux::config_1d::{
     drift_field_names_1d, DriftFlux1DConfig,
@@ -27,31 +27,80 @@ impl TensorResidualKernel<1> for TensorDriftPressureDiffusion1D {
     fn owns_equation(&self, equation: usize) -> bool {
         equation == 1
     }
+
+    /// Lane-packed pressure-diffusion residual for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0` - lane value slots. Overwritten.
+    /// * `f1x` - lane x-flux slots. Overwritten.
+    /// * `f1y` - lane y-flux slots. Overwritten with `0.0` (unused in 1D).
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
-        let k = self.config.pressure_diffusivity_tensor(ctx);
-        [0.0, k * state.grad(1, q, 0), 0.0]
+        let k = self.config.pressure_diffusivities_tensor_lanes(ctxs);
+        let g = state.grad(1, q, 0);
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = k[l] * g[l];
+            f1y[l] = 0.0;
+        }
     }
+
+    /// Lane-packed pressure-diffusion Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point (unused).
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - pressure equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0` - lane linearized value slots. Overwritten.
+    /// * `f1x` - lane linearized x-flux slots. Overwritten.
+    /// * `f1y` - lane linearized y-flux slots. Overwritten with `0.0` (unused in 1D).
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        _: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        _state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
         if equation != 1 {
-            return [0.0; 3];
+            *f0 = [0.0; LANES];
+            *f1x = [0.0; LANES];
+            *f1y = [0.0; LANES];
+            return;
         }
-        let k = self.config.pressure_diffusivity_tensor(ctx);
-        [0.0, k * direction.grad(1, q, 0), 0.0]
+        let k = self.config.pressure_diffusivities_tensor_lanes(ctxs);
+        let dg = direction.grad(1, q, 0);
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = k[l] * dg[l];
+            f1y[l] = 0.0;
+        }
     }
 }

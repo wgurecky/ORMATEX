@@ -1,4 +1,4 @@
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 use crate::material::MaterialProperty;
 
 use crate::kernels::common::TensorResidualKernel;
@@ -29,48 +29,96 @@ impl TensorKernelAdvDiffSUPG {
 }
 
 impl TensorResidualKernel<1> for TensorKernelAdvDiffSUPG {
+    /// Lane-packed SUPG residual for all lanes.
+    ///
+    /// Coefficients are evaluated per lane with the real `q` via
+    /// `lane_material_context`, exactly the value the scalar path sees.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let m = ctx.material_context(Some(state), q);
-        let nu = self.0.nu.eval(&m);
-        let vel = self.0.vel.eval(&m);
-        let tau = self.0.tau.eval(&m);
-        [
-            0.0,
-            (nu + tau * vel * vel) * state.grad(0, q, 0) - vel * state.value(0, q),
-            0.0,
-        ]
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let mut nu = [0.0; LANES];
+        let mut vel = [0.0; LANES];
+        let mut tau = [0.0; LANES];
+        for l in 0..LANES {
+            let m = ctxs[l].lane_material_context(Some(state), l, q);
+            nu[l] = self.0.nu.eval(&m);
+            vel[l] = self.0.vel.eval(&m);
+            tau[l] = self.0.tau.eval(&m);
+        }
+        let g = state.grad(0, q, 0);
+        let v = state.value(0, q);
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = (nu[l] + tau[l] * vel[l] * vel[l]) * g[l] - vel[l] * v[l];
+            f1y[l] = 0.0;
+        }
     }
+
+    /// Lane-packed SUPG Jacobian action for all lanes.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - unused (single output).
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         _equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        let m = ctx.material_context(Some(state), q);
-        let nu = self.0.nu.eval(&m);
-        let vel = self.0.vel.eval(&m);
-        let tau = self.0.tau.eval(&m);
-        let value = state.value(0, q);
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let mut nu = [0.0; LANES];
+        let mut vel = [0.0; LANES];
+        let mut tau = [0.0; LANES];
+        let mut dnu = [0.0; LANES];
+        let mut dvel = [0.0; LANES];
+        let mut dtau = [0.0; LANES];
+        for l in 0..LANES {
+            let m = ctxs[l].lane_material_context(Some(state), l, q);
+            nu[l] = self.0.nu.eval(&m);
+            vel[l] = self.0.vel.eval(&m);
+            tau[l] = self.0.tau.eval(&m);
+            dnu[l] = self.0.nu.derivative(&m, 0).unwrap_or(0.0);
+            dvel[l] = self.0.vel.derivative(&m, 0).unwrap_or(0.0);
+            dtau[l] = self.0.tau.derivative(&m, 0).unwrap_or(0.0);
+        }
+        let v = state.value(0, q);
+        let g = state.grad(0, q, 0);
         let dv = direction.value(0, q);
-        let gradient = state.grad(0, q, 0);
         let dg = direction.grad(0, q, 0);
-        let dnu = self.0.nu.derivative(&m, 0).unwrap_or(0.0);
-        let dvel = self.0.vel.derivative(&m, 0).unwrap_or(0.0);
-        let dtau = self.0.tau.derivative(&m, 0).unwrap_or(0.0);
-        [
-            0.0,
-            (nu + tau * vel * vel) * dg
-                + (dnu + dtau * vel * vel + 2.0 * tau * vel * dvel) * dv * gradient
-                - (vel + dvel * value) * dv,
-            0.0,
-        ]
+        for l in 0..LANES {
+            f0[l] = 0.0;
+            f1x[l] = (nu[l] + tau[l] * vel[l] * vel[l]) * dg[l]
+                + (dnu[l] + dtau[l] * vel[l] * vel[l] + 2.0 * tau[l] * vel[l] * dvel[l])
+                    * dv[l]
+                    * g[l]
+                - (vel[l] + dvel[l] * v[l]) * dv[l];
+            f1y[l] = 0.0;
+        }
     }
 }

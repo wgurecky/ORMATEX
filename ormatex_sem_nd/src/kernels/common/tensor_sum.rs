@@ -4,7 +4,7 @@
 //! keeping pointwise evaluation statically dispatched; the
 //! [`fuse_tensor_kernels`] macro is sugar over its builder.
 use super::traits::TensorResidualKernel;
-use crate::common::{CellState, TensorCtx};
+use crate::common::{LaneState, Lanes, TensorCtx, LANES};
 
 /// Statically dispatched additive composition of tensor residual kernels.
 ///
@@ -37,38 +37,67 @@ impl<const GDIM: usize, A> TensorResidualKernel<GDIM> for TensorResidualKernelSu
 where
     A: TensorResidualKernel<GDIM>,
 {
+    #[inline]
     fn nfields(&self) -> usize {
         self.first.nfields()
     }
 
+    #[inline]
     fn owns_equation(&self, equation: usize) -> bool {
         self.first.owns_equation(equation)
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         self.first.field_names()
     }
 
+    /// Lane-packed residual forwarding to the single child.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        self.first.tensor_residual(ctx, state, equation, q)
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
+        self.first
+            .tensor_residual(ctxs, state, equation, q, f0, f1x, f1y)
     }
 
+    /// Lane-packed Jacobian action forwarding to the single child.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
         self.first
-            .tensor_jacobian_action(ctx, state, direction, equation, q)
+            .tensor_jacobian_action(ctxs, state, direction, equation, q, f0, f1x, f1y)
     }
 }
 
@@ -77,6 +106,7 @@ where
     A: TensorResidualKernel<GDIM>,
     B: TensorResidualKernel<GDIM>,
 {
+    #[inline]
     fn nfields(&self) -> usize {
         assert_eq!(
             self.first.nfields(),
@@ -86,6 +116,7 @@ where
         self.first.nfields()
     }
 
+    #[inline]
     fn field_names(&self) -> Option<Vec<String>> {
         let first = self.first.field_names();
         let second = self.second.field_names();
@@ -103,63 +134,107 @@ where
         }
     }
 
+    #[inline]
     fn owns_equation(&self, equation: usize) -> bool {
         self.first.owns_equation(equation) || self.second.owns_equation(equation)
     }
 
+    /// Lane-packed residual mirroring the scalar `owns_equation` skips.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed solution.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten; when both
+    ///   children own the equation each lane holds `first[l] + second[l]`.
+    #[inline]
     fn tensor_residual(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        // ponytail: skip zero blocks; non-owning leaves return [0; 3] by contract.
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
         if !self.second.owns_equation(equation) {
-            return self.first.tensor_residual(ctx, state, equation, q);
+            self.first
+                .tensor_residual(ctxs, state, equation, q, f0, f1x, f1y);
+            return;
         }
         if !self.first.owns_equation(equation) {
-            return self.second.tensor_residual(ctx, state, equation, q);
+            self.second
+                .tensor_residual(ctxs, state, equation, q, f0, f1x, f1y);
+            return;
         }
-        let first = self.first.tensor_residual(ctx, state, equation, q);
-        let second = self.second.tensor_residual(ctx, state, equation, q);
-        [
-            first[0] + second[0],
-            first[1] + second[1],
-            first[2] + second[2],
-        ]
+        let mut a0 = [0.0; LANES];
+        let mut a1x = [0.0; LANES];
+        let mut a1y = [0.0; LANES];
+        let mut b0 = [0.0; LANES];
+        let mut b1x = [0.0; LANES];
+        let mut b1y = [0.0; LANES];
+        self.first
+            .tensor_residual(ctxs, state, equation, q, &mut a0, &mut a1x, &mut a1y);
+        self.second
+            .tensor_residual(ctxs, state, equation, q, &mut b0, &mut b1x, &mut b1y);
+        for l in 0..LANES {
+            f0[l] = a0[l] + b0[l];
+            f1x[l] = a1x[l] + b1x[l];
+            f1y[l] = a1y[l] + b1y[l];
+        }
     }
 
+    /// Lane-packed Jacobian action mirroring the scalar `owns_equation` skips.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    /// * `state` - lane-packed linearization point.
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `equation` - output equation shared by all lanes.
+    /// * `q` - quadrature-point index shared by all lanes.
+    /// * `f0`/`f1x`/`f1y` - lane output slots. Overwritten; when both
+    ///   children own the equation each lane holds `first[l] + second[l]`.
+    #[inline]
     fn tensor_jacobian_action(
         &self,
-        ctx: &TensorCtx<'_>,
-        state: &CellState<'_>,
-        direction: &CellState<'_>,
+        ctxs: &[TensorCtx<'_>],
+        state: &LaneState<'_>,
+        direction: &LaneState<'_>,
         equation: usize,
         q: usize,
-    ) -> [f64; 3] {
-        // ponytail: skip zero blocks; non-owning leaves return [0; 3] by contract.
+        f0: &mut Lanes,
+        f1x: &mut Lanes,
+        f1y: &mut Lanes,
+    ) {
         if !self.second.owns_equation(equation) {
-            return self
-                .first
-                .tensor_jacobian_action(ctx, state, direction, equation, q);
+            self.first
+                .tensor_jacobian_action(ctxs, state, direction, equation, q, f0, f1x, f1y);
+            return;
         }
         if !self.first.owns_equation(equation) {
-            return self
-                .second
-                .tensor_jacobian_action(ctx, state, direction, equation, q);
+            self.second
+                .tensor_jacobian_action(ctxs, state, direction, equation, q, f0, f1x, f1y);
+            return;
         }
-        let first = self
-            .first
-            .tensor_jacobian_action(ctx, state, direction, equation, q);
-        let second = self
-            .second
-            .tensor_jacobian_action(ctx, state, direction, equation, q);
-        [
-            first[0] + second[0],
-            first[1] + second[1],
-            first[2] + second[2],
-        ]
+        let mut a0 = [0.0; LANES];
+        let mut a1x = [0.0; LANES];
+        let mut a1y = [0.0; LANES];
+        let mut b0 = [0.0; LANES];
+        let mut b1x = [0.0; LANES];
+        let mut b1y = [0.0; LANES];
+        self.first.tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut a0, &mut a1x, &mut a1y,
+        );
+        self.second.tensor_jacobian_action(
+            ctxs, state, direction, equation, q, &mut b0, &mut b1x, &mut b1y,
+        );
+        for l in 0..LANES {
+            f0[l] = a0[l] + b0[l];
+            f1x[l] = a1x[l] + b1x[l];
+            f1y[l] = a1y[l] + b1y[l];
+        }
     }
 }
 

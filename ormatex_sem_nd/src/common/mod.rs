@@ -24,11 +24,17 @@ pub use boundary::{
     StateBoundaryContributions,
 };
 pub(crate) use cell::{
-    cell_ctx, interpolate_cell_state, interpolate_tensor_cell_coefficients,
-    interpolate_tensor_cell_state, rayon_cell_chunk_size, CellData, TensorProductData,
+    cell_ctx, interpolate_cell_state, interpolate_tensor_cell_coefficients, rayon_cell_chunk_size,
+    CellData, TensorProductData,
 };
 pub(crate) mod batch;
+pub(crate) mod facet_batch;
+pub(crate) mod tensor_pass;
+pub(crate) use batch::{SortedRowScatter, TensorBatchPlan, TensorStateCache};
 pub(crate) mod jacobian_pattern;
-pub use contexts::{CellState, FacetCtx, LocalCtx, ShapeFn, TensorCtx, TensorFacetCtx};
+pub use contexts::{
+    CellState, FacetCtx, LaneState, Lanes, LocalCtx, ShapeFn, StateView, TensorCtx, TensorFacetCtx,
+    LANES,
+};
 pub(crate) use reduction::{FieldDofLayout, ReducedDofMap};
-pub(crate) use restriction::{DisjointOut, ElementRestriction};
+pub(crate) use restriction::ElementRestriction;

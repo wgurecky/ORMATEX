@@ -4,7 +4,7 @@
 //! [`EdacNavierStokes1DConfig`]. Laminar only (no Smagorinsky model); the
 //! pressure diffusivity scales with the cell length like the 2D filter width.
 
-use crate::common::{CellState, LocalCtx, TensorCtx};
+use crate::common::{CellState, LaneState, Lanes, LocalCtx, TensorCtx, LANES};
 
 /// Shared parameters for the decomposed two-field 1D EDAC terms.
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +47,7 @@ impl EdacNavierStokes1DConfig {
     }
 
     /// Cell length from the weak context (matches the 1D `cell_sizes` convention).
+    #[inline]
     fn filter_width(ctx: &LocalCtx) -> f64 {
         let length: f64 = ctx.wts.iter().zip(ctx.jdets).map(|(&w, &j)| w * j).sum();
         assert!(
@@ -56,48 +57,92 @@ impl EdacNavierStokes1DConfig {
         length.sqrt()
     }
 
+    #[inline]
     pub(crate) fn pressure_diffusivity(&self, ctx: &LocalCtx) -> f64 {
         self.pressure_diffusion_factor * self.c0 * Self::filter_width(ctx)
     }
 
-    pub(crate) fn pressure_diffusivity_tensor(&self, ctx: &TensorCtx<'_>) -> f64 {
-        self.pressure_diffusion_factor * self.c0 * ctx.cell_size
+    /// Lane-packed pressure diffusivities in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `ctxs` - one tensor context per lane, length [`LANES`].
+    ///
+    /// # Returns
+    /// Per-lane `(factor * c0) * cell_size[l]` with scalar operation order.
+    #[inline]
+    pub(crate) fn pressure_diffusivities_tensor_lanes(&self, ctxs: &[TensorCtx<'_>]) -> Lanes {
+        debug_assert_eq!(ctxs.len(), LANES);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = self.pressure_diffusion_factor * self.c0 * ctxs[l].cell_size;
+        }
+        out
+    }
+
+    /// Lane-packed viscous stresses in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `state` - lane-packed solution.
+    /// * `q` - quadrature-point index shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane `2.0 * nu * grad[l]` with scalar operation order.
+    #[inline]
+    pub(crate) fn stress_tensor_lanes(&self, state: &LaneState<'_>, q: usize) -> Lanes {
+        let g = state.grad(0, q, 0);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = 2.0 * self.nu * g[l];
+        }
+        out
+    }
+
+    /// Lane-packed directional-derivative stresses in scalar operation order.
+    ///
+    /// # Arguments
+    /// * `direction` - lane-packed Gateaux direction.
+    /// * `q` - quadrature-point index shared by all lanes.
+    ///
+    /// # Returns
+    /// Per-lane `2.0 * nu * dgrad[l]` with scalar operation order.
+    #[inline]
+    pub(crate) fn stress_tensor_directional_derivative_lanes(
+        &self,
+        direction: &LaneState<'_>,
+        q: usize,
+    ) -> Lanes {
+        let dg = direction.grad(0, q, 0);
+        let mut out = [0.0; LANES];
+        for l in 0..LANES {
+            out[l] = 2.0 * self.nu * dg[l];
+        }
+        out
     }
 
     /// Viscous stress `tau = 2 nu du/dx` at quadrature point `q`.
+    #[inline]
     pub(crate) fn stress(&self, state: &CellState, q: usize) -> f64 {
         2.0 * self.nu * state.grad(0, q, 0)
     }
 
     /// Gateaux derivative of [`stress`](Self::stress) in the `trial` direction.
+    #[inline]
     pub(crate) fn stress_jacobian(&self, trial_grad: f64, unknown: usize) -> f64 {
         if unknown != 0 {
             return 0.0;
         }
         2.0 * self.nu * trial_grad
     }
-
-    /// Viscous stress for the tensor x-flux slot.
-    pub(crate) fn stress_tensor(&self, state: &CellState<'_>, q: usize) -> f64 {
-        self.stress(state, q)
-    }
-
-    /// Directional-derivative stress for the tensor action slot.
-    pub(crate) fn stress_tensor_directional_derivative(
-        &self,
-        direction: &CellState<'_>,
-        q: usize,
-    ) -> f64 {
-        2.0 * self.nu * direction.grad(0, q, 0)
-    }
 }
 
 /// Ordered `[u, p]` field names shared by every 1D EDAC kernel in this directory.
+#[inline]
 pub(crate) fn fluid_field_names_1d() -> Option<Vec<String>> {
     Some(["u", "p"].into_iter().map(str::to_owned).collect())
 }
 
 /// Assert a weak 1D two-field fluid cell context.
+#[inline]
 pub(crate) fn check_weak_cell_1d(ctx: &LocalCtx, state: &CellState) {
     assert_eq!(ctx.gdim, 1, "1D EDAC terms require gdim == 1");
     assert_eq!(ctx.ncomp, 1, "fluid fields must be scalar fields");
