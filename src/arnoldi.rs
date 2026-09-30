@@ -38,8 +38,80 @@ use faer::prelude::*;
 use faer_traits::RealField;
 use num_traits::Float;
 use reborrow::ReborrowMut;
-use std::cmp;
-// use faer::dyn_stack::PodStack;
+
+/// Scales and orthogonalizes an Arnoldi residual using modified Gram-Schmidt.
+///
+/// Given the already computed vector $A q_k$, first scales it to
+/// $v = \mathrm{scale} \thinspace A q_k$. For each selected basis vector $q_i$,
+/// computes $h_{i,k} = v^T q_i$ and updates $v \leftarrow v - h_{i,k} q_i$.
+/// Each projection uses the updated residual; `zip!` performs the updates in
+/// place without allocating temporary vectors. This helper does not apply $A$.
+///
+/// The incomplete orthogonalization window is `k.saturating_sub(iom)..=k`,
+/// containing up to `iom + 1` basis vectors. Only the selected entries of `h`
+/// are overwritten; the caller must initialize other entries as needed.
+/// If `store_next` is true, writes $\Vert v\Vert_2$ to `h[k + 1]` and normalizes
+/// the residual, or zeroes it on happy breakdown. Otherwise, leaves the residual
+/// unnormalized and does not write the subdiagonal entry.
+///
+/// # Arguments
+///
+/// * `residual` - vector $A q_k$, overwritten by the scaled, orthogonalized
+///   residual (and normalized or zeroed when `store_next` is true)
+/// * `basis` - existing Krylov basis, with the same number of rows as `residual`
+///   and at least `k + 1` columns
+/// * `h` - Hessenberg column $k$, with at least `k + 1` entries, or `k + 2`
+///   entries when `store_next` is true
+/// * `scale` - scale factor applied to the input vector
+/// * `k` - zero-based index of the current Arnoldi iteration
+/// * `iom` - incomplete orthogonalization window parameter; the current vector
+///   and up to `iom` preceding basis vectors are used
+/// * `store_next` - whether to store the subdiagonal norm and prepare the
+///   residual as the next basis vector
+///
+/// # Returns
+///
+/// True if the residual norm before normalization is below the absolute happy
+/// breakdown threshold of `1e-18`; false otherwise.
+///
+/// # Panics
+///
+/// Panics if the residual and basis dimensions are incompatible, if basis
+/// column `k` is missing, or if `h` has insufficient entries.
+fn arnoldi_orthogonalize<T>(
+    mut residual: ColMut<T>,
+    basis: MatRef<T>,
+    mut h: ColMut<T>,
+    scale: T,
+    k: usize,
+    iom: usize,
+    store_next: bool,
+) -> bool
+where
+    T: RealField + Float,
+{
+    faer::zip!(residual.rb_mut()).for_each(|faer::unzip!(y)| *y = *y * scale);
+    // Preserve the existing IOM window (up to iom + 1 vectors).
+    for i in k.saturating_sub(iom)..=k {
+        let qi = basis.col(i);
+        let ht = residual.as_ref().transpose() * qi;
+        h[i] = ht;
+        faer::zip!(residual.rb_mut(), qi).for_each(|faer::unzip!(y, x)| *y = *y - ht * *x);
+    }
+    let norm = residual.norm_l2();
+    if store_next {
+        h[k + 1] = norm;
+    }
+    let breakdown = norm < T::from(1e-18).unwrap();
+    if store_next && !breakdown {
+        let inv_norm = T::from(1.0).unwrap() / norm;
+        faer::zip!(residual.rb_mut()).for_each(|faer::unzip!(y)| *y = *y * inv_norm);
+    } else if store_next {
+        // A consumed terminal column must never contain a stale residual.
+        residual.fill(T::from(0.0).unwrap());
+    }
+    breakdown
+}
 
 /// Arnoldi inner iteration with linear operator A
 ///
@@ -53,6 +125,7 @@ use std::cmp;
 /// * `hs` - upper hessenberg
 /// * `qs` - orthonormal basis of krylov subspace
 /// * `extended` - return extended, nonsquare hessenberg
+/// * `par` - same parallelism used to size the operator scratch workspace
 ///
 fn arnoldi_inner_lop<T>(
     a_lo: &dyn LinOp<T>,
@@ -64,57 +137,52 @@ fn arnoldi_inner_lop<T>(
     mut qs: MatMut<T>,
     stack: &mut MemStack,
     extended: bool,
+    par: faer::Par,
 ) -> bool
 where
     T: RealField + Float,
 {
-    // final iter check
-    let not_final_it: bool = k + 1 < n;
+    let store_next = k + 1 < n || extended;
+    if k + 1 < qs.ncols() {
+        // Split to borrow the basis and output column without aliasing.
+        let (basis, workspace) = qs.rb_mut().split_at_col_mut(k + 1);
+        let basis = basis.as_ref();
+        let mut residual = workspace.col_mut(0);
+        a_lo.apply(
+            residual.rb_mut().as_mat_mut(),
+            basis.col(k).as_mat(),
+            par,
+            stack,
+        );
+        return arnoldi_orthogonalize(
+            residual,
+            basis,
+            hs.col_mut(k),
+            a_lo_scale,
+            k,
+            iom,
+            store_next,
+        );
+    }
 
-    // incomplete orth depth
-    let iom_depth = cmp::max(k as i32 - iom as i32, 0) as usize;
-
-    // breakdown tol
-    let breakdown_tol = T::from(1e-18).unwrap();
-
-    // Krylov vector
-    let q_col: ColRef<T> = qs.rb_mut().col(k);
-
-    // let mut qv: Mat<T> = a_lo * q_col;
-    let mut qv: Mat<T> = faer::Mat::zeros(q_col.nrows(), 1);
+    // Last non-extended step: there is no next basis column for workspace.
+    let basis = qs.as_ref();
+    let mut residual = faer::Col::zeros(qs.nrows());
     a_lo.apply(
-        qv.as_mut(),
-        q_col.as_mat().as_ref(),
-        faer::get_global_parallelism(),
+        residual.as_mut().as_mat_mut(),
+        basis.col(k).as_mat(),
+        par,
         stack,
     );
-    qv = qv * faer::Scale(a_lo_scale);
-
-    // let mut h = Vec::with_capacity(k + 2);
-    // let mut h = vec![T::from(0.0).unwrap(); k+2];
-    let mut h = hs.col_mut(k);
-    for i in iom_depth..=k {
-        let qci: ColRef<T> = qs.rb_mut().col(i);
-        let ht = qv.col(0).transpose() * qci;
-        h[i] = ht;
-        qv = qv - (qci.as_mat() * faer::Scale(ht));
-    }
-
-    let norm_v = qv.norm_l2();
-    if k + 1 < n || extended {
-        h[k + 1] = norm_v;
-    }
-
-    // check for happy breakdown
-    let breakdown_flag: bool = norm_v < breakdown_tol;
-
-    if (not_final_it || extended) && !breakdown_flag {
-        // if norm_v is zero this is a div by 0 err
-        qv = qv * faer::Scale(T::from(1.).unwrap() / norm_v);
-        qs.col_mut(k + 1).copy_from(qv.col(0));
-    }
-
-    return breakdown_flag;
+    arnoldi_orthogonalize(
+        residual.as_mut(),
+        basis,
+        hs.col_mut(k),
+        a_lo_scale,
+        k,
+        iom,
+        store_next,
+    )
 }
 
 /// Arnoldi iteration with linear operator $A$.
@@ -164,6 +232,9 @@ where
     let m = std::cmp::min(n, b.nrows());
     let mut hs = faer::Mat::zeros(m, m);
     let mut qs = faer::Mat::zeros(b.nrows(), m);
+    if m == 0 {
+        return (qs, hs, 0);
+    }
     let norm_b = b.norm_l2();
 
     // prevent div by 0 if norm_b~0
@@ -177,7 +248,7 @@ where
 
     // mem buffer size
     let par = faer::get_global_parallelism();
-    let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(b.ncols(), par));
+    let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(1, par));
 
     for k in 0..m {
         let breakdown_flag = arnoldi_inner_lop(
@@ -190,6 +261,7 @@ where
             qs.as_mut(),
             MemStack::new(&mut mem_buf),
             false,
+            par,
         );
         breakdown_n += 1;
         if breakdown_flag == true {
@@ -219,6 +291,9 @@ where
 /// `h[k+1, k]` is also written in the final iteration, and the corresponding
 /// basis vector `q[k+1]` is stored, so `qs` must have at least `i + n + 1`
 /// columns.
+/// On happy breakdown, the terminal basis column is explicitly zeroed, so
+/// columns `0..=m` are initialized even when the storage is reused. Do not
+/// continue a run after breakdown.
 ///
 /// # Arguments
 ///
@@ -242,7 +317,7 @@ where
 /// # Panics
 ///
 /// Panics if `hs` is not square, if `hs.ncols() <= i + n`, or if
-/// `qs.nrows() != b.nrows()`.
+/// `qs.nrows() != b.nrows()`, or if `qs.ncols() <= i + n`.
 ///
 pub fn arnoldi_lop_restarted<T>(
     a_lo: &dyn LinOp<T>,
@@ -262,6 +337,7 @@ where
     assert!(hs.nrows() == hs.ncols());
     // ensure enough space avail in hs to write into
     assert!(hs.ncols() > i + n);
+    assert!(qs.ncols() > i + n);
     // ensure orthonormal matrix has correct number of rows
     assert!(qs.nrows() == dim);
     let max_krylov_dim = hs.ncols();
@@ -270,19 +346,19 @@ where
     // prevent div by 0 if norm_b~0
     let mut breakdown_n = i;
     let not_early_bkdwn: bool = (T::one() / norm_b).is_finite();
-    let q0 = if not_early_bkdwn {
-        b * faer::Scale(T::from(1.0).unwrap() / norm_b)
-    } else {
-        b * faer::Scale(T::from(1.0).unwrap())
-    };
     if i == 0 {
-        qs.rb_mut().col_mut(i).copy_from(q0.col(0));
+        let scale = if not_early_bkdwn {
+            T::from(1.0).unwrap() / norm_b
+        } else {
+            T::from(1.0).unwrap()
+        };
+        faer::zip!(qs.rb_mut().col_mut(0), b.col(0)).for_each(|faer::unzip!(q, x)| *q = *x * scale);
     }
     let mut breakdown_flag = !not_early_bkdwn;
 
     // mem buffer size
     let par = faer::get_global_parallelism();
-    let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(b.ncols(), par));
+    let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(1, par));
 
     for k in i..i + n {
         // TODO: we should not have to check this.  happy breakdown should
@@ -305,11 +381,12 @@ where
             qs.as_mut(),
             MemStack::new(&mut mem_buf),
             true,
+            par,
         );
         breakdown_n += 1;
     }
 
-    (breakdown_flag, breakdown_n)
+    (breakdown_flag || breakdown_n >= dim, breakdown_n)
 }
 
 #[cfg(test)]
@@ -319,6 +396,168 @@ mod test_arnoldi {
 
     // bring everything from above (parent) module into scope
     use super::*;
+
+    // Allocation-heavy MGS retained only as an independent regression oracle.
+    fn allocating_reference(
+        a: &dyn LinOp<f64>,
+        b: MatRef<f64>,
+        scale: f64,
+        m: usize,
+        iom: usize,
+    ) -> (Mat<f64>, Mat<f64>) {
+        let mut q = Mat::zeros(b.nrows(), m + 1);
+        let mut h = Mat::zeros(m + 1, m + 1);
+        q.col_mut(0)
+            .copy_from((b * faer::Scale(1.0 / b.norm_l2())).col(0));
+        let par = faer::get_global_parallelism();
+        let mut buf = MemBuffer::new(a.apply_scratch(1, par));
+        for k in 0..m {
+            let mut v = Mat::zeros(b.nrows(), 1);
+            a.apply(v.as_mut(), q.col(k).as_mat(), par, MemStack::new(&mut buf));
+            v = v * faer::Scale(scale);
+            for i in k.saturating_sub(iom)..=k {
+                let ht = v.col(0).transpose() * q.col(i);
+                h[(i, k)] = ht;
+                v = v - q.col(i).as_mat() * faer::Scale(ht);
+            }
+            let norm = v.norm_l2();
+            h[(k + 1, k)] = norm;
+            if norm < 1e-18 {
+                break;
+            }
+            q.col_mut(k + 1)
+                .copy_from((v * faer::Scale(1.0 / norm)).col(0));
+        }
+        (q, h)
+    }
+
+    #[test]
+    fn test_arnoldi_in_place_matches_allocating_mgs() {
+        let a = Mat::from_fn(20, 20, |i, j| {
+            if i == j {
+                -((i + 1) as f64)
+            } else {
+                ((3 * i + 7 * j + 1) as f64).sin() / 20.0
+            }
+        });
+        let b = Mat::from_fn(20, 1, |i, _| ((i + 1) as f64).cos());
+        for iom in [0, 2, 1000] {
+            let (q_ref, h_ref) = allocating_reference(&a, b.as_ref(), -0.7, 6, iom);
+            let mut q = Mat::full(20, 7, f64::NAN);
+            let mut h = Mat::zeros(7, 7);
+            let (bd, m) =
+                arnoldi_lop_restarted(&a, -0.7, b.as_ref(), h.as_mut(), q.as_mut(), 0, 3, iom);
+            assert!(!bd);
+            assert_eq!(m, 3);
+            let (bd, m) =
+                arnoldi_lop_restarted(&a, -0.7, b.as_ref(), h.as_mut(), q.as_mut(), 3, 3, iom);
+            assert!(!bd);
+            assert_eq!(m, 6);
+            mat_mat_approx_eq(q.as_ref(), q_ref.as_ref(), 1e-12);
+            mat_mat_approx_eq(h.as_ref(), h_ref.as_ref(), 1e-12);
+            // Includes the allocated workspace in the last non-extended step.
+            let (q_fixed, h_fixed, m) = arnoldi_lop(&a, -0.7, b.as_ref(), 6, iom);
+            assert_eq!(m, 6);
+            mat_mat_approx_eq(q_fixed.as_ref(), q_ref.get(.., ..6), 1e-12);
+            mat_mat_approx_eq(h_fixed.as_ref(), h_ref.get(..6, ..6), 1e-12);
+            let aq = faer::Scale(-0.7) * (a.as_ref() * q.get(.., ..6));
+            let qh = q.as_ref() * h.get(.., ..6);
+            assert!((aq - qh).norm_l2() < 1e-11);
+        }
+    }
+
+    #[test]
+    fn test_arnoldi_breakdown_initializes_terminal_column() {
+        let a = Mat::<f64>::zeros(10, 10);
+        let b = Mat::full(10, 1, 1.0);
+        let mut q = Mat::full(10, 9, f64::NAN);
+        let mut h = Mat::zeros(9, 9);
+        let (bd, m) = arnoldi_lop_restarted(&a, 1.0, b.as_ref(), h.as_mut(), q.as_mut(), 0, 8, 2);
+        assert!(bd);
+        assert_eq!(m, 1);
+        assert_eq!(q.col(1).norm_l2(), 0.0);
+        assert!(q[(0, 2)].is_nan()); // Unconsumed storage need not be touched.
+        let zero = Mat::zeros(10, 1);
+        q.fill(f64::NAN);
+        let (bd, m) =
+            arnoldi_lop_restarted(&a, 1.0, zero.as_ref(), h.as_mut(), q.as_mut(), 0, 8, 2);
+        assert!(bd);
+        assert_eq!(m, 0);
+        assert_eq!(q.col(0).norm_l2(), 0.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_arnoldi_restarted_rejects_short_basis() {
+        let a = Mat::<f64>::identity(5, 5);
+        let b = Mat::full(5, 1, 1.0);
+        arnoldi_lop_restarted(
+            &a,
+            1.0,
+            b.as_ref(),
+            Mat::zeros(4, 4).as_mut(),
+            Mat::zeros(5, 3).as_mut(),
+            0,
+            3,
+            2,
+        );
+    }
+
+    /// Run alone with --release --ignored --nocapture --test-threads=1.
+    #[test]
+    #[ignore = "release-mode performance comparison"]
+    fn benchmark_arnoldi_workspace_reuse() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let n = 20_000;
+        let m = 40;
+        let triplets: Vec<_> = (0..n)
+            .map(|i| faer::sparse::Triplet::new(i, i, -(1.0 + i as f64 / n as f64)))
+            .collect();
+        let a = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+        let b = Mat::from_fn(n, 1, |i, _| ((i + 1) as f64).sin());
+        let mut q = Mat::zeros(n, m + 1);
+        let mut h = Mat::zeros(m + 1, m + 1);
+        let (q_ref, h_ref) = allocating_reference(&a, b.as_ref(), 0.7, m, 2);
+        arnoldi_lop_restarted(&a, 0.7, b.as_ref(), h.as_mut(), q.as_mut(), 0, m, 2);
+        mat_mat_approx_eq(q.as_ref(), q_ref.as_ref(), 1e-10);
+        mat_mat_approx_eq(h.as_ref(), h_ref.as_ref(), 1e-10);
+        let mut old_times = Vec::new();
+        let mut new_times = Vec::new();
+        for round in 0..8 {
+            // Alternate order to reduce warm-cache and scheduling bias.
+            for old in if round % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let start = Instant::now();
+                if old {
+                    black_box(allocating_reference(&a, black_box(b.as_ref()), 0.7, m, 2));
+                    old_times.push(start.elapsed());
+                } else {
+                    h.fill(0.0);
+                    black_box(arnoldi_lop_restarted(
+                        &a,
+                        0.7,
+                        black_box(b.as_ref()),
+                        h.as_mut(),
+                        q.as_mut(),
+                        0,
+                        m,
+                        2,
+                    ));
+                    new_times.push(start.elapsed());
+                }
+            }
+        }
+        old_times.sort();
+        new_times.sort();
+        println!(
+            "Arnoldi n={n}, m={m}, iom=2 median: allocating={:?}, reused={:?}",
+            old_times[4], new_times[4]
+        );
+    }
 
     #[test]
     fn test_arnoldi_lop_dens() {

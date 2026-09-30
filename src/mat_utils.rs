@@ -31,6 +31,33 @@ use rand::prelude::*;
 use rand_distr::{StandardNormal, Uniform};
 use std::cell::RefCell;
 
+/// Computes a dense product, avoiding thread dispatch for small matrices.
+///
+/// Uses sequential execution when every dimension is at most 64, and faer's
+/// global parallelism otherwise. This conservative cutoff is a performance
+/// heuristic: forcing sequential execution up to 256 regresses medium square
+/// products on the release-mode benchmark below.
+///
+/// # Panics
+///
+/// Panics if the inner dimensions do not match.
+pub(crate) fn dense_matmul<T: ComplexField>(a: MatRef<T>, b: MatRef<T>) -> Mat<T> {
+    assert_eq!(
+        a.ncols(),
+        b.nrows(),
+        "dense_matmul inner dimension mismatch"
+    );
+    let mut out = Mat::zeros(a.nrows(), b.ncols());
+    let max_dim = a.nrows().max(a.ncols()).max(b.ncols());
+    let par = if max_dim <= 64 {
+        faer::Par::Seq
+    } else {
+        faer::get_global_parallelism()
+    };
+    faer::linalg::matmul::matmul(out.as_mut(), faer::Accum::Replace, a, b, T::one_impl(), par);
+    out
+}
+
 /// Creates a matrix filled with standard normal samples.
 ///
 /// Entries are independent samples of $N(0, 1)$ drawn from the thread local
@@ -136,7 +163,10 @@ pub fn real_mat<T: RealField + Float>(a: MatRef<num_complex::Complex<T>>) -> Mat
 /// # Returns
 ///
 /// The complex matrix $dt \cdot A$ with zero imaginary part, same size as `a`.
-pub fn complex_mat_scale<T: RealField + Float>(a: MatRef<T>, dt: f64) -> Mat<num_complex::Complex<T>> {
+pub fn complex_mat_scale<T: RealField + Float>(
+    a: MatRef<T>,
+    dt: f64,
+) -> Mat<num_complex::Complex<T>> {
     let dt = T::from(dt).unwrap();
     Mat::from_fn(a.nrows(), a.ncols(), |i, j| {
         num_complex::Complex::new(a[(i, j)] * dt, T::from(0.0).unwrap())
@@ -394,6 +424,110 @@ where
 mod test_matexp_rs {
     // bring everything from above (parent) module into scope
     use super::*;
+
+    #[test]
+    fn test_dense_matmul_shapes_and_threshold() {
+        for (m, k, n) in [
+            (31, 31, 31),
+            (64, 3, 2),
+            (65, 3, 2),
+            (256, 3, 2),
+            (257, 3, 2),
+            (500, 20, 1),
+            (2, 257, 3),
+            (2, 3, 257),
+            (0, 3, 2),
+            (2, 0, 3),
+            (2, 3, 0),
+        ] {
+            let a = Mat::from_fn(m, k, |i, j| ((i + 3 * j) as f64).sin());
+            let b = Mat::from_fn(k, n, |i, j| ((2 * i + j) as f64).cos());
+            let actual = dense_matmul(a.as_ref(), b.as_ref());
+            let expected = a.as_ref() * b.as_ref();
+            assert_eq!((actual.nrows(), actual.ncols()), (m, n));
+            assert!((actual - expected).norm_max() < 1e-11);
+        }
+    }
+
+    #[test]
+    fn test_dense_matmul_complex_strided() {
+        use faer::c64;
+        let a = Mat::from_fn(9, 7, |i, j| c64::new(i as f64 / 9.0, j as f64 / 7.0));
+        let b = Mat::from_fn(8, 9, |i, j| c64::new(j as f64 / 9.0, -(i as f64) / 8.0));
+        let a = a.as_ref().transpose().get(1..6, 2..8);
+        let b = b.as_ref().transpose().get(2..8, 1..7);
+        let actual = dense_matmul(a, b);
+        assert!((actual - a * b).norm_max() < 1e-12);
+    }
+
+    #[test]
+    fn test_dense_matmul_f32() {
+        let a = Mat::from_fn(12, 7, |i, j| (i + j) as f32 / 12.0);
+        let b = Mat::from_fn(7, 9, |i, j| (i + 2 * j) as f32 / 9.0);
+        assert!((dense_matmul(a.as_ref(), b.as_ref()) - a * b).norm_max() < 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "dense_matmul inner dimension mismatch")]
+    fn test_dense_matmul_dimension_mismatch() {
+        dense_matmul(
+            Mat::<f64>::zeros(2, 3).as_ref(),
+            Mat::<f64>::zeros(4, 2).as_ref(),
+        );
+    }
+
+    /// Run alone with --release --ignored --nocapture --test-threads=1.
+    #[test]
+    #[ignore = "release-mode performance comparison"]
+    fn benchmark_dense_matmul_parallelism_policy() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for (m, k, n, iterations) in [
+            (31, 31, 31, 200),
+            (48, 48, 48, 200),
+            (64, 64, 64, 200),
+            (96, 96, 96, 100),
+            (128, 128, 128, 100),
+            (256, 256, 256, 30),
+            (257, 257, 257, 30),
+            (2000, 40, 1, 100),
+        ] {
+            let a = Mat::from_fn(m, k, |i, j| ((i + 3 * j) as f64).sin());
+            let b = Mat::from_fn(k, n, |i, j| ((2 * i + j) as f64).cos());
+            black_box(a.as_ref() * b.as_ref());
+            black_box(dense_matmul(a.as_ref(), b.as_ref()));
+            let mut global_times = Vec::new();
+            let mut policy_times = Vec::new();
+            for round in 0..6 {
+                for global in if round % 2 == 0 {
+                    [true, false]
+                } else {
+                    [false, true]
+                } {
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        if global {
+                            black_box(black_box(a.as_ref()) * black_box(b.as_ref()));
+                        } else {
+                            black_box(dense_matmul(black_box(a.as_ref()), black_box(b.as_ref())));
+                        }
+                    }
+                    if global {
+                        global_times.push(start.elapsed());
+                    } else {
+                        policy_times.push(start.elapsed());
+                    }
+                }
+            }
+            global_times.sort();
+            policy_times.sort();
+            println!(
+                "matmul {m}x{k} * {k}x{n} median per call: global={:?}, policy={:?}",
+                global_times[3] / iterations,
+                policy_times[3] / iterations
+            );
+        }
+    }
 
     /// define Lotka-Volterra system for testing ONLY
     fn lv_sys_rhs(_t: f64, x: MatRef<f64>) -> Mat<f64> {

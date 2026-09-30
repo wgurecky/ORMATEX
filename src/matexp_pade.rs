@@ -33,12 +33,13 @@
 //! * M. Caliari, F. Cassini, F. Zivcovich, "BAMPHI: Chebyshev and rational
 //!   approximations of phi-functions applied to vectors", J. Comput. Appl.
 //!   Math. 423 (2023) 114973.
+use crate::mat_utils::dense_matmul;
 use crate::matexp_traits::DensePhikvEvaluator;
 use faer::complex::ComplexFloat;
 use faer::linalg::solvers::{DenseSolveCore, Solve};
 use faer::prelude::*;
-use faer_traits::math_utils::from_f64;
 use faer_traits::ComplexField;
+use faer_traits::math_utils::from_f64;
 use libm::frexp;
 use num_traits::ToPrimitive;
 use statrs::function::factorial;
@@ -61,7 +62,9 @@ impl PadeExpm {
     ///
     /// * `max_squarings` - maximum number of squarings (stored, currently unused)
     pub fn new(max_squarings: usize) -> Self {
-        Self { _max_squarings: max_squarings }
+        Self {
+            _max_squarings: max_squarings,
+        }
     }
 }
 
@@ -73,7 +76,9 @@ where
     T::Real: ToPrimitive,
 {
     fn apply_phi_k(&self, a: MatRef<T>, dt: f64, v0: MatRef<T>, k: usize) -> Mat<T> {
-        phi_ext((Scale(from_f64::<T>(dt)) * a).as_ref(), k) * v0
+        let scaled = Scale(from_f64::<T>(dt)) * a;
+        let phi_k = phi_ext(scaled.as_ref(), k);
+        dense_matmul(phi_k.as_ref(), v0)
     }
 }
 
@@ -106,7 +111,7 @@ where
     let mut r = denom_qr.solve(numer);
 
     for _i in 0..alpha {
-        r = r.as_ref() * r.as_ref();
+        r = dense_matmul(r.as_ref(), r.as_ref());
     }
     r
 }
@@ -151,7 +156,8 @@ where
         // the phi recurrence: phi_k = Z^{-1}(phi_{k-1} - 1/(k-1)! * I).
         let fact = (1..i).product::<usize>() as f64;
         let fact = if fact == 0.0 { 1.0 } else { fact };
-        phi_k = z_inv.as_ref() * (phi_k.as_ref() - Scale(from_f64::<T>(1.0 / fact)) * id.as_ref());
+        let inner = phi_k.as_ref() - Scale(from_f64::<T>(1.0 / fact)) * id.as_ref();
+        phi_k = dense_matmul(z_inv.as_ref(), inner.as_ref());
     }
     phi_k
 }
@@ -247,24 +253,24 @@ where
 {
     let mut alpha: isize = 0;
     let a_1norm = a.norm_l1();
-    let a2 = a * a;
+    let a2 = dense_matmul(a, a);
 
     if a_1norm < from_f64::<T::Real>(1.495585217958292e-002) {
         let (u, v) = pade3(a, a2.as_ref());
         return (u, v, alpha);
     } else if a_1norm < from_f64::<T::Real>(2.539398330063230e-001) {
-        let a4 = a2.as_ref() * a2.as_ref();
+        let a4 = dense_matmul(a2.as_ref(), a2.as_ref());
         let (u, v) = pade5(a, a2.as_ref(), a4.as_ref());
         return (u, v, alpha);
     } else if a_1norm < from_f64::<T::Real>(9.504178996162932e-001) {
-        let a4 = a2.as_ref() * a2.as_ref();
-        let a6 = a4.as_ref() * a2.as_ref();
+        let a4 = dense_matmul(a2.as_ref(), a2.as_ref());
+        let a6 = dense_matmul(a4.as_ref(), a2.as_ref());
         let (u, v) = pade7(a, a2.as_ref(), a4.as_ref(), a6.as_ref());
         return (u, v, alpha);
     } else if a_1norm < from_f64::<T::Real>(2.097847961257068e+000) {
-        let a4 = a2.as_ref() * a2.as_ref();
-        let a6 = a4.as_ref() * a2.as_ref();
-        let a8 = a6.as_ref() * a2.as_ref();
+        let a4 = dense_matmul(a2.as_ref(), a2.as_ref());
+        let a6 = dense_matmul(a4.as_ref(), a2.as_ref());
+        let a8 = dense_matmul(a6.as_ref(), a2.as_ref());
         let (u, v) = pade9(a, a2.as_ref(), a4.as_ref(), a6.as_ref(), a8.as_ref());
         return (u, v, alpha);
     } else {
@@ -281,9 +287,9 @@ where
         }
         let scale_f64 = (2.0_f64).powi(alpha as i32);
         let a_scaled = a * Scale(from_f64::<T>(1.0 / scale_f64));
-        let a2_scaled = a_scaled.as_ref() * a_scaled.as_ref();
-        let a4_scaled = a2_scaled.as_ref() * a2_scaled.as_ref();
-        let a6_scaled = a4_scaled.as_ref() * a2_scaled.as_ref();
+        let a2_scaled = dense_matmul(a_scaled.as_ref(), a_scaled.as_ref());
+        let a4_scaled = dense_matmul(a2_scaled.as_ref(), a2_scaled.as_ref());
+        let a6_scaled = dense_matmul(a4_scaled.as_ref(), a2_scaled.as_ref());
         let (u, v) = pade13(
             a_scaled.as_ref(),
             a2_scaled.as_ref(),
@@ -303,7 +309,7 @@ fn pade3<T: ComplexField>(a: MatRef<T>, a2: MatRef<T>) -> (Mat<T>, Mat<T>) {
     const B3: [f64; 4] = [120.0, 60.0, 12.0, 1.0];
     let ident = Mat::<T>::identity(a.ncols(), a.nrows());
     let temp = a2 * Scale(from_f64::<T>(B3[3])) + ident.as_ref() * Scale(from_f64::<T>(B3[1]));
-    let u = a * temp;
+    let u = dense_matmul(a, temp.as_ref());
     let v = a2 * Scale(from_f64::<T>(B3[2])) + ident.as_ref() * Scale(from_f64::<T>(B3[0]));
     (u, v)
 }
@@ -314,7 +320,7 @@ fn pade5<T: ComplexField>(a: MatRef<T>, a2: MatRef<T>, a4: MatRef<T>) -> (Mat<T>
     let temp = a4 * Scale(from_f64::<T>(B5[5]))
         + a2 * Scale(from_f64::<T>(B5[3]))
         + ident.as_ref() * Scale(from_f64::<T>(B5[1]));
-    let u = a * temp;
+    let u = dense_matmul(a, temp.as_ref());
     let v = a4 * Scale(from_f64::<T>(B5[4]))
         + a2 * Scale(from_f64::<T>(B5[2]))
         + ident.as_ref() * Scale(from_f64::<T>(B5[0]));
@@ -335,7 +341,7 @@ fn pade7<T: ComplexField>(
         + a4 * Scale(from_f64::<T>(B7[5]))
         + a2 * Scale(from_f64::<T>(B7[3]))
         + ident.as_ref() * Scale(from_f64::<T>(B7[1]));
-    let u = a * temp;
+    let u = dense_matmul(a, temp.as_ref());
     let v = a6 * Scale(from_f64::<T>(B7[6]))
         + a4 * Scale(from_f64::<T>(B7[4]))
         + a2 * Scale(from_f64::<T>(B7[2]))
@@ -368,7 +374,7 @@ fn pade9<T: ComplexField>(
         + a4 * Scale(from_f64::<T>(B9[5]))
         + a2 * Scale(from_f64::<T>(B9[3]))
         + ident.as_ref() * Scale(from_f64::<T>(B9[1]));
-    let u = a * temp;
+    let u = dense_matmul(a, temp.as_ref());
     let v = a8 * Scale(from_f64::<T>(B9[8]))
         + a6 * Scale(from_f64::<T>(B9[6]))
         + a4 * Scale(from_f64::<T>(B9[4]))
@@ -405,18 +411,18 @@ fn pade13<T: ComplexField>(
     let v1 = a6 * Scale(from_f64::<T>(B13[13]))
         + a4 * Scale(from_f64::<T>(B13[11]))
         + a2 * Scale(from_f64::<T>(B13[9]));
-    let temp = a6.as_ref() * v1.as_ref()
+    let temp = dense_matmul(a6, v1.as_ref())
         + a6 * Scale(from_f64::<T>(B13[7]))
         + a4 * Scale(from_f64::<T>(B13[5]))
         + a2 * Scale(from_f64::<T>(B13[3]))
         + ident.as_ref() * Scale(from_f64::<T>(B13[1]));
-    let u = a * temp;
+    let u = dense_matmul(a, temp.as_ref());
 
     // V polynomial (even Pade denominator)
     let temp2 = a6 * Scale(from_f64::<T>(B13[12]))
         + a4 * Scale(from_f64::<T>(B13[10]))
         + a2 * Scale(from_f64::<T>(B13[8]));
-    let v2 = a6.as_ref() * temp2.as_ref()
+    let v2 = dense_matmul(a6, temp2.as_ref())
         + a6 * Scale(from_f64::<T>(B13[6]))
         + a4 * Scale(from_f64::<T>(B13[4]))
         + a2 * Scale(from_f64::<T>(B13[2]))

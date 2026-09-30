@@ -49,7 +49,7 @@
 //!   transpose-free action of linear combinations of phi-functions from
 //!   exponential integrators", J. Comput. Appl. Math. 423 (2023) 114973.
 use faer::complex::{Complex64, ComplexFloat};
-use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
+use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::matmul::triangular::{matmul as tri_matmul, BlockStructure};
 use faer::matrix_free::LinOp;
 use faer::prelude::*;
@@ -2118,7 +2118,7 @@ impl GetSpectrumBounds for LejaEllipseAdapterArnoldiIOM {
         let ones = faer::Mat::ones(a_lo.nrows(), 1);
         let mut av = faer::Mat::zeros(a_lo.nrows(), 1);
         let par = faer::get_global_parallelism();
-        let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(v.ncols(), par));
+        let mut mem_buf = MemBuffer::new(a_lo.apply_scratch(ones.ncols(), par));
         a_lo.apply(av.as_mut(), ones.as_ref(), par, MemStack::new(&mut mem_buf));
         let spec_norm = av.norm_l2();
 
@@ -2381,12 +2381,14 @@ pub fn spectrum_pwr_itr(
     let mut b_k1 = v0.to_owned();
     let mut eig_old = 1.0e20;
     let mut eig_new = 0.0;
+    let par = faer::get_global_parallelism();
+    let mut buffer = MemBuffer::new(ext_a_lo.apply_scratch(b_k.ncols(), par));
     for _i in 0..n {
         ext_a_lo.apply(
             b_k1.as_mut(),
             b_k.as_ref(),
-            faer::get_global_parallelism(),
-            MemStack::new(&mut MemBuffer::new(StackReq::empty())),
+            par,
+            MemStack::new(&mut buffer),
         );
         let sb_k1 = b_k1.as_ref();
         eig_new =
