@@ -408,6 +408,25 @@ pub fn epi3(state0: MatRef<'_, f64>) -> EpirkIntegrator<KrylovExpm> {
     EpirkIntegrator::new(0.0, state0, "epi3".to_string(), krylov)
 }
 
+/// Build an EPI3 integrator with explicit Krylov controls.
+///
+/// * `state0` - initial state vector (also sets the integrator dimension).
+/// * `tol` - Krylov adaptive `phi* v` tolerance.
+/// * `m_init` - initial Krylov subspace dimension.
+/// * `m_max` - maximum Krylov subspace dimension.
+///
+/// Returns the initialized `EpirkIntegrator` named `"epi3"`.
+pub fn epi3_with(
+    state0: MatRef<'_, f64>,
+    tol: f64,
+    m_init: usize,
+    m_max: usize,
+) -> EpirkIntegrator<KrylovExpm> {
+    let expmv = Box::new(PadeExpm::new(12));
+    let krylov = KrylovExpm::new(expmv, m_init, m_max, tol, Some(2));
+    EpirkIntegrator::new(0.0, state0, "epi3".to_string(), krylov)
+}
+
 /// SDIRK32 (3 stages, order 2, L-stable) implicit stepper for stiff systems.
 pub fn sdirk32(state0: MatRef<'_, f64>) -> DirkIntegrator<'_> {
     DirkIntegrator::new(0.0, state0, ImplicitBT::sdirk32(), 1e-10, 1e-10)

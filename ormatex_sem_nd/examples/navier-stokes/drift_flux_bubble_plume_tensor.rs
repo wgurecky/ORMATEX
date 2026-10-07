@@ -13,15 +13,31 @@
 //!
 //! Run with `RAYON_NUM_THREADS=4 cargo run --release --example
 //! navier-stokes-drift-flux-bubble-plume-tensor` (`--steps`, total across
-//! the 5 ramp stages, default 400; `--dt`, default 5e-4 with 1e-4 startup
-//! steps while each ramped jet turns around).
+//! the ramp stages, default 1000 for `epi3` and 400 for `bdf`; `--dt`,
+//! default 1e-5 for `epi3` and 5e-4 for `bdf` with `--dt_start` startup
+//! steps (default 1e-5 for `epi3` and 1e-4 for `bdf`) while `t < 0.01`;
+//! `--integrator <bdf|epi3>`, default `epi3` with `--bdf_order`, default 2;
+//! `epi3` Krylov controls `--krylov_tol` (default 1e-6), `--krylov_dim_init`
+//! (default 30), `--krylov_dim_max` (default 300) via `edac::epi3_with`;
+//! `--ramp_stages` inlet-velocity ramp stage count, default 5).
+//!
+//! NOTE: the default `epi3` run is stability-limited to `dt ~ 1e-5` on this
+//! stiff air-water case. Cause: `epi3` is an explicit exponential integrator
+//! paired with the stiff EDAC/air-water Jacobian, so larger steps leave the
+//! stability region and the Krylov `phi*v` approximation stops converging
+//! (`dt >= 3e-5` diverges). `dt = 2e-5` advances only with `krylov_tol 1e-6`
+//! at `m ~ 150-200`; the looser `1e-6` tolerance (avg Krylov `m ~ 43` vs 66
+//! at `1e-12`) is the stable default.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use faer::prelude::*;
+use ormatex::matexp_krylov::KrylovExpm;
+use ormatex::ode_epirk::EpirkIntegrator;
 use ormatex::ode_implicit::{DirkIntegrator, BdfIntegrator};
+use ormatex::ode_sys::{OdeSys, StepError, StepResult};
 use ormatex::ode_traits::IntegrateSys;
 use ormatex::tableau_implicit::ImplicitBT;
 use ormatex_sem_nd::{
@@ -48,7 +64,7 @@ const RHO_LIQUID: f64 = 1000.0;
 const RHO_GAS: f64 = 1.2;
 const MU_LIQUID: f64 = 1.0e-3;
 const MU_GAS: f64 = 1.8e-5;
-const ACOUSTIC_C0: f64 = 10.0;
+const ACOUSTIC_C0: f64 = 5.0;
 const SMAGORINSKY_CS: f64 = 0.1;
 // ponytail: generous turbulent mixing; the only mechanism diluting the
 // pure-gas jet core (no interphase drag in this drift-flux phase). Mixture
@@ -124,10 +140,96 @@ fn dirichlet(values: &[(usize, f64)]) -> DofReduction2D {
 
 /// Inlet velocity ramp stages: the impulsive start of a pure-gas downward
 /// jet in water stalls Newton's method, so the inlet speed is raised in
-/// `NSTAGES` equal fractions of `INLET_VELOCITY`, one case rebuild per
+/// `nstages` equal fractions of `INLET_VELOCITY`, one case rebuild per
 /// stage. Facet sets never change, so every stage shares one reduced-DOF
 /// layout and the state vector carries over directly.
-const NSTAGES: usize = 5;
+///
+/// Default stage count (overridable with `--ramp_stages`).
+const NSTAGES_DEFAULT: usize = 5;
+
+/// Time integrator backing the ramp-stage loop.
+///
+/// - `Bdf`: L-stable implicit BDF (`BdfIntegrator`).
+/// - `Epi3`: Krylov exponential EPI3 (`EpirkIntegrator<KrylovExpm>`) with
+///   caller-supplied Krylov controls via `edac::epi3_with`.
+enum PlumeIntegrator {
+    Bdf(BdfIntegrator<'static>),
+    Epi3(EpirkIntegrator<KrylovExpm>),
+}
+
+impl PlumeIntegrator {
+    /// Build the selected integrator at time `t` from state `state`.
+    ///
+    /// * `use_epi3` - when true build EPI3, otherwise build BDF of order `bdf_order`.
+    /// * `t` - current simulation time carried across ramp stages.
+    /// * `state` - current solution vector carried across ramp stages.
+    /// * `bdf_order` - BDF order used when `use_epi3` is false.
+    /// * `krylov_tol` - Krylov `phi*v` tolerance used when `use_epi3` is true.
+    /// * `krylov_dim_init` - initial Krylov dimension used when `use_epi3` is true.
+    /// * `krylov_dim_max` - maximum Krylov dimension used when `use_epi3` is true.
+    ///
+    /// Returns the initialized integrator holding an owned copy of `state`.
+    fn new(
+        use_epi3: bool,
+        t: f64,
+        state: MatRef<'_, f64>,
+        bdf_order: usize,
+        krylov_tol: f64,
+        krylov_dim_init: usize,
+        krylov_dim_max: usize,
+    ) -> Self {
+        if use_epi3 {
+            let mut integrator = edac::epi3_with(state, krylov_tol, krylov_dim_init, krylov_dim_max);
+            integrator.reset_ic(t, state.to_owned());
+            Self::Epi3(integrator)
+        } else {
+            Self::Bdf(BdfIntegrator::new(t, state, bdf_order, 1e-8, 1e-8))
+        }
+    }
+
+    /// Advance by `dt` on `system`, returning the proposed step result.
+    ///
+    /// * `system` - ODE system providing `frhs`/`fjac` at the current stage.
+    /// * `dt` - step size to attempt.
+    ///
+    /// Returns the proposed `StepResult` on success, or the solver `StepError`.
+    fn step<'b>(
+        &mut self,
+        system: &'b dyn OdeSys<'b>,
+        dt: f64,
+    ) -> Result<StepResult<f64, Mat<f64>>, StepError> {
+        match self {
+            Self::Bdf(integrator) => integrator.step(system, dt),
+            Self::Epi3(integrator) => integrator.step(system, dt),
+        }
+    }
+
+    /// Accept a proposed step result into the integrator history.
+    ///
+    /// * `result` - accepted step produced by [`PlumeIntegrator::step`].
+    fn accept_step(&mut self, result: StepResult<f64, Mat<f64>>) {
+        match self {
+            Self::Bdf(integrator) => integrator.accept_step(result),
+            Self::Epi3(integrator) => integrator.accept_step(result),
+        }
+    }
+
+    /// Return an owned copy of the current state vector.
+    fn state(&self) -> Mat<f64> {
+        match self {
+            Self::Bdf(integrator) => integrator.state(),
+            Self::Epi3(integrator) => integrator.state(),
+        }
+    }
+
+    /// Return the current integrator time.
+    fn time(&self) -> f64 {
+        match self {
+            Self::Bdf(integrator) => integrator.time(),
+            Self::Epi3(integrator) => integrator.time(),
+        }
+    }
+}
 
 /// Build one ramp stage: same mesh, facet sets, and boundary kernels every
 /// time, differing only in the prescribed inlet velocity.
@@ -218,9 +320,35 @@ fn nearest(positions: &[(f64, f64)], target: (f64, f64)) -> usize {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let steps = parse_usize_flag(&args, "--steps").unwrap_or(400);
+    let integrator_name =
+        parse_string_flag(&args, "--integrator").unwrap_or_else(|| "epi3".to_string());
+    let use_epi3 = match integrator_name.as_str() {
+        "bdf" => false,
+        "epi3" => true,
+        other => panic!("--integrator must be one of <bdf|epi3>, got {other}"),
+    };
+    // Integrator-dependent defaults: epi3 is stability-limited to dt ~ 1e-5
+    // on this stiff air-water case, while bdf keeps the previous 5e-4/1e-4
+    // defaults. Steps default 1000 for epi3 (400 steps at dt 1e-5 covers a
+    // tiny physical time) and 400 for bdf.
+    let steps = parse_usize_flag(&args, "--steps").unwrap_or(if use_epi3 { 1000 } else { 400 });
     let bdf_order = parse_usize_flag(&args, "--bdf_order").unwrap_or(2);
-    let dt = parse_f64_flag(&args, "--dt").unwrap_or(5.0e-4);
+    let dt = parse_f64_flag(&args, "--dt").unwrap_or(if use_epi3 { 1.0e-5 } else { 5.0e-4 });
+    let dt_start =
+        parse_f64_flag(&args, "--dt_start").unwrap_or(if use_epi3 { 1.0e-5 } else { 1.0e-4 });
+    let nstages_raw = parse_usize_flag(&args, "--ramp_stages").unwrap_or(NSTAGES_DEFAULT);
+    assert!(nstages_raw > 0, "--ramp_stages must be positive");
+    let nstages = if steps < nstages_raw {
+        eprintln!(
+            "warning: --steps ({steps}) < --ramp_stages ({nstages_raw}); clamping stages to {steps} so no stage is empty"
+        );
+        steps.min(nstages_raw)
+    } else {
+        nstages_raw
+    };
+    let krylov_tol = parse_f64_flag(&args, "--krylov_tol").unwrap_or(1e-8);
+    let krylov_dim_init = parse_usize_flag(&args, "--krylov_dim_init").unwrap_or(30);
+    let krylov_dim_max = parse_usize_flag(&args, "--krylov_dim_max").unwrap_or(300);
     let threads = parse_usize_flag(&args, "--threads");
     let benchmark = args.iter().any(|arg| arg == "--benchmark");
     if let Some(threads) = threads {
@@ -233,18 +361,18 @@ fn main() {
     }
 
     // Still tank of pure water; the inlet jet ramps 0 -> full speed over
-    // NSTAGES (impulsive pure-gas injection stalls Newton). Stiff true
+    // nstages (impulsive pure-gas injection stalls Newton). Stiff true
     // air-water system: L-stable SDIRK32 with 1e-8 tolerances (O(1e3)
     // pressure scales; max-switch Jacobians limit Newton to linear anyway).
     let mut state = Mat::<f64>::zeros(build_case(0.0).0.system_size(), 1);
     let mut t = 0.0;
     let mut total_steps = 0;
     let integration_start = Instant::now();
-    for stage in 0..NSTAGES {
-        let inlet_velocity = INLET_VELOCITY * (stage + 1) as f64 / NSTAGES as f64;
-        let stage_steps = steps / NSTAGES
-            + if stage + 1 == NSTAGES {
-                steps % NSTAGES
+    for stage in 0..nstages {
+        let inlet_velocity = INLET_VELOCITY * (stage + 1) as f64 / nstages as f64;
+        let stage_steps = steps / nstages
+            + if stage + 1 == nstages {
+                steps % nstages
             } else {
                 0
             };
@@ -255,13 +383,20 @@ fn main() {
             "ramp stages must share one DOF layout"
         );
         let system = TensorFluidSystem::new(&problem, drift_kernel()).with_state_boundary(terms);
-        let mut integrator =
-            BdfIntegrator::new(t, state.as_ref(), bdf_order, 1e-8, 1e-8);
+        let mut integrator = PlumeIntegrator::new(
+            use_epi3,
+            t,
+            state.as_ref(),
+            bdf_order,
+            krylov_tol,
+            krylov_dim_init,
+            krylov_dim_max,
+        );
         for _ in 0..stage_steps {
             // ponytail: small steps while each ramped jet turns around
             // (t < 0.01), full dt once the plume is established.
             let step_dt = if integrator.time() < 0.01 {
-                dt.min(1.0e-4)
+                dt.min(dt_start)
             } else {
                 dt
             };
@@ -277,7 +412,7 @@ fn main() {
         state = integrator.state();
         t = integrator.time();
         println!(
-            "stage {}/{NSTAGES}: inlet v={inlet_velocity:.2} t={t:.4}",
+            "stage {}/{nstages}: inlet v={inlet_velocity:.2} t={t:.4}",
             stage + 1
         );
     }
@@ -287,7 +422,7 @@ fn main() {
     let (problem, _) = build_case(INLET_VELOCITY);
 
     println!(
-        "drift-flux bubble plume tensor: steps={total_steps} dt={dt:e} dofs={} integration={integration_time:?} threads={threads:?}",
+        "drift-flux bubble plume tensor: integrator={integrator_name} steps={total_steps} dt={dt:e} dt_start={dt_start:e} ramp_stages={nstages} krylov_tol={krylov_tol:e} krylov_dim_init={krylov_dim_init} krylov_dim_max={krylov_dim_max} dofs={} integration={integration_time:?} threads={threads:?}",
         problem.system_size(),
     );
     if benchmark {
@@ -353,6 +488,12 @@ fn parse_usize_flag(args: &[String], name: &str) -> Option<usize> {
                 .parse()
                 .expect("invalid numeric command-line flag")
         })
+}
+
+fn parse_string_flag(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].clone())
 }
 
 fn parse_f64_flag(args: &[String], name: &str) -> Option<f64> {
