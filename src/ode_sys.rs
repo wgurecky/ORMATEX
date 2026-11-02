@@ -97,32 +97,37 @@ impl<T, S> StepResult<T, S> {
     }
 }
 
-/// Builds the reversed forcing columns and the shift matrix in a single pass.
-fn build_extended_blocks(vb: &[MatRef<f64>]) -> (Mat<f64>, Mat<f64>) {
-    assert!(!vb.is_empty(), "extended operator requires at least v0");
+/// Builds the reversed forcing columns and the shift matrix.
+fn build_extended_blocks(vb: &[MatRef<f64>], ks: &[usize]) -> (Mat<f64>, Mat<f64>) {
+    assert!(!vb.is_empty(), "extended operator requires at least one vector");
+    assert_eq!(vb.len(), ks.len(), "one order is required per vector");
     let n = vb[0].nrows();
     assert!(vb.iter().all(|v| v.nrows() == n && v.ncols() == 1));
-    let p = vb.len() - 1;
-    let bmat = Mat::from_fn(n, p, |r, c| vb[p - c][(r, 0)]);
+    let p = *ks.iter().max().unwrap();
+    let mut bmat = Mat::<f64>::zeros(n, p);
+    for (v, &k) in vb.iter().zip(ks) {
+        if k > 0 {
+            let mut col = bmat.col_mut(p - k);
+            col += v.col(0);
+        }
+    }
     let kmat = Mat::from_fn(p, p, |r, c| if c == r + 1 { 1.0 } else { 0.0 });
     (bmat, kmat)
 }
 
-/// Builds [v0; 0; ...; 1], or just v0 when there is no augmented block.
-fn build_extended_v(vb: &[MatRef<f64>]) -> (Mat<f64>, usize) {
-    assert!(!vb.is_empty(), "extended operator requires at least v0");
+/// Builds [sum(v for k=0); 0; ...; 1].
+fn build_extended_v(vb: &[MatRef<f64>], ks: &[usize], p: usize) -> (Mat<f64>, usize) {
+    assert!(!vb.is_empty(), "extended operator requires at least one vector");
+    assert_eq!(vb.len(), ks.len(), "one order is required per vector");
     let n = vb[0].nrows();
-    let p = vb.len() - 1;
-    // Reading past the end of v0 yields zero, which keeps the fill loop free of
-    // per-element branching so it compiles to a copy plus a short zero tail.
-    let mut out = match vb[0].col(0).try_as_col_major() {
-        Some(v0) => {
-            let v0 = v0.as_slice();
-            Mat::from_fn(n + p, 1, |r, _| v0.get(r).copied().unwrap_or(0.0))
+    assert!(vb.iter().all(|v| v.nrows() == n && v.ncols() == 1));
+    let mut out = Mat::<f64>::zeros(n + p, 1);
+    for (v, &k) in vb.iter().zip(ks) {
+        if k == 0 {
+            let mut top = out.get_mut(0..n, ..);
+            top += v.as_ref();
         }
-        // v0 is a strided view, e.g. a transposed row.
-        None => Mat::from_fn(n + p, 1, |r, _| if r < n { vb[0][(r, 0)] } else { 0.0 }),
-    };
+    }
     if p > 0 {
         out[(n + p - 1, 0)] = 1.0;
     }
@@ -198,19 +203,19 @@ pub fn apply_linop(lop: &impl LinOp<f64>, q: MatRef<f64>) -> Mat<f64> {
 /// ```
 ///
 /// to a vector. Here `t` is a scale factor for the inner operator (typically
-/// the step size), $B$ is an $n \times p$ matrix whose columns are built from
-/// `vb[1..]` (in reverse order, so column `p-1` is `vb[1]` and column `0` is
-/// `vb[p]`), and $K$ is the $p \times p$ shift matrix with ones on the first
-/// superdiagonal. Applying a matrix exponential to the augmented operator lets a
-/// linear combination of $\varphi_k$ products
-/// $\sum_k \varphi_k(t A) v_k$ be evaluated with one exponential action.
+/// the step size), $p$ is the largest order in `ks`, and $B$ contains the
+/// vectors in reverse order. Vectors with the same positive order are summed;
+/// missing orders have zero columns. $K$ is the shift matrix with ones on the
+/// first superdiagonal. The first $n$ entries of
+/// $\exp(\tau \tilde A) \tilde v$ are
+/// $\sum_j \tau^{k_j} \varphi_{k_j}(\tau t A) v_j$.
 ///
 /// Use [`ExtendedLinOp::get_v`] to build the matching starting vector.
 ///
 /// Example use:
 ///
 /// ```ignore
-/// let elop = ExtendedLinOp::new(dt, lop, &vb);
+/// let elop = ExtendedLinOp::new(dt, lop, &vb, &ks);
 /// let (v, n) = elop.get_v(&vb);
 /// let mut res = faer::Mat::zeros(elop.nrows(), 1);
 /// elop.apply(res.as_mut(), v.as_ref(), ..);
@@ -222,6 +227,7 @@ pub struct ExtendedLinOp<'a> {
     inner_lop: Box<dyn LinOp<f64> + 'a>,
     bmat: faer::Mat<f64>,
     kmat: faer::Mat<f64>,
+    ks: Vec<usize>,
 }
 
 impl<'a> ExtendedLinOp<'a> {
@@ -231,37 +237,54 @@ impl<'a> ExtendedLinOp<'a> {
     ///
     /// * `t` - scale factor applied to the inner operator (typically the step size)
     /// * `inner_lop` - the inner $n \times n$ linear operator $A$
-    /// * `vb` - vectors `[v0, v1, ..., vp]`, each of length $n$. `v0` is only used for
-    ///   its number of rows here; `v1..vp` fill the columns of $B$.
+    /// * `vb` - nonempty collection of $n \times 1$ vectors
+    /// * `ks` - phi-function order for each vector in `vb`
     ///
     /// # Panics
     ///
-    /// Panics if `vb` is empty or its vectors have inconsistent shapes.
-    pub fn new(t: f64, inner_lop: Box<dyn LinOp<f64> + 'a>, vb: &Vec<MatRef<f64>>) -> Self {
-        let (bmat, kmat) = build_extended_blocks(vb);
+    /// Panics if the orders, vector shapes, or inner operator dimensions do not match.
+    pub fn new(t: f64, inner_lop: Box<dyn LinOp<f64> + 'a>, vb: &[MatRef<f64>], ks: &[usize]) -> Self {
+        let (bmat, kmat) = build_extended_blocks(vb, ks);
+        assert_eq!(inner_lop.nrows(), bmat.nrows());
+        assert_eq!(inner_lop.ncols(), bmat.nrows());
         Self {
             t,
             inner_lop,
             bmat,
             kmat,
+            ks: ks.to_vec(),
         }
+    }
+
+    /// Returns the unscaled inner linear operator.
+    ///
+    /// # Returns
+    ///
+    /// A shared reference to the wrapped operator.
+    pub fn inner_lop(&self) -> &dyn LinOp<f64> {
+        self.inner_lop.as_ref()
     }
 
     /// Create the starting vector for this extended linop.
     ///
-    /// The result has length $n+p$: the first $n$ entries are `vb[0]`, the
-    /// following $p-1$ entries are zero and the last entry is one. For $p=0$,
-    /// the result is just `vb[0]`.
+    /// The first $n$ entries are the sum of vectors with order zero. The
+    /// remaining $p$ entries are zero except for the last, which is one.
     ///
     /// # Arguments
     ///
-    /// * `vb` - vectors `[v0, v1, ..., vp]` used to build the operator
+    /// * `vb` - vectors used to build the operator, unchanged and in the same order
     ///
     /// # Returns
     ///
     /// A tuple `(v, n)` of the extended vector and the size $n$ of the original system.
-    pub fn get_v(&self, vb: &Vec<MatRef<f64>>) -> (Mat<f64>, usize) {
-        build_extended_v(vb)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number or shapes of the vectors do not match the operator.
+    pub fn get_v(&self, vb: &[MatRef<f64>]) -> (Mat<f64>, usize) {
+        let (v, n) = build_extended_v(vb, &self.ks, self.kmat.nrows());
+        assert_eq!(n, self.bmat.nrows());
+        (v, n)
     }
 }
 
@@ -325,6 +348,7 @@ pub struct DynRefExtendedLinOp<'a> {
     inner_lop: &'a dyn LinOp<f64>,
     bmat: faer::Mat<f64>,
     kmat: faer::Mat<f64>,
+    ks: Vec<usize>,
 }
 
 impl<'a> DynRefExtendedLinOp<'a> {
@@ -334,37 +358,58 @@ impl<'a> DynRefExtendedLinOp<'a> {
     ///
     /// * `t` - scale factor applied to the inner operator (typically the step size)
     /// * `inner_lop` - the inner $n \times n$ linear operator $A$, borrowed
-    /// * `vb` - vectors `[v0, v1, ..., vp]`, each of length $n$. `v0` is only used for
-    ///   its number of rows here; `v1..vp` fill the columns of the block $B$.
+    /// * `vb` - nonempty collection of $n \times 1$ vectors
+    /// * `ks` - phi-function order for each vector in `vb`
     ///
     /// # Panics
     ///
-    /// Panics if `vb` is empty or its vectors have inconsistent shapes.
-    pub fn new(t: f64, inner_lop: &'a dyn LinOp<f64>, vb: &Vec<MatRef<f64>>) -> Self {
-        let (bmat, kmat) = build_extended_blocks(vb);
+    /// Panics if the orders, vector shapes, or inner operator dimensions do not match.
+    pub fn new(t: f64, inner_lop: &'a dyn LinOp<f64>, vb: &[MatRef<f64>], ks: &[usize]) -> Self {
+        let (bmat, kmat) = build_extended_blocks(vb, ks);
+        assert_eq!(inner_lop.nrows(), bmat.nrows());
+        assert_eq!(inner_lop.ncols(), bmat.nrows());
         Self {
             t,
             inner_lop,
             bmat,
             kmat,
+            ks: ks.to_vec(),
         }
+    }
+
+    /// Returns the unscaled inner linear operator.
+    ///
+    /// # Returns
+    ///
+    /// A shared reference to the wrapped operator.
+    pub fn inner_lop(&self) -> &dyn LinOp<f64> {
+        self.inner_lop
+    }
+
+    pub(crate) fn assert_orders(&self, ks: &[usize]) {
+        assert_eq!(self.ks, ks, "orders differ from the extended operator");
     }
 
     /// Create the starting vector for this extended linop.
     ///
-    /// The result has length $n+p$: the first $n$ entries are `vb[0]`, the
-    /// following $p-1$ entries are zero and the last entry is one. For $p=0$,
-    /// the result is just `vb[0]`.
+    /// The first $n$ entries are the sum of vectors with order zero. The
+    /// remaining $p$ entries are zero except for the last, which is one.
     ///
     /// # Arguments
     ///
-    /// * `vb` - vectors `[v0, v1, ..., vp]` used to build the operator
+    /// * `vb` - vectors used to build the operator, unchanged and in the same order
     ///
     /// # Returns
     ///
     /// A tuple `(v, n)` of the extended vector and the size $n$ of the original system.
-    pub fn get_v(&self, vb: &Vec<MatRef<f64>>) -> (Mat<f64>, usize) {
-        build_extended_v(vb)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number or shapes of the vectors do not match the operator.
+    pub fn get_v(&self, vb: &[MatRef<f64>]) -> (Mat<f64>, usize) {
+        let (v, n) = build_extended_v(vb, &self.ks, self.kmat.nrows());
+        assert_eq!(n, self.bmat.nrows());
+        (v, n)
     }
 }
 
@@ -925,6 +970,30 @@ mod test_extended_linop {
     use super::*;
 
     #[test]
+    fn test_extended_operators_arbitrary_orders() {
+        let a = faer::mat![[-1.0, 0.0], [0.0, -2.0]];
+        let v0 = faer::mat![[1.0], [2.0]];
+        let v1 = faer::mat![[3.0], [4.0]];
+        let v2 = faer::mat![[5.0], [6.0]];
+        let vb = vec![v0.as_ref(), v1.as_ref(), v2.as_ref(), v1.as_ref()];
+        let ks = vec![2, 0, 2, 0];
+        let owned = ExtendedLinOp::new(0.5, Box::new(a.clone()), &vb, &ks);
+        let borrowed = DynRefExtendedLinOp::new(0.5, &a, &vb, &ks);
+        assert_eq!(owned.inner_lop().nrows(), 2);
+        assert_eq!(borrowed.inner_lop().nrows(), 2);
+        assert_eq!(owned.nrows(), 4);
+        assert_eq!(borrowed.bmat[(0, 0)], 6.0);
+        assert_eq!(borrowed.bmat[(1, 0)], 8.0);
+        assert_eq!(borrowed.bmat[(0, 1)], 0.0);
+        let (v, _) = owned.get_v(&vb);
+        let (w, _) = borrowed.get_v(&vb);
+        assert_eq!((v.as_ref() - w.as_ref()).norm_max(), 0.0);
+        assert_eq!(w[(0, 0)], 6.0);
+        assert_eq!(w[(1, 0)], 8.0);
+        assert_eq!(w[(3, 0)], 1.0);
+    }
+
+    #[test]
     fn test_extended_operators_against_explicit_matrix() {
         let n = 6;
         let a = Mat::from_fn(n, n, |i, j| ((3 * i + j + 1) as f64).sin());
@@ -933,9 +1002,10 @@ mod test_extended_linop {
                 .map(|c| Mat::from_fn(n, 1, |r, _| (r + c + 1) as f64 / 7.0))
                 .collect();
             let vb: Vec<_> = vectors.iter().map(|v| v.as_ref()).collect();
+            let ks: Vec<_> = (0..=p).collect();
             for t in [0.0, -0.77, 1.0] {
-                let owned = ExtendedLinOp::new(t, Box::new(a.clone()), &vb);
-                let borrowed = DynRefExtendedLinOp::new(t, &a, &vb);
+                let owned = ExtendedLinOp::new(t, Box::new(a.clone()), &vb, &ks);
+                let borrowed = DynRefExtendedLinOp::new(t, &a, &vb, &ks);
                 assert_eq!((owned.nrows(), owned.ncols()), (n + p, n + p));
                 assert_eq!((borrowed.nrows(), borrowed.ncols()), (n + p, n + p));
                 let explicit = Mat::from_fn(n + p, n + p, |r, c| {
@@ -1000,7 +1070,8 @@ mod test_extended_linop {
             let mut vb = vec![v0];
             vb.extend(extra.iter().map(|v| v.as_ref()));
             let a = Mat::<f64>::identity(n, n);
-            let (v, original_n) = DynRefExtendedLinOp::new(1.0, &a, &vb).get_v(&vb);
+            let ks: Vec<_> = (0..vb.len()).collect();
+            let (v, original_n) = DynRefExtendedLinOp::new(1.0, &a, &vb, &ks).get_v(&vb);
             assert_eq!(original_n, n);
             assert_eq!(v.nrows(), n + p);
             for r in 0..n + p {

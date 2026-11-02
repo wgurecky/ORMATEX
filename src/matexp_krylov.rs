@@ -473,8 +473,7 @@ impl KrylovExpm {
     /// [`KrylovExpm::set_max_substeps`]) the product is evaluated in $N$ equal
     /// substeps. Since $\varphi_k$ for $k \ge 1$ has no semigroup property, the
     /// substeps are applied to the exponential of the extended operator built
-    /// from $A \thinspace dt$ and $v_0$ (placed at index $k$ of the right hand
-    /// sides), and the full extended vector is carried from one substep to the
+    /// from $A \thinspace dt$, $v_0$ and order $k$, and the full extended vector is carried from one substep to the
     /// next. This is the same construction the Leja evaluator uses. In this case
     /// `v0` must be a single column.
     ///
@@ -502,10 +501,9 @@ impl KrylovExpm {
         }
         // phi_k(dt*A) v0 is the first n rows of exp(ext_a_lo) [v0; 0..0; 1]
         // with the extended operator [[dt*A, B], [0, K]].
-        let zeros = Mat::<f64>::zeros(v0.nrows(), v0.ncols());
-        let mut vbk: Vec<MatRef<f64>> = (0..k).map(|_| zeros.as_ref()).collect();
-        vbk.push(v0);
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, a_lo, &vbk);
+        let vbk = [v0];
+        let ks = [k];
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, a_lo, &vbk, &ks);
         let (w, n) = ext_a_lo.get_v(&vbk);
         let w = self.adapt_substepped(&ext_a_lo, 1.0, w);
         w.get(0..n, 0..1).to_owned()
@@ -572,9 +570,10 @@ impl KrylovExpm {
 
     /// Evaluates a linear combination of phi-functions applied to vectors.
     ///
-    /// Computes
+    /// Computes the upper block of $\exp(\tau \tilde A)\tilde v$. If the
+    /// operator was built with scale $t$ and orders $k_j$, this is
     ///
-    /// $$ \sum_{j=0}^{n} \varphi_j(\tau A) \thinspace v_j $$
+    /// $$ \sum_j \tau^{k_j} \varphi_{k_j}(\tau t A) \thinspace v_j $$
     ///
     /// using only a single phi-function (matrix exponential) evaluation on an
     /// extended (augmented) linear operator, thus reducing the number of
@@ -599,8 +598,7 @@ impl KrylovExpm {
     /// * `ext_a_lo` - Extended linear operator built from $A$ and the vectors
     ///   $v_1, \ldots, v_n$. It carries its own time scale, so `tau` is normally 1.0.
     /// * `tau` - additional time step scale applied to `ext_a_lo`
-    /// * `vb` - Vec of right hand sides $[v_0, \ldots, v_n]$ in
-    ///   $\sum_{j=0}^{n} \varphi_j(A \tau) v_j$
+    /// * `vb` - slice of vectors used to build `ext_a_lo`, in the same order
     ///
     /// # Returns
     ///
@@ -618,7 +616,7 @@ impl KrylovExpm {
         &mut self,
         ext_a_lo: &DynRefExtendedLinOp,
         tau: f64,
-        vb: &Vec<MatRef<f64>>,
+        vb: &[MatRef<'_, f64>],
     ) -> Mat<f64> {
         // setup the extended rhs vector
         let (w, n) = ext_a_lo.get_v(vb);
@@ -636,8 +634,11 @@ impl LinOpPhikvEvaluator for KrylovExpm {
         &mut self,
         ext_a_lo: &DynRefExtendedLinOp,
         dt: f64,
-        vb: &Vec<MatRef<f64>>,
+        vb: &[MatRef<'_, f64>],
+        ks: &[usize],
+        _par: Par,
     ) -> Mat<f64> {
+        ext_a_lo.assert_orders(ks);
         self.apply_linop_ext(ext_a_lo, dt, vb)
     }
 
@@ -647,6 +648,7 @@ impl LinOpPhikvEvaluator for KrylovExpm {
         dt: f64,
         v: MatRef<f64>,
         k: usize,
+        _par: Par,
     ) -> Mat<f64> {
         self.apply_phik_linop(a_lo, dt, v, k)
     }
@@ -688,8 +690,9 @@ mod test_matexp_krylov {
 
         // compute phi_0(dt*A)*b0
         let dt = 0.3;
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        let phi0mv_krylov_pm: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb);
+        let ks = vec![0];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        let phi0mv_krylov_pm: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb, &ks, Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi0mv_pade_dense = matexp(test_b.as_ref(), dt, Par::Seq) * test_v.as_ref();
@@ -700,8 +703,9 @@ mod test_matexp_krylov {
         // compute phi_1(dt*A)*b0
         let zeros = Mat::zeros(test_v.nrows(), test_v.ncols());
         let test_vb = vec![zeros.as_ref(), test_v.as_ref()];
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        let phi1mv_krylov_pm: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb);
+        let ks = vec![0, 1];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        let phi1mv_krylov_pm: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb, &ks, Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi1mv_pade_dense = phi_ext((dt * test_b).as_ref(), 1, Par::Seq) * test_v.as_ref();
@@ -762,6 +766,7 @@ mod test_matexp_krylov {
             vec![test_v.as_ref(), v1.as_ref(), v2.as_ref()],
         ];
         for vb in &cases {
+            let ks: Vec<_> = (0..vb.len()).collect();
             let mut reference = Mat::<f64>::zeros(n, 1);
             for (j, v) in vb.iter().enumerate() {
                 let z = faer::Scale(dt) * test_b.as_ref();
@@ -769,8 +774,8 @@ mod test_matexp_krylov {
             }
             let eval = |max_substeps: usize| {
                 let mut e = new_eval(10, 100, iom, max_substeps);
-                let ext_lo = DynRefExtendedLinOp::new(dt, &test_b, vb);
-                e.apply_phi_k_v(&ext_lo, 1.0, vb)
+                let ext_lo = DynRefExtendedLinOp::new(dt, &test_b, vb, &ks);
+                e.apply_phi_k_v(&ext_lo, 1.0, vb, &ks, Par::Seq)
             };
             let base = eval(0);
             println!(
@@ -806,7 +811,7 @@ mod test_matexp_krylov {
             let z = faer::Scale(dt) * test_b.as_ref();
             let reference = phi_ext(z.as_ref(), k, Par::Seq) * test_v.as_ref();
             let eval = |max_substeps: usize| {
-                new_eval(10, 100, iom, max_substeps).apply_phi_k(&test_b, dt, test_v.as_ref(), k)
+                new_eval(10, 100, iom, max_substeps).apply_phi_k(&test_b, dt, test_v.as_ref(), k, Par::Seq)
             };
             let base = eval(0);
             println!(
@@ -871,6 +876,7 @@ mod test_matexp_krylov {
                 dt,
                 test_v.as_ref(),
                 0,
+                Par::Seq,
             );
             max_abs_diff(&res, &reference)
         };
@@ -891,7 +897,8 @@ mod test_matexp_krylov {
         let n = test_v.nrows();
         let v1 = Mat::from_fn(n, 1, |i, _| ((i + 1) as f64).sin());
         let vb = vec![test_v.as_ref(), v1.as_ref()];
-        let ext_lo = DynRefExtendedLinOp::new(dt, &test_b, &vb);
+        let ks = vec![0, 1];
+        let ext_lo = DynRefExtendedLinOp::new(dt, &test_b, &vb, &ks);
         let key_ext = (0, n + 1);
         let key_phi3 = (3, n);
 
@@ -899,10 +906,10 @@ mod test_matexp_krylov {
         let mut eval = new_eval(10, 100, 2, 0);
         assert!(eval.m_by_call.is_empty());
         for _ in 0..3 {
-            eval.apply_phi_k_v(&ext_lo, 1.0, &vb);
+            eval.apply_phi_k_v(&ext_lo, 1.0, &vb, &ks, Par::Seq);
             let m_ext = eval.m;
             assert_eq!(eval.m_by_call[&key_ext], m_ext);
-            eval.apply_phi_k(&test_b, dt, test_v.as_ref(), 3);
+            eval.apply_phi_k(&test_b, dt, test_v.as_ref(), 3, Par::Seq);
             assert_eq!(eval.m_by_call[&key_phi3], eval.m);
             assert_eq!(eval.m_by_call[&key_ext], m_ext);
         }
@@ -916,9 +923,9 @@ mod test_matexp_krylov {
         // near the dimension actually needed
         let mut remembered = new_eval(12, 100, 2, 0);
         remembered.m_by_call.insert(key_ext, 60);
-        remembered.apply_phi_k_v(&ext_lo, 1.0, &vb);
+        remembered.apply_phi_k_v(&ext_lo, 1.0, &vb, &ks, Par::Seq);
         let mut fresh = new_eval(12, 100, 2, 0);
-        fresh.apply_phi_k_v(&ext_lo, 1.0, &vb);
+        fresh.apply_phi_k_v(&ext_lo, 1.0, &vb, &ks, Par::Seq);
         // observed: 53 (= 60 - 7) and 25
         assert!(remembered.m > 40);
         assert!(fresh.m < 40);

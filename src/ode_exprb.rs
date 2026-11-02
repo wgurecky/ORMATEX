@@ -185,19 +185,14 @@ where
         };
 
         // extended linear operator
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb);
-        self.expm.apply_prepare(
-            sys_jac_lop.as_ref(),
-            dt,
-            y0.as_ref(),
-            2,
-            Some((&ext_a_lo, &vb)),
-        );
+        let ks: Vec<usize> = (0..vb.len()).collect();
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb, &ks);
+        self.expm.apply_prepare(&ext_a_lo, dt, &vb, &ks, faer::Par::Seq);
 
         // first stage
         let t_2 = t + dt;
         let y_2 = y0.as_ref()
-            + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb);
+            + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb, &ks, faer::Par::Seq);
 
         // nonlinear remainder
         let r_2 = self.remf(
@@ -213,7 +208,7 @@ where
 
         // final stage
         let y_new = y_2.as_ref()
-            + 2. * dt * self.expm.apply_phi_k(sys_jac_lop.as_ref(), dt, r_2.as_ref(), 3);
+            + 2. * dt * self.expm.apply_phi_k(sys_jac_lop.as_ref(), dt, r_2.as_ref(), 3, faer::Par::Seq);
 
         // embedded error estimate
         let y_err = (y_new.as_ref() - y_2.as_ref()).as_ref().norm_l1().abs();

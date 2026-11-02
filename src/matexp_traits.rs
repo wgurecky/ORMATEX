@@ -88,8 +88,8 @@ pub trait DensePhikvEvaluator<T: ComplexField = f64> {
     ///
     /// * `a` - dense square matrix $A$
     /// * `dt` - time step scale factor
-    /// * `vb` - the vectors $v_j$ to which each phi-function is applied
-    /// * `ks` - the phi-function orders $k_j$, one per entry of `vb`
+    /// * `vb` - slice of vectors $v_j$ to which each phi-function is applied
+    /// * `ks` - slice of phi-function orders $k_j$, one per entry of `vb`
     /// * `par` - faer parallelism for the dense linear algebra
     ///
     /// # Returns
@@ -103,8 +103,8 @@ pub trait DensePhikvEvaluator<T: ComplexField = f64> {
         &self,
         a: MatRef<T>,
         dt: f64,
-        vb: &Vec<MatRef<T>>,
-        ks: &Vec<usize>,
+        vb: &[MatRef<'_, T>],
+        ks: &[usize],
         par: Par,
     ) -> Mat<T> {
         assert!(!vb.is_empty());
@@ -121,17 +121,24 @@ pub trait DensePhikvEvaluator<T: ComplexField = f64> {
     /// Prepare for a subsequent `apply_*` call.
     ///
     /// Implementors may use this hook to precompute and cache data that
-    /// depends only on `a` and `dt` (e.g. matrix factorizations). The default
-    /// implementation does nothing.
+    /// depends on `a`, `dt`, `vb` and `ks`. The default implementation does
+    /// nothing.
     ///
     /// # Arguments
     ///
     /// * `_a` - dense square matrix $A$
     /// * `_dt` - time step scale factor
-    /// * `_v0` - the vector to which the phi-function will be applied
-    /// * `_k` - the phi-function order
+    /// * `_vb` - slice of rhs vectors to which the phi-function will be applied
+    /// * `_ks` - slice of phi-function orders, one per entry of `_vb`
     /// * `_par` - faer parallelism for the dense linear algebra
-    fn apply_prepare(&mut self, _a: MatRef<T>, _dt: f64, _v0: MatRef<T>, _k: usize, _par: Par) {
+    fn apply_prepare(
+        &mut self,
+        _a: MatRef<T>,
+        _dt: f64,
+        _vb: &[MatRef<'_, T>],
+        _ks: &[usize],
+        _par: Par,
+    ) {
         // default is null-op
     }
 }
@@ -140,29 +147,45 @@ pub trait DensePhikvEvaluator<T: ComplexField = f64> {
 /// matrix-free linear operator `A`.
 ///
 /// The scalar type `T` defaults to `f64`.
+/// Krylov and Leja retain faer's global parallelism for their existing operator
+/// and basis operations. Krylov uses its configured `dense_par` for the
+/// projected matrix; these implementations do not currently use the per-call
+/// `par` argument.
 pub trait LinOpPhikvEvaluator<T: ComplexField = f64> {
     /// Evaluates a linear combination of phi-function vector products.
     ///
     /// Computes
     ///
-    /// $$ \sum_{j} \varphi_j(dt \thinspace A) \thinspace v_j $$
+    /// $$ \sum_j dt^{k_j} \varphi_{k_j}(dt \thinspace t A) \thinspace v_j $$
     ///
-    /// where $v_j$ is `vb[j]`.
+    /// where $k_j$ is `ks[j]`, $v_j$ is `vb[j]`, and $t$ is the scale
+    /// used to construct `a_lo`. Orders can be repeated or omitted. When
+    /// `dt` is 1, the result is the sum of $\varphi_{k_j}(t A) v_j$.
     ///
     /// # Arguments
     ///
-    /// * `a_lo` - the extended linear operator wrapping $A$ and the vectors `vb`
-    /// * `dt` - time step scale factor
-    /// * `vb` - the vectors $v_j$ to which the phi-function of order $j$ is applied
+    /// * `a_lo` - extended operator built using the same `vb` and `ks`; the
+    ///   vector values must not change between construction and evaluation
+    /// * `dt` - additional scale applied to the entire extended operator
+    /// * `vb` - slice of single-column vectors $v_j$ used to construct `a_lo`
+    /// * `ks` - slice of phi-function orders $k_j$, one per entry of `vb`
+    /// * `par` - parallelism for internal dense linear algebra; implementations
+    ///   may use their own configured parallelism for projected matrices
     ///
     /// # Returns
     ///
     /// The summed product, a matrix with as many rows as `vb[0]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vector shapes or orders do not match the operator.
     fn apply_phi_k_v(
         &mut self,
-        a_lo: &DynRefExtendedLinOp,
+        ext_a_lo: &DynRefExtendedLinOp,
         dt: f64,
-        vb: &Vec<MatRef<T>>,
+        vb: &[MatRef<'_, T>],
+        ks: &[usize],
+        par: Par,
     ) -> Mat<T>;
 
     /// Evaluates the phi-function vector product $\varphi_k(dt \thinspace A) v$.
@@ -176,39 +199,31 @@ pub trait LinOpPhikvEvaluator<T: ComplexField = f64> {
     /// * `dt` - time step scale factor
     /// * `v` - the vector to which $\varphi_k$ is applied
     /// * `k` - the phi-function order
+    /// * `par` - parallelism for internal dense linear algebra
     ///
     /// # Returns
     ///
     /// The product $\varphi_k(dt \thinspace A) v$, same size as `v`.
-    fn apply_phi_k(&mut self, a_lo: &dyn LinOp<T>, dt: f64, v: MatRef<T>, k: usize) -> Mat<T>;
+    fn apply_phi_k(&mut self, a_lo: &dyn LinOp<T>, dt: f64, v: MatRef<T>, k: usize, par: Par) -> Mat<T>;
 
-    /// Prepare for a subsequent `apply_*` call.
-    ///
-    /// When `ext` is `Some((ext_a_lo, vb))` the implementation should compute the
-    /// $p = $ `vb.len() - 1` Taylor-block iterates
-    /// $w_j = A_{ext}^j \tilde{v}$ ($j = 1, \ldots, p$), where `ext_a_lo` is
-    /// $A_{ext}$, use the upper block of $w_p$ as the Arnoldi starting vector
-    /// (correct per BAMPHI section 3), and cache the iterates for
-    /// zero-duplication reuse in the subsequent `apply_phi_k_v` call.
-    ///
-    /// When `ext` is `None` the legacy path is used: `v` is the Arnoldi starting
-    /// vector and `k` is the zero-prefix length. The default implementation does
-    /// nothing.
+    /// Prepare for a subsequent `apply_*` call. Call this again whenever the
+    /// operator or vectors change; cached data is not checked for changes.
     ///
     /// # Arguments
     ///
-    /// * `_a_lo` - linear operator $A$
-    /// * `_dt` - time step scale factor
-    /// * `_v` - the vector to which the phi-function will be applied
-    /// * `_k` - the phi-function order (zero-prefix length in the legacy path)
-    /// * `_ext` - optional extended linear operator and the vectors `vb`
+    /// * `_a_lo` - extended linear operator $\tilde A$
+    /// * `_dt` - scale applied to the inner operator for spectrum preparation;
+    ///   normally the scale used to construct `_a_lo`
+    /// * `_vb` - slice of vectors used to construct `_a_lo`
+    /// * `_ks` - slice of phi-function orders, one per entry of `_vb`
+    /// * `_par` - parallelism for internal dense linear algebra
     fn apply_prepare(
         &mut self,
-        _a_lo: &dyn LinOp<T>,
+        _a_lo: &DynRefExtendedLinOp,
         _dt: f64,
-        _v: MatRef<T>,
-        _k: usize,
-        _ext: Option<(&DynRefExtendedLinOp, &Vec<MatRef<T>>)>,
+        _vb: &[MatRef<'_, T>],
+        _ks: &[usize],
+        _par: Par,
     ) {
         // default is null-op
     }

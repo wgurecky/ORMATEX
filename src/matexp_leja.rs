@@ -1109,6 +1109,8 @@ pub struct LejaPhiEval {
     /// tay_prefix[j] = \tilde A^{j+1} * \tilde_v  (unscaled, j = 0..p-1)
     /// None when krylov_reuse=false or when p=0.
     tay_prefix: Option<Vec<Mat<f64>>>,
+    /// Whether preparation computed reusable Krylov data.
+    prepared_reuse: bool,
 }
 
 /// Leja point phi function evaluator
@@ -1151,6 +1153,7 @@ impl LejaPhiEval {
             dd_method: dd_method.to_string(),
             leja_ellipse_adapter: leja_ellipse_adapter,
             tay_prefix: None,
+            prepared_reuse: false,
         }
     }
 
@@ -1660,21 +1663,27 @@ impl LejaPhiEval {
         coeffs
     }
 
-    /// Computes the linear combination $\varphi_0(h A) v_0 + \ldots + \varphi_k(h A) v_k$
-    /// by leja polynomial approximation with optional substepping.
+    /// Computes a linear combination of phi-function vector products by leja
+    /// polynomial approximation with optional substepping.
     ///
     /// The linear combination is evaluated as the first $n$ rows of
     /// $\exp(h \tilde{A}) \tilde{v}$, where $\tilde{A}$ is the extended
     /// linear operator and $\tilde{v}$ the extended vector built from `vb`
-    /// (see [`DynRefExtendedLinOp`]). When `max_substeps > 0`, the
+    /// (see [`DynRefExtendedLinOp`]). For operator scale $t$ and orders $k_j$,
+    /// the result is $\sum_j h^{k_j} \varphi_{k_j}(h t A) v_j$.
+    /// When `max_substeps > 0`, the
     /// exponential is evaluated in `max_substeps` equal substeps, each with
     /// the spectrum shift and scale reduced by the substep size.
     ///
     /// # Arguments
     ///
     /// * `ext_a_lo` - the extended linear operator built from A
-    /// * `h` - the stepsize, typically h=1.0 if linop A has dt pre-multiplied into it
-    /// * `vb` - a sequence of rhs vectors, the vector at index $j$ corresponds to the phi-function $\varphi_j$
+    /// * `h` - the stepsize, typically h=1.0 if linop A has dt pre-multiplied into it.
+    ///         TODO: support multiple hs, for to compute multiple output vectors:
+    ///         $[\varphi_k(h_0 \delta t A), ... \varphi_k(h_s \delta t A)]$ in a _single_ call.
+    ///         Useful for high order multi-stage exponential integrators where the same phi functions
+    ///         can be called with a different scaling factor on the phi function argument.
+    /// * `vb` - slice of vectors used to build `ext_a_lo`, in the same order
     ///
     /// # Returns
     ///
@@ -1684,7 +1693,7 @@ impl LejaPhiEval {
         &self,
         ext_a_lo: &DynRefExtendedLinOp,
         h: f64,
-        vb: &Vec<MatRef<f64>>,
+        vb: &[MatRef<'_, f64>],
     ) -> Mat<f64> {
         // remark: ext_a_lo may contain a scaling by dt, so ext_a_lo = dt*A
         // setup the extended rhs vector
@@ -1819,9 +1828,9 @@ impl LejaPhiEval {
         let last_lp = leja_x.slice(splice_idx, leja_x.n_leja());
         // splice into final sequence
         let mut leja_x_ext = first_lp.concat(vec![&splice_lp, &last_lp]);
+        self.p = p;
         if p > 0 {
             leja_x_ext = leja_x_ext.prepend_zeros(p, shift, scale);
-            self.p = p;
         }
         self.leja_x = leja_x_ext;
     }
@@ -1841,9 +1850,9 @@ impl LejaPhiEval {
     /// * `p` - number of zeros to prepend to the sequence
     pub fn update_leja(&mut self, a: f64, b: f64, c: f64, p: usize) {
         let (mut leja_x, shift, scale) = self.leja_base.rescale(a, b, c);
+        self.p = p;
         if p > 0 {
             leja_x = leja_x.prepend_zeros(p, shift, scale);
-            self.p = p;
         }
         self.leja_x = leja_x;
     }
@@ -1852,106 +1861,108 @@ impl LejaPhiEval {
 impl LinOpPhikvEvaluator for LejaPhiEval {
     fn apply_phi_k_v(
         &mut self,
-        a_lo: &DynRefExtendedLinOp,
+        ext_a_lo: &DynRefExtendedLinOp,
         dt: f64,
-        vb: &Vec<MatRef<f64>>,
+        vb: &[MatRef<'_, f64>],
+        ks: &[usize],
+        _par: faer::Par,
     ) -> Mat<f64> {
+        ext_a_lo.assert_orders(ks);
         let clock = std::time::Instant::now();
-        // remark: a_lo may contain a scaling by dt, so a_lo = dt*A
-        let res = self.leja_expmv_substep(a_lo, dt, vb);
+        // remark: ext_a_lo may contain a scaling by dt, so ext_a_lo = dt*A
+        let reuse = self.krylov_reuse;
+        let prefix = if !self.prepared_reuse {
+            self.krylov_reuse = false;
+            self.tay_prefix.take()
+        } else {
+            None
+        };
+        let res = self.leja_expmv_substep(ext_a_lo, dt, vb);
+        self.krylov_reuse = reuse;
+        if prefix.is_some() {
+            self.tay_prefix = prefix;
+        }
         println!("phi_k_v apply time (s): {}", clock.elapsed().as_secs_f64());
         res
     }
 
+    /// Evaluates a single product without reusing a prepared extended operator.
+    /// Use `apply_phi_k_v` with that operator to reuse its Krylov data.
     fn apply_phi_k(
         &mut self,
         a_lo: &dyn LinOp<f64>,
         dt: f64,
         v: MatRef<f64>,
         k: usize,
+        _par: faer::Par,
     ) -> Mat<f64> {
         let clock = std::time::Instant::now();
-        // create an extended linop
-        let mut vbk: Vec<MatRef<f64>> = vec![];
-        let tmp_zeros = faer::Mat::zeros(v.nrows(), v.ncols());
-        for _i in 0..k {
-            vbk.push(tmp_zeros.as_ref());
-        }
-        vbk.push(v);
+        let vbk = [v];
+        let ks = [k];
         // remark: ext_a_lo contains a scaling by dt, so ext_a_lo = dt*A
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, a_lo, &vbk);
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, a_lo, &vbk, &ks);
         // compute phi_k(a_lo)*v
+        let reuse = self.krylov_reuse;
+        let prefix = self.tay_prefix.take();
+        self.krylov_reuse = false;
         let res = self.leja_expmv_substep(&ext_a_lo, 1.0, &vbk);
+        self.krylov_reuse = reuse;
+        self.tay_prefix = prefix;
         println!("phi_k apply time (s): {}", clock.elapsed().as_secs_f64());
         res
     }
 
+    /// Prepare for a subsequent `apply_*` call.
+    ///
+    /// If `self.krylov_reuse` is true, initial iterations from arnoldi
+    /// to inspect the jacobian spectrum are re-used for the first few iterations
+    /// of the polynomial terms.  This requires careful handling of the
+    /// nil-potent block of the extended linear operator.
+    ///
+    /// Computes $p = \max_j k_j$ Taylor-block iterates
+    /// $w_j = A_{ext}^j \tilde{v}$ ($j = 1, \ldots, p$), where `ext_a_lo` is
+    /// $A_{ext}$. Uses the upper block of $w_p$ as the Arnoldi starting vector
+    /// (correct per BAMPHI section 3), and cache the iterates for
+    /// zero-duplication reuse in the subsequent `apply_phi_k_v` call.
+    ///
+    /// # Arguments
+    ///
+    /// * `ext_a_lo` - extended operator built using `vb` and `ks`
+    /// * `dt` - scale applied to the inner operator for spectrum estimation
+    /// * `vb` - slice of vectors used to build the extended operator
+    /// * `ks` - slice of phi-function orders, one per vector in `vb`
+    /// * `_par` - unused; operator applications use global parallelism
     fn apply_prepare(
         &mut self,
-        a_lo: &dyn LinOp<f64>,
+        ext_a_lo: &DynRefExtendedLinOp,
         dt: f64,
-        v: MatRef<f64>,
-        k: usize,
-        ext: Option<(&DynRefExtendedLinOp, &Vec<MatRef<f64>>)>,
+        vb: &[MatRef<'_, f64>],
+        ks: &[usize],
+        _par: faer::Par,
     ) {
         let clock = std::time::Instant::now();
         println!("=== Updating Spectrum Parameters ===");
 
-        // Determine the Arnoldi starting vector and (optionally) cache Taylor iterates.
-        //
-        // When `ext = Some((ext_a_lo, vb))`:
-        //   Compute w_j = ext_a_lo^j * tilde_v for j = 1..=p where p = vb.len()-1.
-        //   Store w_1..w_p in self.tay_prefix so complex_conj_leja_expmv can use them
-        //   without re-doing any matvecs (zero duplication).
-        //
-        // Ref: Caliari, M., Cassini, F., & Zivcovich, F. (2023). BAMPHI: Matrix-free
-        //      and transpose-free action of linear combinations of phi-functions from
-        //      exponential integrators. Journal of Computational and Applied Mathematics,
-        //      423, 114973.
-        // See eq. 13 and remark 3.
-        let p_eff = match ext {
-            Some((ext_a_lo, vb)) => {
-                let p = vb.len() - 1;
-                let (tilde_v, _) = ext_a_lo.get_v(vb);
-                let par = faer::get_global_parallelism();
-                let mut mem = MemBuffer::new(ext_a_lo.apply_scratch(1, par));
-                let mut w = tilde_v;
-                let mut tay_vecs: Vec<Mat<f64>> = Vec::with_capacity(p);
-                for _ in 0..p {
-                    let mut out = faer::Mat::zeros(ext_a_lo.nrows(), 1);
-                    ext_a_lo.apply(out.as_mut(), w.as_ref(), par, MemStack::new(&mut mem));
-                    w = out;
-                    tay_vecs.push(w.clone());
-                }
-                // v0 = upper a_lo.nrows() block of w_p (zero lower by nilpotency)
-                let v0 = tay_vecs
-                    .last()
-                    .map(|wp| wp.get(0..a_lo.nrows(), ..).to_owned())
-                    .unwrap_or_else(|| {
-                        // p == 0: tilde_v itself (no extension), same as vb[0]
-                        w.get(0..a_lo.nrows(), ..).to_owned()
-                    });
-                // Cache only when krylov_reuse is on and there is a prefix to reuse
-                self.tay_prefix = if self.krylov_reuse && p > 0 {
-                    Some(tay_vecs)
-                } else {
-                    None
-                };
-                // When krylov_reuse is on and the correct v0 was computed from ext,
-                // always rebuild the orthonormal matrix Q_r (V_r) and hessenberg, H_r
-                // Note: \tilde A changes each step.
-                self.leja_ellipse_adapter
-                    .update(a_lo, v0.as_ref(), dt, self.krylov_reuse);
-                p
-            }
-            None => {
-                // use the caller-supplied `v` and `k`
-                self.tay_prefix = None;
-                self.leja_ellipse_adapter
-                    .update(a_lo, v.as_ref(), dt, false);
-                k
-            }
-        };
+        ext_a_lo.assert_orders(ks);
+        let p_eff = *ks.iter().max().expect("at least one order is required");
+        let a_lo = ext_a_lo.inner_lop();
+        let (mut w, _) = ext_a_lo.get_v(vb);
+        let par = faer::get_global_parallelism();
+        let mut mem = MemBuffer::new(ext_a_lo.apply_scratch(1, par));
+        let mut tay_vecs = Vec::with_capacity(p_eff);
+        for _ in 0..p_eff {
+            let mut out = faer::Mat::zeros(ext_a_lo.nrows(), 1);
+            ext_a_lo.apply(out.as_mut(), w.as_ref(), par, MemStack::new(&mut mem));
+            w = out;
+            tay_vecs.push(w.clone());
+        }
+        let mut v0 = w.get(0..a_lo.nrows(), ..).to_owned();
+        if v0.norm_l2() == 0.0 {
+            v0 = Mat::ones(a_lo.nrows(), 1);
+        }
+        self.tay_prefix = if self.krylov_reuse && p_eff > 0 { Some(tay_vecs) } else { None };
+        self.prepared_reuse = self.krylov_reuse;
+        self.leja_ellipse_adapter.update(a_lo, v0.as_ref(), dt, self.krylov_reuse);
 
         // update the leja ellipse parameters
         let (a, b, c) = self.leja_ellipse_adapter.get_bounds();
@@ -2547,11 +2558,10 @@ pub fn complex_diag_leja_phikv_fitted(
         Box::new(leja_ellipse_adapter),
     );
     // adapt the leja ellipse to the target; build a proxy ext for the correct Arnoldi v0
-    let zeros_x = faer::Mat::zeros(x.nrows(), 1);
-    let mut vb_prep: Vec<MatRef<f64>> = (0..k).map(|_| zeros_x.as_ref()).collect();
-    vb_prep.push(x.as_ref());
-    let ext_prep = DynRefExtendedLinOp::new(dt, a_lo, &vb_prep);
-    leja_phikv_eval.apply_prepare(a_lo, dt, x.as_ref(), k, Some((&ext_prep, &vb_prep)));
+    let vb_prep = [x.as_ref()];
+    let ks = [k];
+    let ext_prep = DynRefExtendedLinOp::new(dt, a_lo, &vb_prep, &ks);
+    leja_phikv_eval.apply_prepare(&ext_prep, dt, &vb_prep, &ks, faer::Par::Seq);
 
     complex_diag_leja_phikv(leja_phikv_eval, dt, d_diag_re, d_diag_im, v_re, v_im, k, m)
 }
@@ -2650,16 +2660,12 @@ fn complex_diag_leja_phikv(
         v_r[(2 * i + 1, 0)] = v_im[i];
     }
 
-    let zeros = faer::Mat::zeros(v_r.nrows(), 1);
-    let mut ext_vr: Vec<MatRef<f64>> = vec![];
-    for _i in 0..k {
-        ext_vr.push(zeros.as_ref());
-    }
-    ext_vr.push(v_r.as_ref());
+    let ext_vr = [v_r.as_ref()];
+    let ks = [k];
 
     leja_phikv_eval.set_krylov_reuse(false);
-    let ext_dmat_r = DynRefExtendedLinOp::new(1.0, &dmat_sprs_r, &ext_vr);
-    let phikv_leja_r: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_dmat_r, 1.0, &ext_vr);
+    let ext_dmat_r = DynRefExtendedLinOp::new(1.0, &dmat_sprs_r, &ext_vr, &ks);
+    let phikv_leja_r: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_dmat_r, 1.0, &ext_vr, &ks, faer::Par::Seq);
 
     // extract shifted and scaled leja sequence
     let (shift, scale) = leja_phikv_eval.leja_ellipse_adapter.get_shift_scale();
@@ -2710,7 +2716,7 @@ mod test_matexp_leja {
         // build an extended linear operator
         let mut vbk: Vec<MatRef<f64>> = vec![];
         vbk.push(test_v.as_ref());
-        let ext_a_lo = DynRefExtendedLinOp::new(1.0, &test_a, &vbk);
+        let ext_a_lo = DynRefExtendedLinOp::new(1.0, &test_a, &vbk, &[0]);
         let (ext_a, _ext_b, ext_c, _, _, _, _) =
             spectrum_arnoldi_iom(&ext_a_lo, test_v.as_ref(), 1.0, 10, 10, true);
 
@@ -2815,15 +2821,10 @@ mod test_matexp_leja {
                 Box::new(leja_ellipse_adapter),
             );
             let vb_prep = vec![test_v.as_ref()];
-            let ext_prep = DynRefExtendedLinOp::new(1.0, test_m, &vb_prep);
-            leja_phikv_eval.apply_prepare(
-                &test_m,
-                1.0,
-                test_v.as_ref(),
-                0,
-                Some((&ext_prep, &vb_prep)),
-            );
-            let expmv_leja_pm = leja_phikv_eval.apply_phi_k(&test_m, 1.0, test_v.as_ref(), 0);
+            let ks = vec![0];
+            let ext_prep = DynRefExtendedLinOp::new(1.0, test_m, &vb_prep, &ks);
+            leja_phikv_eval.apply_prepare(&ext_prep, 1.0, &vb_prep, &ks, faer::Par::Seq);
+            let expmv_leja_pm = leja_phikv_eval.apply_phi_k(&test_m, 1.0, test_v.as_ref(), 0, faer::Par::Seq);
 
             // Ensure results are consistent with pade methods.
             let expmv_pade_dense = matexp(test_m.as_ref(), 1.0, faer::Par::Seq) * test_v.as_ref();
@@ -2861,11 +2862,11 @@ mod test_matexp_leja {
         );
 
         // compute phi_0(dt*A)*b0
-        // fn apply_phi_k_v(&self, a_lo: &DynRefExtendedLinOp, dt: f64, vb: &Vec<MatRef<f64>>) -> Mat<f64> {
         let dt = 1.0;
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        leja_phikv_eval.apply_prepare(&test_b, dt, test_v.as_ref(), 0, Some((&ext_b_lo, &test_vb)));
-        let phi0mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, dt, &test_vb);
+        let ks = vec![0];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        leja_phikv_eval.apply_prepare(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
+        let phi0mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi0mv_pade_dense = matexp(test_b.as_ref(), 1.0, faer::Par::Seq) * test_v.as_ref();
@@ -2878,8 +2879,9 @@ mod test_matexp_leja {
         let test_vb = vec![zeros.as_ref(), test_v.as_ref()];
 
         // compute phi_0(dt*A)*b0 + ... phi_k(dt*A)*bk
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        let phi1mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, dt, &test_vb);
+        let ks = vec![0, 1];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        let phi1mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi1mv_pade_dense = phi(test_b.as_ref(), 1, faer::Par::Seq) * test_v.as_ref();
@@ -2929,10 +2931,11 @@ mod test_matexp_leja {
         println!("ritz im: {:?}", ritz_im);
 
         // compute phi_0(dt*A)*b0
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        leja_phikv_eval.apply_prepare(&test_b, dt, test_v.as_ref(), 0, Some((&ext_b_lo, &test_vb)));
+        let ks = vec![0];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        leja_phikv_eval.apply_prepare(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
         leja_phikv_eval.set_max_substeps(max_substeps);
-        let phi0mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb);
+        let phi0mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb, &ks, faer::Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi0mv_pade_dense = matexp(test_b.as_ref(), dt, faer::Par::Seq) * test_v.as_ref();
@@ -2945,10 +2948,11 @@ mod test_matexp_leja {
         let test_vb = vec![zeros.as_ref(), test_v.as_ref()];
 
         // compute phi_0(dt*A)*b0 + ... phi_k(dt*A)*bk
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        leja_phikv_eval.apply_prepare(&test_b, dt, test_v.as_ref(), 1, Some((&ext_b_lo, &test_vb)));
+        let ks = vec![0, 1];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        leja_phikv_eval.apply_prepare(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
         leja_phikv_eval.set_max_substeps(max_substeps);
-        let phi1mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb);
+        let phi1mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb, &ks, faer::Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi1mv_pade_dense = phi((dt * test_b.as_ref()).as_ref(), 1, faer::Par::Seq) * test_v.as_ref();
@@ -2961,10 +2965,11 @@ mod test_matexp_leja {
         let test_vb = vec![zeros.as_ref(), zeros.as_ref(), test_v.as_ref()];
 
         // compute phi_0(dt*A)*b0 + ... phi_k(dt*A)*bk
-        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb);
-        leja_phikv_eval.apply_prepare(&test_b, dt, test_v.as_ref(), 2, Some((&ext_b_lo, &test_vb)));
+        let ks = vec![0, 1, 2];
+        let ext_b_lo = DynRefExtendedLinOp::new(dt, &test_b, &test_vb, &ks);
+        leja_phikv_eval.apply_prepare(&ext_b_lo, dt, &test_vb, &ks, faer::Par::Seq);
         leja_phikv_eval.set_max_substeps(max_substeps);
-        let phi2mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb);
+        let phi2mv_leja_pm: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_b_lo, 1.0, &test_vb, &ks, faer::Par::Seq);
 
         // Ensure results are consistent with pade methods.
         let phi2mv_pade_dense = phi((dt * test_b.as_ref()).as_ref(), 2, faer::Par::Seq) * test_v.as_ref();
@@ -3067,15 +3072,10 @@ mod test_matexp_leja {
         // generate vb vector: vb = [b0, b1, ... bk]
         let test_vb = vec![test_v.as_ref()];
         // compute phi_0(dt*A)*v0
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, &test_a, &test_vb);
-        leja_phikv_eval.apply_prepare(
-            &test_a,
-            1.0,
-            test_v.as_ref(),
-            0,
-            Some((&ext_a_lo, &test_vb)),
-        );
-        let phi0_v0: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_a_lo, 1.0, &test_vb);
+        let ks = vec![0];
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, &test_a, &test_vb, &ks);
+        leja_phikv_eval.apply_prepare(&ext_a_lo, 1.0, &test_vb, &ks, faer::Par::Seq);
+        let phi0_v0: Mat<f64> = leja_phikv_eval.apply_phi_k_v(&ext_a_lo, 1.0, &test_vb, &ks, faer::Par::Seq);
 
         println!("dt: {:}", dt);
         println!("Leja phi0(dt*A)*v0: {:?}", phi0_v0);

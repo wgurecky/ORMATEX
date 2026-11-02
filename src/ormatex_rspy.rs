@@ -86,7 +86,7 @@ impl PySysWrapped {
 ///
 /// The python object must provide `dim()`, the operator dimension, and
 /// `matvec_npcompat(x)`, the matrix-vector product on a 1D numpy array. Only
-/// square operators and `apply` are supported; `ncols` and `conj_apply` panic.
+/// square operators and `apply` are supported; `conj_apply` panics.
 #[pyclass]
 pub struct PyJaxJacLinOp {
     /// inner linop def in python
@@ -128,8 +128,7 @@ impl LinOp<f64> for PyJaxJacLinOp {
 
     /// Number of cols in the linop
     fn ncols(&self) -> usize {
-        // Not implented error!
-        panic!("Not Implemented");
+        self.nrows()
     }
 
     fn apply(
@@ -723,7 +722,7 @@ impl DensePhikvEvalRs {
     ) {
         let a = a_np.into_faer();
         let v0 = v0_np.into_faer();
-        self.evaluator.apply_prepare(a, dt, v0, k, Par::Seq);
+        self.evaluator.apply_prepare(a, dt, &[v0], &[k], Par::Seq);
     }
 
     /// Evaluate $\varphi_k(\Delta t A) v_0$.

@@ -189,3 +189,12 @@ fn expint_regression_nonauto() {
         assert_state_close(label, &state, &reference, 1e-3);
     }
 }
+
+#[test]
+fn exprb_leja_krylov_reuse_handles_both_stages() {
+    let mut eval = leja_evaluator(true, -1.0, 0.0, 0.0);
+    eval.set_krylov_reuse(true);
+    let state = run_nonauto("exprb3", eval);
+    let reference = faer::mat![[(-0.5_f64).exp()]];
+    assert_state_close("EXPRB3/Leja reuse", &state, &reference, 1e-3);
+}

@@ -83,3 +83,17 @@ def test_integrate_rs_krylov_rejects_zero_iom():
     y0 = jnp.array([0.1, 0.2])
     with pytest.raises(ValueError):
         integrate(sys, y0, 0.0, 0.05, 2, "epi2_rs", phi_method="krylov", iom=0)
+
+
+@pytest.mark.skipif(not HAS_ORMATEX_RUST, reason="rust ormatex bindings not built")
+def test_dense_prepare_and_reordered_orders():
+    from ormatex_py.ormatex import DensePhikvEvalRs
+
+    a = np.diag([-1.0, -2.0])
+    v = np.array([[1.0], [2.0]])
+    w = np.array([[3.0], [4.0]])
+    evaluator = DensePhikvEvalRs("cram", 16)
+    expected = evaluator.eval_phik(a, 0.4, v, 2) + evaluator.eval_phik(a, 0.4, w, 0)
+    evaluator.prepare(a, 0.4, v, 2)
+    actual = evaluator.eval_phik_v(a, 0.4, [v, w], [2, 0])
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)

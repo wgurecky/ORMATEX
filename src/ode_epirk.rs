@@ -197,16 +197,11 @@ where
 
         // build vector of rhs
         let zero_mat = faer::Mat::zeros(y0.nrows(), 1);
-        let vb = vec![zero_mat.as_ref(), fy0_dt.as_ref(), vb2.as_ref()];
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb);
-        self.expm.apply_prepare(
-            sys_jac_lop.as_ref(),
-            dt,
-            y0.as_ref(),
-            2,
-            Some((&ext_a_lo, &vb)),
-        );
-        let y_new = y0.as_ref() + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb);
+        let vb = [zero_mat.as_ref(), fy0_dt.as_ref(), vb2.as_ref()];
+        let ks = [0, 1, 2];
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb, &ks);
+        self.expm.apply_prepare(&ext_a_lo, dt, &vb, &ks, faer::Par::Seq);
+        let y_new = y0.as_ref() + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb, &ks, faer::Par::Seq);
 
         // return result
         Ok(StepResult::new(t + dt, dt, y_new, None))
@@ -262,16 +257,11 @@ where
 
         // build vector of rhs
         let zero_mat = faer::Mat::zeros(y0.nrows(), 1);
-        let vb = vec![zero_mat.as_ref(), fy0_dt.as_ref(), vb2.as_ref()];
-        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb);
-        self.expm.apply_prepare(
-            sys_jac_lop.as_ref(),
-            dt,
-            y0.as_ref(),
-            2,
-            Some((&ext_a_lo, &vb)),
-        );
-        let y_new = y0.as_ref() + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb);
+        let vb = [zero_mat.as_ref(), fy0_dt.as_ref(), vb2.as_ref()];
+        let ks = [0, 1, 2];
+        let ext_a_lo = DynRefExtendedLinOp::new(dt, sys_jac_lop.as_ref(), &vb, &ks);
+        self.expm.apply_prepare(&ext_a_lo, dt, &vb, &ks, faer::Par::Seq);
+        let y_new = y0.as_ref() + self.expm.apply_phi_k_v(&ext_a_lo, 1.0, &vb, &ks, faer::Par::Seq);
 
         // return result
         Ok(StepResult::new(t + dt, dt, y_new, None))

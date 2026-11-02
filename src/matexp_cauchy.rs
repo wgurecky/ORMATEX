@@ -263,7 +263,7 @@ where
         v0: MatRef<T>,
         par: Par,
     ) -> Mat<T> {
-        self.phik_dense_apply_cauchy(a, dt, v0, vec![0], par)
+        self.phik_dense_apply_cauchy(a, dt, v0, &[0], par)
     }
 
     /// Computes a linear combination of phi-function vector products.
@@ -309,7 +309,7 @@ where
         a: MatRef<T>,
         dt: f64,
         vb: MatRef<T>,
-        ks: Vec<usize>,
+        ks: &[usize],
         par: Par,
     ) -> Mat<T> {
         assert!(vb.ncols() == ks.len());
@@ -359,7 +359,7 @@ where
         for (idx, &k) in ks.iter().enumerate() {
             // only apply shift to phi_0 col
             if k == 0 {
-                let mut r_col = r_v.col_mut(idx);
+                let mut r_col = r_v.col_mut(0);
                 r_col += Scale(self.alpha_0.re) * vb.col(idx);
             }
         }
@@ -374,15 +374,15 @@ where
     Complex<T>: ComplexField<Real = T>,
 {
     fn apply_phi_k(&self, a: MatRef<T>, dt: f64, v0: MatRef<T>, k: usize, par: Par) -> Mat<T> {
-        self.phik_dense_apply_cauchy(a, dt, v0, vec![k], par)
+        self.phik_dense_apply_cauchy(a, dt, v0, &[k], par)
     }
 
     fn apply_phi_k_v(
         &self,
         a: MatRef<T>,
         dt: f64,
-        vb: &Vec<MatRef<T>>,
-        ks: &Vec<usize>,
+        vb: &[MatRef<'_, T>],
+        ks: &[usize],
         par: Par,
     ) -> Mat<T> {
         assert!(!vb.is_empty());
@@ -393,10 +393,10 @@ where
             assert!(v.ncols() == 1);
             vb_mat.col_mut(j).copy_from(v.col(0));
         }
-        self.phik_dense_apply_cauchy(a, dt, vb_mat.as_ref(), ks.clone(), par)
+        self.phik_dense_apply_cauchy(a, dt, vb_mat.as_ref(), ks, par)
     }
 
-    fn apply_prepare(&mut self, a: MatRef<T>, dt: f64, _v0: MatRef<T>, _k: usize, par: Par) {
+    fn apply_prepare(&mut self, a: MatRef<T>, dt: f64, _vb: &[MatRef<'_, T>], _ks: &[usize], par: Par) {
         let s = self.theta.nrows();
         let dim = a.nrows();
         let ident: Mat<Complex<T>> = Mat::identity(dim, dim);
@@ -588,7 +588,7 @@ mod test_matexp_cauchy {
         let cram = gen_cram_expm(16);
         let a32: Mat<f32> = Mat::from_fn(3, 3, |i, j| _gen_test_a()[(i, j)] as f32);
         let v: Mat<f32> = mat![[1.0f32], [2.0], [3.0]];
-        let out = cram.phik_dense_apply_cauchy(a32.as_ref(), 1.0, v.as_ref(), vec![1], Par::Seq);
+        let out = cram.phik_dense_apply_cauchy(a32.as_ref(), 1.0, v.as_ref(), &[1], Par::Seq);
         let expected = phi_ext(_gen_test_a().as_ref(), 1, Par::Seq) * v.as_ref().to_owned().map(|x| *x as f64).as_ref();
         for i in 0..3 {
             assert!((out[(i, 0)] as f64 - expected[(i, 0)]).abs() < 1e-4);
@@ -635,7 +635,7 @@ mod test_matexp_cauchy {
         mat_mat_approx_eq(pade_phi1_av.as_ref(), cram_phi1_av.as_ref(), 1e-12);
 
         // higher order phi fns
-        cram.apply_prepare(test_a.as_ref(), dt, v0.as_ref(), 0, Par::Seq);
+        cram.apply_prepare(test_a.as_ref(), dt, &vec![v0.as_ref()], &vec![0], Par::Seq);
         for k in 0..4 {
             let pade_phik_av = phi_ext((Scale(dt) * test_a.as_ref()).as_ref(), k, Par::Seq) * v0.as_ref();
             let cram_phik_av = cram.apply_phi_k(test_a.as_ref(), dt, v0.as_ref(), k, Par::Seq);
@@ -663,7 +663,7 @@ mod test_matexp_cauchy {
         }
 
         // compute using multi RHS
-        cram.apply_prepare(test_a.as_ref(), dt, v0.as_ref(), 0, Par::Seq);
+        cram.apply_prepare(test_a.as_ref(), dt, &vb, &vec![0, 1, 2], Par::Seq);
         assert!(cram.lu_factors.is_some());
         let out = cram.apply_phi_k_v(test_a.as_ref(), dt, &vb, &vec![0,1,2], Par::Seq);
 
@@ -687,7 +687,7 @@ mod test_matexp_cauchy {
         }
 
         // compute using multi RHS
-        cram.apply_prepare(test_a.as_ref(), dt, v0.as_ref(), 0, Par::Seq);
+        cram.apply_prepare(test_a.as_ref(), dt, &vb, &vec![0], Par::Seq);
         assert!(cram.lu_factors.is_some());
         let out = cram.apply_phi_k_v(test_a.as_ref(), dt, &vb, &vec![0,], Par::Seq);
 
@@ -730,7 +730,7 @@ mod test_matexp_cauchy {
             mat_mat_approx_eq(seq_e.as_ref(), thr_e.as_ref(), 1e-12);
         }
         // cached LU factors computed with a threaded par give the same answer
-        cram.apply_prepare(a.as_ref(), 0.1, v0.as_ref(), 0, Par::rayon(3));
+        cram.apply_prepare(a.as_ref(), 0.1, &vec![v0.as_ref()], &vec![0], Par::rayon(3));
         let cached = cram.apply_phi_k(a.as_ref(), 0.1, v0.as_ref(), 1, Par::Seq);
         mat_mat_approx_eq(seq.as_ref(), cached.as_ref(), 1e-12);
     }

@@ -119,16 +119,11 @@ fn _case_s3_phikv(krylov_reuse: bool, k: usize) {
     } else {
         vec![y_vec.as_ref()]
     };
-    let ext_jac_lo = DynRefExtendedLinOp::new(dt, &jac_sparse, &vb_vec);
+    let ks: Vec<_> = (0..vb_vec.len()).collect();
+    let ext_jac_lo = DynRefExtendedLinOp::new(dt, &jac_sparse, &vb_vec, &ks);
 
     // Prepare the evaluator with the correct extended operator
-    leja_eval.apply_prepare(
-        &jac_sparse,
-        dt,
-        y_vec.as_ref(),
-        k,
-        Some((&ext_jac_lo, &vb_vec)),
-    );
+    leja_eval.apply_prepare(&ext_jac_lo, dt, &vb_vec, &ks, faer::Par::Seq);
 
     println!("n_ritz: {}", leja_eval.leja_ellipse_adapter.n_ritz());
     println!(
@@ -141,7 +136,7 @@ fn _case_s3_phikv(krylov_reuse: bool, k: usize) {
     );
 
     // Apply phi_0 using Leja polynomial method
-    let leja_phikv = leja_eval.apply_phi_k_v(&ext_jac_lo, 1.0, &vb_vec);
+    let leja_phikv = leja_eval.apply_phi_k_v(&ext_jac_lo, 1.0, &vb_vec, &ks, faer::Par::Seq);
 
     // Verify result is finite and reasonable
     assert_eq!(
@@ -162,7 +157,7 @@ fn _case_s3_phikv(krylov_reuse: bool, k: usize) {
     let mut krylov_phikv_eval = KrylovExpm::new(expmv, m, krylov_dim_max, tol, Some(iom));
 
     // Apply phi_0 using Krylov method
-    let krylov_phikv: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_jac_lo, 1.0, &vb_vec);
+    let krylov_phikv: Mat<f64> = krylov_phikv_eval.apply_phi_k_v(&ext_jac_lo, 1.0, &vb_vec, &ks, faer::Par::Seq);
 
     // Verify numerical consistency with krylov
     // Compute relative error
